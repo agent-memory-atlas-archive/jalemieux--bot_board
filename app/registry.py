@@ -509,6 +509,58 @@ NO_PROFILE = ("You have no profile. The guide you just read is all there is: wor
               "given, in your workspace, as it says.\n")
 
 
+def identity_text(agent: dict, base: str = "") -> str:
+    """The section about one bot that the board appends to AGENTS.md when the bot's own
+    token fetches it (#344): its workspace and channels, its profile, and its skills, each as
+    name@revision, with the text of every mandatory one. The launcher puts the whole document
+    in the session's first prompt, and again in a wake prompt when the hash moves; the model
+    fetches none of it. Skill bodies on disk are the launcher's (block 2, #346)."""
+    from . import workspaces
+    api = base.rstrip("/") + "/api"
+    lines = ["", "---", "", "# Your identity", "",
+             f"You are `@{agent['handle']}`. This copy of the guide was composed for you: what follows is"
+             " yours alone, and your launcher gives you the whole document again, in a prompt, whenever"
+             " any of it changes. What you do not have (a workspace, a profile, skills) is not listed.", ""]
+    ws = workspaces.by_id(agent.get("workspace_id")) if agent.get("workspace_id") else None
+    if ws is not None:
+        lines += ["## Your workspace", "",
+                  f"**{ws['name']}** (`{ws['slug']}`). {ws.get('purpose') or ''}".rstrip(), "",
+                  "Its channels:", ""]
+        for ch in workspaces.channels_of(ws, include_archived=False):
+            name = "" if ch["home"] or ch["name"] == ch["slug"] else ch["name"]
+            what = " — ".join(x for x in (name, ch["topic"]) if x)
+            lines.append(f"- `#{ch['slug']}`" + (" (General)" if ch["home"] else "") + (f": {what}" if what else ""))
+        lines += ["", f"Its shared memory starts at `GET {api}/knowledge/INDEX.md`; a channel's references"
+                  " (`GET " + api + "/channels/<slug>`) say what to read there.", ""]
+    profile = profile_of(agent["handle"])
+    if profile is not None:
+        lines += [f"## Your profile: {profile['name']}", "", f"**Role.** {profile['role']}", ""]
+        if profile.get("specialized"):
+            lines += ["**Specialized.** This profile is for one kind of work. The board offers you new threads only"
+                      " in the channels your bot was added for; elsewhere you take part when mentioned.", ""]
+        for key, title in (("responsibilities", "Responsibilities"), ("focus", "Focus"), ("avoid", "Avoid")):
+            if profile.get(key):
+                lines += [f"### {title}", "", profile[key].strip(), ""]
+    skills = resolve(profile) if profile else []
+    if skills:
+        lines += ["## Your skills", "",
+                  "Your launcher keeps each of these installed where your harness loads skills, at the revision"
+                  " listed. The mandatory ones are written out below: read them now, before any work. The others"
+                  " your harness offers when a thread calls for what they describe.", ""]
+        for s in skills:
+            lines.append(f"- **{s['name']}@{s['revision']}**{' (mandatory)' if s['mandatory'] else ''}: {s['description']}")
+        lines.append("")
+        for s in skills:
+            if not s["mandatory"]:
+                continue
+            try:
+                body = (get_skill(s["name"]).get("body") or "").strip()
+            except (KeyError, ValueError):
+                continue
+            lines += [f"### Skill: {s['name']}", "", body, ""]
+    return "\n".join(lines)
+
+
 def profile_text(profile: dict | None, base: str = "") -> str:
     """The profile as a bot reads it at the start of a session."""
     if profile is None:
