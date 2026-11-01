@@ -76,6 +76,11 @@ class FakeBoard:
                 board.requests.append(("GET", self.path, None))
                 handle = self.who()
                 since = int(q.get("since", ["0"])[0])
+                if path == "/agents.md":      # composed for the token (#344); the launcher puts it in the prompt
+                    b = ("the rules\n\n# Your identity\n\nYou are @%s, a bot of the workspace game.\n" % handle).encode()
+                    self.send_response(200); self.send_header("content-type", "text/plain; charset=utf-8")
+                    self.send_header("content-length", str(len(b))); self.send_header("X-Agents-Revision", "rev-a")
+                    self.end_headers(); return self.wfile.write(b)
                 if path == "/api/me":
                     return self.send(200, {"agent": {"handle": handle}, "workspace": {"slug": "game"}, "cursor": board.cursor})
                 if path.startswith("/api/threads/"):
@@ -160,7 +165,14 @@ class WorkspaceBot(unittest.TestCase):
         self.assertEqual(board.registrations[0]["workspace"], "game")
         self.assertEqual(board.registrations[0]["handle"], ME)
         self.assertIn("workspace game", board.registrations[0]["description"])
-        self.assertEqual(runs[0]["prompt"], f"Read {board.url}/agents.md and return. Your environment holds BOARD, BOT_HANDLE and BOARD_TOKEN.")
+        # the launcher fetched agents.md with the bot's token and the prompt carries it (#344)
+        self.assertTrue(runs[0]["prompt"].startswith("This is your AGENTS.md, composed for you by the board. Read it and return."
+                                                     " Your environment holds BOARD, BOT_HANDLE and BOARD_TOKEN.\n\nthe rules\n"), runs[0]["prompt"])
+        self.assertIn(f"You are @{ME}, a bot of the workspace game.", runs[0]["prompt"])
+        self.assertNotIn("/agents.md", runs[0]["prompt"])
+        state = os.path.join(self.home, ".config/bot_board/bots", ME)
+        self.assertEqual(open(os.path.join(state, "agents-rev")).read().strip(), "rev-a")
+        self.assertIn("You are @", open(os.path.join(state, "agents.md")).read())
         self.assertEqual(runs[0]["env"], {"BOARD": board.url, "BOT_HANDLE": ME, "BOARD_TOKEN": ME + "-token"})
         # one directory per bot, under the pool root, named by handle
         self.assertEqual({r["cwd"] for r in runs}, {os.path.join(self.pool, ME)})
@@ -169,7 +181,7 @@ class WorkspaceBot(unittest.TestCase):
         self.assertEqual(open(os.path.join(state, "workspace")).read().strip(), "game")
         self.assertEqual(open(os.path.join(state, "dir")).read().strip(), os.path.join(self.pool, ME))
         # the token stays out of the prompt
-        self.assertNotIn("token", "\n".join(r["prompt"] for r in runs))
+        self.assertNotIn(ME + "-token", "\n".join(r["prompt"] for r in runs))
 
     def test_prompts_are_envelopes_and_only_roots_are_claimed(self):
         board = FakeBoard([
@@ -237,7 +249,7 @@ class WorkspaceBot(unittest.TestCase):
         self.assertEqual(len(board.registrations), 1)
         self.assertTrue(any("two" in r["prompt"] for r in runs))
         self.assertEqual(len({r["sid"] for r in runs}), 1)
-        self.assertEqual(len([r for r in runs if "agents.md and return" in r["prompt"]]), 1, "the first prompt ran again")
+        self.assertEqual(len([r for r in runs if "This is your AGENTS.md" in r["prompt"]]), 1, "the first prompt ran again")
 
 
 if __name__ == "__main__":

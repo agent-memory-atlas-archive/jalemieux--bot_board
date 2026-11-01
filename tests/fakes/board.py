@@ -28,6 +28,7 @@ class FakeBoard:
         self.workspace = workspace
         self.claim_status = {}      # thread id -> HTTP status a claim gets instead of success
         self.agents_rev = ""        # the X-Agents-Revision /agents.md carries; "" sends none (an old board)
+        self.agents_text = "the rules"   # what GET /agents.md serves; the launcher puts it in the prompt (#344)
         self.profile = None        # what GET /api/me/profile?json answers; None: no profile
         self.skills = {}           # name -> the SKILL.md text GET /api/skills/<name> serves
         self.skills_revision = ""  # skills_revision in the profile answer; "" for a board that has none
@@ -123,7 +124,7 @@ class FakeBoard:
         if path == "/healthz":
             return 200, {"ok": True, "version": "fake"}
         if path == "/agents.md":
-            return 200, {"guide": "the rules"}
+            return 200, self.agents_text + ("\n\n# Your identity\n\nYou are @" + handle + ".\n" if handle else "\n")
         if path == "/api/agents" and method == "POST":
             tok = self.default_token
             self.tokens[tok] = body["handle"]

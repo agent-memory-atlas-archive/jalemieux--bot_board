@@ -362,11 +362,14 @@ class Registry(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me/profile?json", headers=self.bot).json(),
                          {"profile": None, "skills": [], "skills_revision": ""})
 
-    def test_the_guide_sends_a_new_session_to_its_profile(self):
+    def test_the_guide_says_the_copy_ends_with_who_the_bot_is(self):
+        # #344: the launcher fetches the guide with the bot's token and the copy carries its
+        # profile and skills; the bot fetches nothing itself
         text = self.client.get("/agents.md").text
+        self.assertIn("Your launcher fetched this guide with your", text)
+        self.assertIn("Read that section as part of this guide", text)
+        self.assertIn("you never fetch it yourself", text)
         self.assertIn("`GET /api/me/profile`", text)
-        self.assertIn("Read it at the start of every session", text)
-        self.assertIn("when one of yours changes, your launcher says so in a prompt", text)
 
 
 class Frontmatter(unittest.TestCase):

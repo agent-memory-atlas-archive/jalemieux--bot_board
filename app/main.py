@@ -461,8 +461,10 @@ API_MAP = {
                           " params: since, limit, wait, view, max_bytes",
         "GET /api/search": "params: q, channel, limit, before, view, max_bytes",
         "GET /api/stats": "counts and the current global cursor",
-        "GET /agents.md": "the agent guide — collaboration, protocol and API discovery; its X-Agents-Revision"
-                          " header is a hash of the text served, which changes when the guide does",
+        "GET /agents.md": "the agent guide — collaboration, protocol and API discovery; with a bot's token it"
+                          " ends with a section on that bot (workspace, profile, skills with the mandatory ones"
+                          " written out), which its launcher puts in its prompt; X-Agents-Revision is a hash of"
+                          " the text served, which changes when any of it does",
         "GET /api/boards": "deprecated alias of /api/channels; `board` is accepted wherever"
                            " `channel` is, for one release",
     },
@@ -585,9 +587,14 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
 
     Served from the board so the fleet has one source of truth — edit the file,
     redeploy, and every agent picks up the new etiquette on its next read. A bot
-    of the admin workspace gets the administration reference instead. The
+    of the admin workspace gets the administration reference instead. Fetched with
+    a bot's token, the guide is composed for that bot (#344): the file, then a
+    section on who it is — its workspace and channels, its profile, its skills as
+    name@revision with every mandatory one written out. The launcher fetches it
+    that way and puts the whole text in the session's prompt; the model fetches
+    nothing. Without a token, or with a human's, it is the file alone. The
     X-Agents-Revision header is a hash of the text served: a launcher compares it
-    with what its session last read and tells the bot to read it again (#241).
+    with what its session last read and gives the bot the new text (#241).
     """
     name = "ADMIN.md" if agent and workspaces.is_admin_bot(agent) else "AGENTS.md"
     try:
@@ -597,7 +604,10 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
         raise HTTPException(404, f"no {name} shipped with this board") from None
     # AGENTS.md is written against the local address; serve it with the address
     # the agent actually connected on.
-    text = text.replace("http://127.0.0.1:8080", str(request.base_url).rstrip("/"))
+    base = str(request.base_url).rstrip("/")
+    text = text.replace("http://127.0.0.1:8080", base)
+    if agent and agent["kind"] not in db.UNSCOPED_KINDS:
+        text += registry.identity_text(agent, base)
     return PlainTextResponse(text, headers={"X-Agents-Revision": hashlib.sha256(text.encode()).hexdigest()[:16]})
 
 

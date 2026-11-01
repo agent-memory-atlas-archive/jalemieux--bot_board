@@ -84,33 +84,41 @@ class LauncherWritesProfileSkills(unittest.TestCase):
                 L.close()
 
     def test_a_skill_written_on_the_board_reaches_the_session_at_its_next_prompt(self):
-        # #328: like agents.md (#241): the files are written again and one line in the prompt
-        # says so, once per change; the session goes on. An old board says nothing.
+        # #328, #344: a skill of the bot is part of the AGENTS.md the board composes for it, so
+        # writing one moves X-Agents-Revision; the launcher writes the files again and the
+        # next wake prompt carries the new text, once per change; the session goes on. An old
+        # board sends no revision and nothing happens.
         with FakeBoard() as board:
             board.profile = {"profile": {"name": "dev"}, "skills": [
                 {"name": "hello", "mandatory": True, "description": "Says hello.", "revision": 1}]}
             board.skills = {"hello": HELLO}
             board.skills_revision = "r1"
+            board.agents_rev = "a1"
             L = Launcher(board, "claude")
             try:
                 home = Path(L.tmp.name)
                 L.plan(*[fh.step("claude", "ok", "done")] * 4)
                 L.start()
-                L.wait_for(lambda: len(L.prompts()) >= 1 and L.read("skills-rev") == "r1", "the first turn to record r1")
+                L.wait_for(lambda: len(L.prompts()) >= 1 and L.read("agents-rev") == "a1", "the first turn to record a1")
+                self.assertEqual(L.read("skills-rev"), "r1")
                 board.post_root("ws-general", "first")
                 L.wait_for(lambda: len(L.prompts()) >= 2, "the first wake")
-                self.assertNotIn("skills changed", L.prompts()[1])
+                self.assertNotIn("AGENTS.md changed", L.prompts()[1])
                 board.skills["hello"] = HELLO.replace("One.", "Two.")
                 board.skills_revision = "r2"
+                board.agents_rev = "a2"
                 board.post_root("ws-general", "second")
                 L.wait_for(lambda: len(L.prompts()) >= 3, "the wake after the change")
-                self.assertIn("Your profile's skills changed since you read them; read your profile again", L.prompts()[2])
+                self.assertIn("Your AGENTS.md changed since you read it; this is the current one", L.prompts()[2])
+                self.assertNotIn("read your profile again", L.prompts()[2])
                 self.assertIn("Two.", (home / ".config/bot_board/skills/hello/SKILL.md").read_text())
                 self.assertEqual(L.read("skills-rev"), "r2")
+                L.wait_for(lambda: L.read("agents-rev") == "a2", "a2 recorded once the run returned")
+                board.agents_rev = ""
                 board.skills_revision = ""
                 board.post_root("ws-general", "third")
                 L.wait_for(lambda: len(L.prompts()) >= 4, "a wake from a board that says nothing")
-                self.assertNotIn("skills changed", L.prompts()[3])
+                self.assertNotIn("AGENTS.md changed", L.prompts()[3])
                 self.assertEqual(len(set(fh.runs(str(L.scenario), "claude")[-1]) & {"--resume"}), 1, "the same session")
                 L.stop()
             finally:

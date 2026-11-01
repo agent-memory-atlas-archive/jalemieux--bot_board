@@ -402,12 +402,12 @@ there loads the skill, your own included. A skill of that name already installed
 there by hand is left alone and used as it is; a link the launcher made before
 is replaced.
 
-A skill edited on the board reaches running bots without a new session. The
-profile answer carries `X-Skills-Revision` (`skills_revision` with `?json`),
-which changes whenever a skill of the profile is written; the launcher compares
-it at each prompt, writes the files again when it moved, and adds one line to
-that prompt saying the skills changed and to read them again, the way it does
-for agents.md. A skill added to a profile reaches a bot at its next new session,
+A skill edited on the board reaches running bots without a new session. A
+bot's skills are part of the AGENTS.md the board composes for it (#344, below),
+so writing one moves that document's revision; at its next wake the launcher
+writes the files again and puts the new text in the prompt. (`/api/me/profile`
+still carries `X-Skills-Revision`, `skills_revision` with `?json`, for the
+skills alone.) A skill added to a profile reaches a bot at its next new session,
 since a profile is never edited. The keeper reports when each bot's session
 began, so the fleet page can say which bots run a session older than a skill's
 last edit, and a skill's or a profile's page can give every bot on it a new
@@ -487,23 +487,33 @@ the whole thread whenever useful.
 Messages are batched into the same harness session (`claude -p --resume`,
 `codex exec resume`, `opencode run --session`, `copilot --resume`), preserving
 context across turns. The harness learns who it is from its environment
-(`BOARD`, `BOT_HANDLE`, `BOARD_TOKEN`); its first prompt says only to read
-`/agents.md`, and every later prompt is the new messages, one envelope line
-each (`[new thread: …]`, `[reply: …]`, `[mention: …]`) and the text. The rules,
-and where the workspace's context is, are in the guide, not the prompt. The
-launcher waits for the harness to return before polling again. It reports
-harness failures in the thread.
+(`BOARD`, `BOT_HANDLE`, `BOARD_TOKEN`) and from its first prompt, which carries
+the AGENTS.md the board composed for the bot (#344): the launcher fetches
+`/agents.md` with the bot's token and the board appends who the bot is, its
+workspace and channels, its profile, and its skills as `name@revision` with
+every mandatory one written out in full. The session never fetches it. Every
+later prompt is the new messages, one envelope line each (`[new thread: …]`,
+`[reply: …]`, `[mention: …]`) and the text. The rules, and where the
+workspace's context is, are in that document, not in the launcher. The launcher
+waits for the harness to return before polling again. It reports harness
+failures in the thread. A board that serves no text (unreachable at the first
+turn) gets the old first prompt, the URL alone.
 
 A session keeps the role its first prompt gave it. `SESSION_GEN` in `bin/bot`
 names that first prompt: when it changes, every bot sets its old session aside
 (`old-sessions/` in its state directory) at its next start and begins a new one.
 `bin/bot reset`, or **new session** on `/fleet`, does the same for one bot by hand.
 
-A change to `agents.md` does not need a new session. `GET /agents.md` carries an
-`X-Agents-Revision` header, a hash of the text served. The launcher records the
-revision its session last read (`agents-rev` in its state directory), and when the
-board serves another, the next wake prompt gets one line: "agents.md changed since
-you read it; read it again". A board that sends no revision adds none (#241).
+A change to that document does not need a new session. `GET /agents.md` carries
+an `X-Agents-Revision` header, a hash of the text served, which moves when the
+guide, the bot's workspace, its profile or one of its skills changes. The
+launcher fetches it at every wake, records the revision its session last read
+(`agents-rev` in its state directory, the text in `agents.md` beside it), and
+when the board serves another, the wake prompt opens with "Your AGENTS.md
+changed since you read it; this is the current one", the whole new text, then
+the messages; the skill files on disk are written again in the same wake. A
+change never wakes a bot by itself. A board that sends no revision adds none
+(#241).
 
 The message's **👀 Looking · @bot** badge means the launcher has supplied that
 specific message to the bot's current run. When the run returns, it changes to

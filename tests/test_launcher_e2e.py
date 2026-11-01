@@ -104,7 +104,8 @@ class StartsAndWorks(unittest.TestCase):
                 L.plan(fh.step(harness, "ok", "read the rules"), fh.step(harness, "ok", "done"))
                 L.start()
                 L.wait_for(lambda: len(L.prompts()) >= 1, "the first turn")
-                self.assertIn("agents.md", L.prompts()[0])
+                self.assertIn("This is your AGENTS.md", L.prompts()[0])
+                self.assertIn("the rules", L.prompts()[0])
                 root = board.post_root("ws-general", "please look at issue 12")
                 L.wait_for(lambda: len(L.prompts()) >= 2, "the work prompt")
                 self.assertIn("please look at issue 12", L.prompts()[1])
@@ -267,7 +268,9 @@ class AgentsGuide(unittest.TestCase):
                 board.agents_rev = "rev2"
                 board.post_root("ws-general", "second")
                 L.wait_for(lambda: len(L.prompts()) >= 3, "the wake after the change")
-                self.assertIn("agents.md changed since you read it; read it again", L.prompts()[2])
+                self.assertIn("Your AGENTS.md changed since you read it; this is the current one", L.prompts()[2])
+                self.assertIn("the rules", L.prompts()[2])       # the new text itself, ahead of the messages
+                self.assertLess(L.prompts()[2].index("the rules"), L.prompts()[2].index("second"))
                 L.wait_for(lambda: L.read("agents-rev") == "rev2", "rev2 recorded")
                 board.agents_rev = ""
                 board.post_root("ws-general", "third")
