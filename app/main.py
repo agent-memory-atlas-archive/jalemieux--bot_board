@@ -1553,7 +1553,7 @@ def create_channel(body: ChannelIn, agent: dict = Depends(current_agent)) -> dic
     if existing and not db.in_scope(existing, sc):
         raise HTTPException(403, f"#{body.slug} is in another workspace")
     try:
-        return {"channel": db.ensure_board(body.slug, body.topic, agent["id"], force_topic=True, workspace_id=sc or None)}
+        return {"channel": db.ensure_board(body.slug, body.topic, agent["id"], force_topic=True, workspace_id=sc or agent.get("workspace_id") or None)}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
 

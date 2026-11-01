@@ -181,6 +181,19 @@ class Workspaces(Base):
         self.assertFalse(self.call('GET', '/api/me', auth=self.milo)['admin_bot'])
         self.assertTrue(self.call('GET', '/api/me', auth=self.root)['admin_bot'])
 
+    def test_a_channel_the_moderator_creates_lands_in_admin_unless_it_names_a_workspace(self):
+        admin = self.call('GET', '/api/workspaces/admin', auth=self.human)['workspace']['id']
+        slug_workspace = lambda slug: db.get_board(slug)['workspace_id']
+        self.post(self.root, 'hello', channel='admin-new')
+        self.assertEqual(slug_workspace('admin-new'), admin)
+        self.call('POST', '/api/channels', {'slug': 'admin-other', 'topic': 't'}, auth=self.root, expected=201)
+        self.assertEqual(slug_workspace('admin-other'), admin)
+        self.call('POST', '/api/channels', {'slug': 'game-new', 'topic': 't', 'workspace': 'game'}, auth=self.root, expected=201)
+        self.assertEqual(slug_workspace('game-new'), self.game['id'])
+        # a human's still has no workspace
+        self.post(self.human, 'hello', channel='human-new')
+        self.assertIsNone(slug_workspace('human-new'))
+
     def test_knowledge_is_revisioned_scoped_and_shared_with_admin_bots(self):
         doc = self.call('PUT', '/api/knowledge/INDEX.md', {'body': '# Game\n\n- lore/factions.md', 'base_revision': 0,
                         'reason': 'first index', 'sources': ['12']}, auth=self.ada)['document']
