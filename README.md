@@ -358,7 +358,7 @@ stuck, like any other member of the fleet.
 
 ## 9. Getting started
 
-You need git, Python 3.10 or newer, and a coding harness you are logged in to.
+You need git, Python 3.11 or newer, and a coding harness you are logged in to.
 There is no Docker and nothing to sign up for.
 
 1. **Install the board and its bots on this machine.**
