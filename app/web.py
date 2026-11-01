@@ -2273,8 +2273,14 @@ document.addEventListener('submit', function (ev) {
   ask(f.elements.handle.value.trim().replace(/^@/, ''), f.elements.host.value, true,
       f.elements.harness.value, false, f.elements.workspace.value, null, f.elements.profile.value, picked.length ? picked : null);
 });
+function showAddBot(open) {
+  var card = document.getElementById('addbot'), btn = document.querySelector('.addbot-btn'); if (!card || !btn) return;
+  card.hidden = !open; btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) card.querySelector('select').focus(); else btn.focus();
+}
 document.addEventListener('click', function (ev) {
-  if (ev.target.closest('button.addbot-cancel')) document.getElementById('addbot').open = false;
+  if (ev.target.closest('button.addbot-btn')) showAddBot(document.getElementById('addbot').hidden);
+  else if (ev.target.closest('button.addbot-cancel')) showAddBot(false);
 });
 // The channel chips list the channels of the workspace chosen above them.
 var CHANNELS = JSON.parse((document.getElementById('channels-data') || {}).textContent || '{}');
@@ -2629,12 +2635,10 @@ FLEET_CSS = """
 .fleet-page .fleet-settings pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .fleet-page .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .addbot-cta{display:none}
-.fleet-page details#addbot{position:relative}
-.fleet-page details#addbot>summary{list-style:none;cursor:pointer}
-.fleet-page details#addbot>summary::-webkit-details-marker{display:none}
-.fleet-page .addbot-btn{display:inline-block;background:var(--accent);color:#fff;border-radius:8px;padding:7px 14px;font-weight:600;font-size:13.5px}
-.fleet-page details#addbot[open]{flex-basis:100%;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 16px;padding:10px 0 0}
-.fleet-page details#addbot[open]>summary{padding:0 16px 8px}
+.fleet-page .addbot-btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:600 13.5px/1.6 var(--sans);cursor:pointer}
+.fleet-page .addbot-btn[aria-expanded=true]{background:var(--ink)}
+.fleet-page .addbot-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 16px;padding:12px 0 0}
+.fleet-page .addbot-card[hidden]{display:none}
 .fleet-page form.newbot-top{padding:4px 16px 14px}
 .fleet-page .newbot-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 18px}
 .fleet-page .newbot-grid .span2{grid-column:span 2}.fleet-page .newbot-grid .span3{grid-column:1/-1}
@@ -2822,8 +2826,9 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
                                   f'{e(p["name"])}{" · specialized" if p.get("specialized") else ""} · {e(p["role"][:60])}</option>'
                                   for p in profiles))
         channels_json = json.dumps(channels or {}).replace("<", "\\u003c")
-        add_bot = f"""<details id="addbot" class="addbot-cta">
-<summary><span class="addbot-btn">+ Add a bot</span></summary>
+        add_bot = ('<button type="button" class="addbot-btn addbot-cta" aria-controls="addbot" aria-expanded="false">'
+                   '+ Add a bot</button>')
+        add_bot_card = f"""<div id="addbot" class="addbot-card addbot-cta" hidden>
 <form class="newbot-top" aria-label="Add a bot">
 <div class="newbot-grid">
 <label class="fld"><span><b>Machine</b></span><select name="host" aria-label="machine">{host_opts}</select></label>
@@ -2840,13 +2845,15 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
 <script type="application/json" id="channels-data">{channels_json}</script>
-</details>"""
+</div>"""
     else:
         add_bot = '<p class="addbot-empty">To add a bot, a machine must be reporting: <a href="#fleet-add-machine">add one</a>.</p>'
+        add_bot_card = ""
     return shell(board_name, "fleet", here="/fleet", content=f"""
 <style>{FLEET_CSS}{registry_web.REG_CSS}</style>
 <div class="fleet-page">
 <div class="fleet-head"><h1>Fleet</h1>{add_bot}</div>
+{add_bot_card}
 {attention}
 <nav class="fleet-tabs" aria-label="Fleet">
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>
