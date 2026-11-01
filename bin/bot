@@ -380,18 +380,32 @@ else:
         if h not in roster:
             if full: drop(h,"the board does not know it, untouched here for %d days"%local)
         elif a is None or a>=days: drop(h,"last seen on the board %s"%("never" if a is None else "%d days ago"%a))
-if full:
-    # a skill is skills/<name>/SKILL.md, written from the board for the bots here whose profile lists it
-    # (#328); anything else under skills/ (a clone from before, a skill no bot here lists) goes, links too
-    used=set()
-    for f in glob.glob(os.path.join(cfg,"bots","*","skills")): used|=set(open(f).read().split())
-    for c in sorted(glob.glob(os.path.join(cfg,"skills","*"))):
-        if os.path.basename(c) in used and os.path.isfile(os.path.join(c,"SKILL.md")): continue
-        real=os.path.realpath(c)
-        for l in glob.glob(os.path.expanduser("~/.claude/skills/*"))+glob.glob(os.path.expanduser("~/.agents/skills/*")):
-            if os.path.islink(l) and (os.path.realpath(l)+"/").startswith(real+"/"): rm(l,"a link into a skill that is going")
-        rm(c,"a skill no bot on this box lists")
 ' "$CFG" "$dry" "$full" "$days" "$live" "$@"
+  [ -z "$full" ] || sweep_skills "$dry"
+}
+# sweep_skills <dry|"">: a skill is $CFG/skills/<name>/SKILL.md, written from the board for
+# the bots here that list it (#328, #346); anything else under skills/ (a clone from before,
+# a skill no bot here lists any more) goes, and the links this script made into it. One
+# line per thing removed. Run after every reconcile and by `bot gc`.
+sweep_skills() {
+  local dry=${1:-} verb=removed used="" f c name real l have
+  [ -z "$dry" ] || verb="would remove"
+  for f in "$CFG"/bots/*/skills; do [ -f "$f" ] && used+=" $(cat "$f" | tr '\n' ' ')"; done
+  for c in "$CFG"/skills/*/; do
+    [ -d "$c" ] || continue
+    c=${c%/}; name=${c##*/}
+    case " $used " in *" $name "*) [ -f "$c/SKILL.md" ] && continue ;; esac
+    real=$(cd "$c" && pwd -P)
+    for l in ~/.claude/skills/* ~/.agents/skills/*; do
+      [ -L "$l" ] || continue
+      have=$(cd "$l" 2>/dev/null && pwd -P || true)
+      [ "$have" = "$real" ] || continue
+      echo "$verb $l: a link into a skill that is going"
+      [ -n "$dry" ] || rm -f "$l"
+    done
+    echo "$verb $c: a skill no bot on this box lists"
+    [ -n "$dry" ] || rm -rf "$c"
+  done
 }
 if [ "${1:-}" = gc ]; then
   shift; DRY=""; DAYS=${BOT_GC_DAYS:-7}; NAMES=()
@@ -815,16 +829,18 @@ trap 'rm -f "$STATE/pid" "$STATE/stop" "$STATE/busy" "$STATE/poll"' EXIT
 gc_sweep "" "" "${BOT_GC_DAYS:-7}" 2>>"$LOG" | while IFS= read -r line; do log "gc: $line"; done || true
 log "bot $HANDLE ($HARNESS) standing by in $DIR${WORKSPACE:+, workspace $WORKSPACE}, seen=$SEEN"
 
-# ---- the profile's skills ------------------------------------------------------------
-# A bot added with a profile (/fleet) gets its skills from the board, their only home
-# (#328): each SKILL.md is written under $CFG/skills/<name>/ and linked where the
-# harnesses load skills from, so a harness loads it natively and the bot reads the same
-# text over the API. Done at every start, and again when the board's skills revision
+# ---- the bot's skills ----------------------------------------------------------------
+# A bot's skills come from the board, their only home (#328), and the launcher keeps the
+# copies here in step with the board's list, deterministically (#346): each SKILL.md is
+# written under $CFG/skills/<name>/ with the revision it is at, and linked where the
+# harnesses load skills from, so a harness loads it natively. A skill already here at the
+# listed revision is not fetched again; one the list no longer names (and no other bot on
+# this box lists) is removed, links too. Done at every start, and again when the AGENTS.md
 # moves: the loop compares it at each prompt and tells the session in that prompt.
 # $STATE/skills lists the names, which keeps their files from `bot gc`;
 # $STATE/skills-rev is the revision written here.
 write_profile_skills() {
-  local json out rev names name dir tmp
+  local json out rev list name srev dir tmp
   json=$(api --max-time 20 "$BOARD/api/me/profile?json" 2>/dev/null) || { log "profile: the board did not answer; skills stay as they are"; return 0; }
   out=$(printf '%s' "$json" | python3 -c '
 import sys,json
@@ -832,20 +848,26 @@ d=json.load(sys.stdin)
 if not isinstance(d,dict) or "skills" not in d: sys.exit(1)   # a board from before profiles
 print(d.get("skills_revision") or "")
 for s in d.get("skills") or []:
-    if s.get("name"): print(s["name"])' 2>/dev/null) || return 0
-  rev=${out%%$'\n'*}; if [ "$rev" = "$out" ]; then names=""; else names=${out#*$'\n'}; fi
-  : > "$STATE/skills"
-  for name in $names; do
+    if s.get("name"): print("%s\t%s" % (s["name"], s.get("revision") or ""))' 2>/dev/null) || return 0
+  rev=${out%%$'\n'*}; if [ "$rev" = "$out" ]; then list=""; else list=${out#*$'\n'}; fi
+  : > "$STATE/skills.new"
+  while IFS=$'\t' read -r name srev; do
+    [ -n "$name" ] || continue
     dir=$CFG/skills/$name; mkdir -p "$dir"; tmp=$dir/.SKILL.md.$$
-    if api --max-time 20 -f -o "$tmp" "$BOARD/api/skills/$name" 2>/dev/null && [ -s "$tmp" ]; then
-      mv -f "$tmp" "$dir/SKILL.md"
+    if [ -f "$dir/SKILL.md" ] && [ -n "$srev" ] && [ "$(cat "$dir/revision" 2>/dev/null)" = "$srev" ]; then
+      skill_link "$dir" "$name" | grep -v '^linked [^,]*$' | while IFS= read -r line; do log "skill $name: $line"; done || true
+    elif api --max-time 20 -f -o "$tmp" "$BOARD/api/skills/$name" 2>/dev/null && [ -s "$tmp" ]; then
+      mv -f "$tmp" "$dir/SKILL.md"; echo "$srev" > "$dir/revision"
+      log "skill $name: written at revision ${srev:-?}"
       skill_link "$dir" "$name" | while IFS= read -r line; do log "skill $name: $line"; done || true
     else
       rm -f "$tmp"; log "skill $name: the board did not serve it; the copy here, if any, stays"
     fi
-    [ -f "$dir/SKILL.md" ] && echo "$name" >> "$STATE/skills"
-  done
+    [ -f "$dir/SKILL.md" ] && echo "$name" >> "$STATE/skills.new"
+  done <<<"$list"
+  mv -f "$STATE/skills.new" "$STATE/skills"
   echo "$rev" > "$STATE/skills-rev"
+  sweep_skills | while IFS= read -r line; do log "skills: $line"; done || true
 }
 write_profile_skills
 

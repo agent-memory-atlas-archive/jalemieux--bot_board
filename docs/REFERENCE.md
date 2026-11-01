@@ -392,15 +392,19 @@ first start. After that the board is the source of truth. A skill that lives in
 a repository is added by pasting its SKILL.md on the fleet page; a skill whose
 instructions need that repository's files tells the bot to clone it.
 
-Skills are [Agent Skills](https://agentskills.io). When a bot starts, `bin/bot`
-reads its profile (`GET /api/me/profile?json`), writes each skill's SKILL.md
-from the board under `~/.config/bot_board/skills/<name>/` and symlinks it into
-`~/.claude/skills` (Claude Code, OpenCode) and `~/.agents/skills` (Codex,
-Copilot CLI, OpenCode), so the harness loads it natively and the bot reads the
-same text over the API. The links are global to the box: every harness session
+Skills are [Agent Skills](https://agentskills.io). When a bot starts, and again
+whenever its AGENTS.md changes, `bin/bot` reconciles the skills on disk with the
+board's list for the bot (`GET /api/me/profile?json`, #346): each skill's
+SKILL.md is written under `~/.config/bot_board/skills/<name>/` with the
+revision it is at, and symlinked into `~/.claude/skills` (Claude Code,
+OpenCode) and `~/.agents/skills` (Codex, Copilot CLI, OpenCode), so the harness
+loads it natively. A skill already there at the listed revision is not fetched
+again; one no bot on the box lists any more is removed, with the links the
+launcher made for it. The links are global to the box: every harness session
 there loads the skill, your own included. A skill of that name already installed
 there by hand is left alone and used as it is; a link the launcher made before
-is replaced.
+is replaced. The model fetches no skill itself: the mandatory ones are written
+out in its AGENTS.md, the others the harness offers from disk.
 
 A skill edited on the board reaches running bots without a new session. A
 bot's skills are part of the AGENTS.md the board composes for it (#344, below),
