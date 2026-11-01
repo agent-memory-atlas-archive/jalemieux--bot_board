@@ -137,8 +137,14 @@ def claude(outcome, text="ok"):
     """(stdout, stderr, exit) for an outcome, as claude -p --output-format json behaves."""
     if outcome == "ok":
         return claude_result(text), "", 0
+    if outcome == "warned_overflow":      # completed, with a warning in the words of an overflow
+        return claude_result(text), "warn: prompt is too long, compacting\n", 0
     if outcome == "session_lost":
         return "", "No conversation found with session ID: {SESSION}\n", 1
+    if outcome == "context_overflow":
+        return claude_result("API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                             "\"message\":\"prompt is too long\"}}", is_error=True,
+                             subtype="error_during_execution", api_error_status=400), "", 1
     if outcome == "bad_invocation":
         return "", "error: unknown option '--no-such-flag'\n", 1
     if outcome == "logged_out":
@@ -166,7 +172,7 @@ def claude(outcome, text="ok"):
         return claude_result("", is_error=True, subtype="error_max_budget_usd", total_cost_usd=5.0), "", 1
     if outcome == "unknown":
         return claude_result("API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
-                             "\"message\":\"prompt is too long\"}}", is_error=True,
+                             "\"message\":\"messages: tool_use ids must be unique\"}}", is_error=True,
                              subtype="error_during_execution", api_error_status=400), "", 1
     if outcome == "unknown_no_result":    # died before printing a result object
         return "", "TypeError: Cannot read properties of undefined (reading 'content')\n", 1
@@ -187,6 +193,15 @@ def codex(outcome, text="ok"):
         return codex_events(started, msg, done), "", 0
     if outcome == "session_lost":
         return "", "Error: thread/resume: thread/resume failed: no rollout found for thread id {SESSION} (code -32600)\n", 1
+    if outcome == "context_overflow":
+        return codex_events(started, {"type": "turn.failed", "error": {"message": "Your input exceeds the context window of this model",
+                                                                        "code": "context_length_exceeded"}}), "", 1
+    if outcome == "warned_overflow":
+        return codex_events(started, msg, done), "context_length_exceeded: trimming history\n", 0
+    if outcome == "context_overflow_wording":
+        return codex_events(started, {"type": "turn.failed", "error": {"message": "Codex ran out of room in the model's context window"}}), "", 1
+    if outcome == "recovered_overflow":   # reported, retried and finished: exit 0 (#329)
+        return codex_events(started, {"type": "error", "message": "Your input exceeds the context window of this model"}, msg, done), "", 0
     if outcome == "bad_invocation":
         return "", "error: unexpected argument '--no-such-flag' found\n\nUsage: codex exec [OPTIONS] [PROMPT]\n", 2
     if outcome == "logged_out":
@@ -222,6 +237,17 @@ def opencode(outcome, text="ok"):
         return opencode_events(ev), "", 0
     if outcome == "session_lost":
         return "", "\x1b[91m\x1b[1mError: \x1b[0mSession not found\n", 1
+    if outcome == "recovered_overflow":   # reported, compacted and finished: exit 0 (#329)
+        return opencode_events({"type": "error", "sessionID": "{SESSION}", "error": {"name": "UnknownError", "data": {
+            "message": "Context size has been exceeded."}}}, ev), "", 0
+    if outcome == "warned_overflow":
+        return opencode_events(ev), "Context size has been exceeded, compacting\n", 0
+    if outcome == "context_overflow_wording":
+        return opencode_events({"type": "error", "sessionID": "{SESSION}", "error": {"name": "APIError", "data": {
+            "message": "the request exceeds the available context size", "type": "exceed_context_size_error"}}}), "", 1
+    if outcome == "context_overflow":     # a llama.cpp server with --no-context-shift, as opencode reports it (#323)
+        return opencode_events({"type": "error", "sessionID": "{SESSION}", "error": {"name": "UnknownError", "data": {
+            "message": json.dumps({"message": "Context size has been exceeded.", "type": "server_error", "code": 500})}}}), "", 1
     if outcome == "bad_invocation":
         return "", "Unknown argument: no-such-flag\n", 1
     if outcome == "limited":
@@ -242,6 +268,10 @@ def copilot(outcome, text="ok"):
         return text + "\n", "", 0
     if outcome == "session_lost":
         return "", "Error: session {SESSION} not found\n", 1
+    if outcome == "context_overflow":
+        return "", "Error: prompt is too long: 210000 tokens > 200000 maximum\n", 1
+    if outcome == "quoted_overflow":      # a short reply that only talks about it, exit 0
+        return "The log says: prompt is too long.\n", "", 0
     if outcome == "bad_invocation":
         return "", "error: unknown option '--no-such-flag'\n", 1
     if outcome == "logged_out":

@@ -7,9 +7,6 @@
 #   bot opencode-set <handle> [--model <provider/model>] [--opencode-config <file>]
 #       this bot's model and OpenCode configuration, e.g. a local server's provider block; kept with the bot, used from
 #       its next run, an empty value clears. opencode-set does it for a bot that exists, running or not
-#   bot skill add <dir|github-url>... | remove <source|name>... | list | update
-#       the skills in BOT_SKILLS in the config, linked where every harness on this box loads skills from
-#       (deprecated: the board's skill registry and the bot's profile are the list now)
 #   bot ps [-a] [--tsv]             the bots running on this box (-a: stopped and moved ones too)
 #   bot stop <handle> [--handoff]   let the bot finish what it is doing, then exit
 #                                   (--handoff: first push its work in progress and say on the PR where it stands)
@@ -44,8 +41,10 @@
 #
 # Each bot works in one directory, $BOT_POOL/<handle> (BOT_POOL defaults to
 # ~/.bot_board/workspace). What it checks out there is its business: the board
-# knows no repositories. Skills are a box matter: `bot skill add` links them
-# where the harnesses load skills from, for every session on the box.
+# knows no repositories. A bot's skills come from the board through its profile
+# (#328): the script writes each SKILL.md under ~/.config/bot_board/skills/<name>/
+# and links it where the harnesses load skills from, at start and again when the
+# board's copy changes, telling the session so in its next prompt.
 #
 # A new bot is given a first name for a handle (ada, milo, ...), drawn from
 # BOT_NAMES: one no bot on this box has had and the board does not know yet.
@@ -69,7 +68,7 @@
 # ~/.config/bot_board only grows unless it is swept. `bot gc` removes: a .seen
 # with no .token; the token, cursor and state of a session handle
 # (<host>-<project>-<seed>) the board has not seen for --days (default 7, or
-# $BOT_GC_DAYS) or does not know; and skill clones nothing refers to. --dry-run
+# $BOT_GC_DAYS) or does not know; and skill files no bot here lists. --dry-run
 # lists what would go and why. A running bot is never removed, and a bot with a
 # first name only when named: `bot gc <handle>` removes that bot from this box
 # whatever its age. Every start removes the first two kinds, for handles the board
@@ -79,17 +78,17 @@
 # file of the variables below, read on every start, so a box is set up once:
 #     BOARD=http://board.example:8080
 #     BOT_POOL=~/Dev/src
-#     BOT_SKILLS="https://github.com/owner/repo/tree/main/skills/some-skill"
 # A variable set in the environment wins over the file; a flag wins over both.
 #
 # Every harness run ends in one outcome (ok, retry, limited, capacity, logged_out,
-# session_lost, bad_invocation, exhausted, unknown), read off the exit status, the
+# session_lost, context_overflow, bad_invocation, exhausted, unknown), read off the exit status, the
 # harness's structured result (claude's --output-format json result object, codex's and
 # opencode's error events) and its error stream, never off the model's reply. Each
 # outcome has one policy: ok is done; limited, capacity, logged_out and bad_invocation
 # hold the batch and wait (BOT_LIMIT_WAIT, BOT_BAD_WAIT, or until the login is back);
 # retry holds and tries again after each of BOT_RETRY_WAITS; session_lost starts a new
-# session and runs the batch once more; unknown gets one more try after BOT_UNKNOWN_WAIT;
+# session and runs the batch once more; context_overflow retires the session, keeping it
+# in old-sessions/, and does the same; unknown gets one more try after BOT_UNKNOWN_WAIT;
 # exhausted, and anything given up, releases the threads the batch claimed so another bot
 # or a human can take them. $STATE/health says what is wrong in the words /fleet shows;
 # $STATE/last.json and runs.jsonl record each run; `bot ps` shows the last outcome.
@@ -101,7 +100,6 @@
 #      BOT_POOL (where bots work: one directory per bot under it),
 #      BOT_CATCH_UP (how far back a starting bot looks for unclaimed threads, seconds; default a day),
 #      BOT_ITEMS_PER_WAKE (how many routine announcements one batch claims; default 1, #234),
-#      BOT_SKILLS (skill sources for `bot skill`, space-separated),
 #      BOT_NAMES (the names new bots are drawn from, space-separated),
 #      BOT_GC_DAYS (how long a session handle may be gone before bot gc removes it; default 7).
 set -euo pipefail
@@ -293,7 +291,8 @@ SESSION_GEN=2
 # What the keeper reports beside the version (#238): bump PROTOCOL when a change to this
 # launcher's files or requests would break an older keeper or board.
 # 2: installs the profile's sourced skills at start and records session-started under $STATE.
-PROTOCOL=2
+# 3: writes the profile's skills from the board (no clones) and rewrites them when they change (#328).
+PROTOCOL=3
 # retire_session <state dir>: set the session ids aside (old-sessions/<time>/), so the
 # next run starts a new session; the harness's own transcripts are left where they are.
 retire_session() {
@@ -312,63 +311,21 @@ alive() {
   [ "${a##*/}" = "${0##*/}" ] || [ "${b##*/}" = "${0##*/}" ]
 }
 
-# A skill source that is a GitHub URL: owner, repo, ref and path are groups 1, 2, 4 and 6.
-GH_SKILL='^https?://github\.com/([^/]+)/([^/]+)(/tree/([^/]+)(/(.*))?)?/?$'
-
-# skill_fetch <source> [local]: sets SKILL_DIR to where the source is on this box
-# and SKILL_CLONE to its checkout if it is a GitHub URL, which is cloned, or
-# pulled if it is on a branch; a tag or a commit is a pin and is never pulled.
-# "local" stays off the network. Returns 1 with SKILL_ERR set; a pull that
-# fails is only SKILL_WARN, since the copy already here still works.
-skill_fetch() {
-  local src=$1 out
-  SKILL_ERR=""; SKILL_WARN=""; SKILL_CLONE=""
-  if [[ $src =~ $GH_SKILL ]]; then
-    local owner=${BASH_REMATCH[1]} repo=${BASH_REMATCH[2]%.git} ref=${BASH_REMATCH[4]} sub=${BASH_REMATCH[6]%/}
-    SKILL_CLONE=$CFG/skills/$owner/$repo@${ref:-HEAD}
-    if [ -d "$SKILL_CLONE/.git" ]; then
-      if [ -z "${2:-}" ] && git -C "$SKILL_CLONE" symbolic-ref -q HEAD >/dev/null; then
-        git -C "$SKILL_CLONE" pull -q --ff-only >/dev/null 2>&1 || SKILL_WARN="pull failed, using the checkout as it is"
-      fi
-    elif [ -n "${2:-}" ]; then SKILL_ERR="not fetched yet"; return 1
-    else
-      mkdir -p "$(dirname "$SKILL_CLONE")"
-      out=$(GIT_TERMINAL_PROMPT=0 git clone -q "https://github.com/$owner/$repo.git" "$SKILL_CLONE" 2>&1 \
-            && { [ -z "$ref" ] || git -C "$SKILL_CLONE" checkout -q "$ref" 2>&1; }) \
-        || { rm -rf "$SKILL_CLONE"; SKILL_ERR="cannot fetch $src: $(echo $out)"; return 1; }
-    fi
-    SKILL_DIR=$SKILL_CLONE${sub:+/$sub}
-  else SKILL_DIR=$src; fi
-  [ -d "$SKILL_DIR" ] || { SKILL_ERR="no directory $SKILL_DIR"; return 1; }
-  SKILL_DIR=$(cd "$SKILL_DIR" && pwd -P)
-}
-# skill_meta <dir>: "name<TAB>description" from the SKILL.md frontmatter; the directory name if it has none
-skill_meta() {
-  python3 -c '
-import sys,os,re
-t=open(os.path.join(sys.argv[1],"SKILL.md"),encoding="utf-8").read()
-m=re.match(r"---\n(.*?)\n---",t,re.S); f={}; block=set(); k=""
-for l in (m.group(1) if m else "").splitlines():
-    if l.startswith((" ","\t")):
-        if f.get(k,"x")[:1] in (">","|"): f[k]=l.strip()  # a block scalar: its text is on the lines below
-        elif k in block: f[k]+=" "+l.strip()
-        continue
-    k,_,v=l.partition(":"); k=k.strip(); f[k]=v.strip().strip("\"\x27")
-    if f[k][:1] in (">","|"): block.add(k)
-print(re.sub(r"[^A-Za-z0-9._-]","-",f.get("name") or os.path.basename(sys.argv[1])),re.sub(r"\s+"," ",f.get("description","")),sep="\t")' "$1"
-}
 # skill_link <dir> <name> [check]: symlink the skill where the harnesses load skills
-# from (symlink, not copy: a skill's scripts may reach into the rest of its
-# checkout), one line on stdout per place. A skill of that name already there
-# from elsewhere is left alone and is the one the harness loads. "check" only
-# reports. Returns 1 if something that is not a skill is in the way.
+# from, one line on stdout per place. A link this script made before (into
+# $CFG/skills, a clone from before #328 included) or that dangles is replaced; a
+# skill of that name from elsewhere is left alone and is the one the harness loads.
+# "check" only reports. Returns 1 if something that is not a skill is in the way.
 skill_link() {
-  local dir=$1 name=$2 base link have rc=0
+  local dir=$1 name=$2 base link have own rc=0
+  own=$(cd "$CFG/skills" 2>/dev/null && pwd -P || echo "$CFG/skills")
   for base in ~/.claude/skills ~/.agents/skills; do
     link=$base/$name
     if [ -e "$link" ] || [ -L "$link" ]; then
       have=$(cd "$link" 2>/dev/null && pwd -P || true)
       if [ "$have" = "$dir" ]; then echo "linked $link"
+      elif [ -L "$link" ] && [ -z "${3:-}" ] && { [ -z "$have" ] || [[ $have == "$own"/* ]]; }; then
+        rm -f "$link"; ln -s "$dir" "$link"; echo "linked $link, in place of an older link"
       elif [ -f "$link/SKILL.md" ]; then echo "shadowed by ${have:-$link}: a harness loads that copy, not this one"
       else echo "blocked: $link exists and is not a skill; move it aside"; rc=1; fi
     elif [ -n "${3:-}" ]; then echo "not linked at $link"
@@ -377,130 +334,15 @@ skill_link() {
   return $rc
 }
 
-# ---- bot skill add|remove|list: BOT_SKILLS in the config ---------------------------
-# add fetches, checks and links a skill before it writes the file, so a bad source
-# fails here and not when the bots next start. A directory is written as its
-# absolute path. remove also takes away the links made for the skill.
+# ---- bot skill: gone (#328) -----------------------------------------------------------
 if [ "${1:-}" = skill ]; then
-  ACT=${2:-}; shift; shift || usage
-  # what the file sets, not what the environment says
-  HAVE=$(unset BOT_SKILLS; if [ -f "$BOT_CONFIG" ]; then . "$BOT_CONFIG"; fi; echo ${BOT_SKILLS:-})
-  # set_skills <sources>: one plain BOT_SKILLS="..." line is rewritten in place;
-  # anything cleverer is left as written and overridden by a line at the end.
-  set_skills() {
-    mkdir -p "$(dirname "$BOT_CONFIG")"; touch "$BOT_CONFIG"
-    python3 - "$BOT_CONFIG" "$1" <<'PY'
-import sys,re
-path,want=sys.argv[1:]
-lines=open(path,encoding="utf-8").read().splitlines()
-hits=[i for i,l in enumerate(lines) if re.match(r"\s*(export\s+)?BOT_SKILLS\+?=",l)]
-plain=r'''BOT_SKILLS=("[^"$`\\]*"|'[^']*'|[^\s"'$`\\;&|#]*)\s*$'''
-new='BOT_SKILLS="%s"'%want
-if len(hits)==1 and re.match(plain,lines[hits[0]]): lines[hits[0]]=new
-else:
-    lines.append(new)
-    if hits: print("bot: left the BOT_SKILLS lines in %s as written; the one added at the end overrides them"%path)
-open(path,"w",encoding="utf-8").write("\n".join(lines)+"\n")
-PY
-  }
-  case $ACT in
-    list|ls|update)
-      [ -n "$HAVE" ] || { echo "bot: no skills in $BOT_CONFIG" >&2; exit 0; }
-      echo "bot: BOT_SKILLS is deprecated: the board's skill registry (/fleet) is the list now, and a bot installs its profile's skills when it starts" >&2
-      # one block per skill: what it is, which commit is here, and which copy a harness loads
-      for src in $HAVE; do
-        if [ "$ACT" = update ]; then skill_fetch "$src" || true; else skill_fetch "$src" local || true; fi
-        if [ -n "$SKILL_ERR" ]; then printf '%s\n    source  %s\n    %s\n' "?" "$src" "$SKILL_ERR"; continue; fi
-        if [ ! -f "$SKILL_DIR/SKILL.md" ]; then printf '%s\n    source  %s\n    no SKILL.md in %s\n' "?" "$src" "$SKILL_DIR"; continue; fi
-        IFS=$'\t' read -r name desc < <(skill_meta "$SKILL_DIR")
-        printf '%s\n    source  %s\n    here    %s' "$name" "$src" "$SKILL_DIR"
-        if [ -n "$SKILL_CLONE" ]; then
-          printf ' at %s' "$(git -C "$SKILL_CLONE" rev-parse --short HEAD)"
-          git -C "$SKILL_CLONE" symbolic-ref -q HEAD >/dev/null || printf ' (pinned)'
-        fi
-        printf '\n'; [ -z "$SKILL_WARN" ] || echo "    $SKILL_WARN"
-        skill_link "$SKILL_DIR" "$name" check | sed 's/^/    /' || true
-      done ;;
-    add)
-      [ $# -gt 0 ] || usage
-      # everything is fetched and checked before the config is touched
-      ADD=(); DIRS=()
-      for src in "$@"; do
-        if ! [[ $src =~ $GH_SKILL ]]; then [ -d "$src" ] || die "no directory $src"; src=$(cd "$src" && pwd); fi
-        skill_fetch "$src" || die "$SKILL_ERR"
-        ONE=("$src")
-        if [ ! -f "$SKILL_DIR/SKILL.md" ]; then
-          # a folder of skills stands for each skill in it
-          ONE=(); base=${src%/}
-          if [[ $src =~ $GH_SKILL ]] && [ -z "${BASH_REMATCH[4]}" ]; then base+=/tree/$(git -C "$SKILL_CLONE" rev-parse --abbrev-ref HEAD); fi
-          for md in "$SKILL_DIR"/*/SKILL.md; do
-            if [ -f "$md" ]; then md=${md%/SKILL.md}; ONE+=("$base/${md##*/}"); fi
-          done
-          [ ${#ONE[@]} -gt 0 ] || die "no SKILL.md in $src, nor in the folders directly under it"
-          echo "bot: $src is a folder of ${#ONE[@]} skills; adding each of them"
-        fi
-        for one in "${ONE[@]}"; do
-          # BOT_SKILLS is split on whitespace and written inside double quotes
-          case $one in *[[:space:]\"\'\$\`\\]*) die "BOT_SKILLS cannot hold a source with spaces or quotes: $one" ;; esac
-          case " $HAVE ${ADD[*]:-} " in *" $one "*) echo "bot: $one is already in BOT_SKILLS"; continue ;; esac
-          skill_fetch "$one" local || skill_fetch "$one" || die "$SKILL_ERR"
-          ADD+=("$one"); DIRS+=("$SKILL_DIR")
-        done
-      done
-      [ ${#ADD[@]} -gt 0 ] || exit 0
-      set_skills "$HAVE${HAVE:+ }${ADD[*]}"
-      for i in "${!ADD[@]}"; do
-        IFS=$'\t' read -r name desc < <(skill_meta "${DIRS[$i]}")
-        printf 'bot: added %s\n    about   %s\n    source  %s\n    here    %s\n' "$name" "${desc:-(no description)}" "${ADD[$i]}" "${DIRS[$i]}"
-        skill_link "${DIRS[$i]}" "$name" | sed 's/^/    /' || true
-      done
-      echo "bot: BOT_SKILLS in $BOT_CONFIG now lists ${#ADD[@]} more. The links are for the whole box:"
-      echo "bot: every Claude Code, Codex, Copilot and OpenCode session here loads these skills, yours included, not only the bots"
-      echo "bot: BOT_SKILLS is deprecated: add the skill on the board's fleet page instead, and list it in a profile; a bot installs its profile's skills when it starts" >&2 ;;
-    remove|rm)
-      # a skill is named by its source as listed, its directory, or the last part of either
-      [ $# -gt 0 ] || usage
-      KEEP=$HAVE; GONE=""
-      for arg in "$@"; do
-        abs=$(cd "$arg" 2>/dev/null && pwd || true); left=""; hit=""
-        for src in $KEEP; do
-          if [ "$src" = "${arg%/}" ] || [ "$src" = "$abs" ] || [ "${src##*/}" = "$arg" ]; then hit=1; GONE+="${GONE:+ }$src"
-          else left+="${left:+ }$src"; fi
-        done
-        [ -n "$hit" ] || { echo "bot: $arg is not in BOT_SKILLS in $BOT_CONFIG (bot skill list shows what is)" >&2; exit 1; }
-        KEEP=$left
-      done
-      set_skills "$KEEP"
-      echo "bot: removed from BOT_SKILLS in $BOT_CONFIG: $GONE"
-      # the links are global to the box: only symlinks that resolve to this skill go
-      for src in $GONE; do
-        if [[ $src =~ $GH_SKILL ]]; then
-          sub=${BASH_REMATCH[6]%/}
-          dir=~/.config/bot_board/skills/${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}@${BASH_REMATCH[4]:-HEAD}${sub:+/$sub}
-        else dir=$src; fi
-        dir=$(cd "$dir" 2>/dev/null && pwd -P || true); [ -n "$dir" ] || continue
-        for link in ~/.claude/skills/* ~/.agents/skills/*; do
-          if [ -L "$link" ] && [ "$(cd "$link" 2>/dev/null && pwd -P || true)" = "$dir" ]; then rm "$link"; echo "bot: unlinked $link"; fi
-        done
-        # the clone goes with the last skill taken from it
-        [[ $src =~ $GH_SKILL ]] || continue
-        clone=$CFG/skills/${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}@${BASH_REMATCH[4]:-HEAD}; inuse=""
-        for other in $KEEP $(cat "$CFG"/bots/*/skills 2>/dev/null || true); do
-          case " $GONE " in *" $other "*) continue ;; esac   # a bot still lists what was just removed, until it restarts
-          if [[ $other =~ $GH_SKILL ]] && [ "$CFG/skills/${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}@${BASH_REMATCH[4]:-HEAD}" = "$clone" ]; then inuse=1; fi
-        done
-        if [ -z "$inuse" ] && [ -d "$clone" ]; then rm -rf "$clone"; rmdir "${clone%/*}" 2>/dev/null || true; echo "bot: removed the clone $clone"; fi
-      done ;;
-    *) usage ;;
-  esac
-  case $ACT in add|remove|rm) echo "bot: restart the bots on this box for this to take effect" ;; esac
-  exit 0
+  die "bot skill is gone: skills live on the board. Add or edit one on the fleet page (/fleet) and list it in a profile; every bot with that profile writes it here when it starts and when it changes"
 fi
 
 # ---- bot gc: what ended sessions and bots left behind ---------------------------------
 # gc_sweep <dry|""> <full|""> <days> [handle...]: prints one line per thing removed.
 # full is `bot gc` itself; without it (the sweep at every start) handles the board
-# does not know and skill clones are left alone, so a start against another board
+# does not know and skill files are left alone, so a start against another board
 # removes nothing. The roster is read without a token, so no agent is marked as
 # seen by asking; if the board cannot be read, or knows none of the handles here,
 # only what needs no board goes (.seen with no .token).
@@ -509,8 +351,7 @@ gc_sweep() {
   [ -z "$full" ] || wait=15   # a start should not hang on a slow board
   for d in "$CFG"/bots/*/; do if alive "${d%/}"; then d=${d%/}; live+="${d##*/} "; fi; done
   { curl -sS --max-time "$wait" "$BOARD/api/agents" 2>/dev/null || true; } \
-  | BOT_SKILLS_FILE=$(unset BOT_SKILLS; if [ -f "$BOT_CONFIG" ]; then . "$BOT_CONFIG"; fi; echo ${BOT_SKILLS:-}) \
-    python3 -c '
+  | python3 -c '
 import sys,os,re,json,time,shutil,glob,datetime,fcntl
 cfg,dry,full,days,live,named=sys.argv[1],sys.argv[2],sys.argv[3],float(sys.argv[4]),set(sys.argv[5].split()),sys.argv[6:]
 if not dry and os.path.isdir(cfg):
@@ -560,20 +401,16 @@ else:
             if full: drop(h,"the board does not know it, untouched here for %d days"%local)
         elif a is None or a>=days: drop(h,"last seen on the board %s"%("never" if a is None else "%d days ago"%a))
 if full:
-    # a clone is skills/<owner>/<repo>@<ref>; a source names it as github.com/<owner>/<repo>[/tree/<ref>...]
-    used=set(); srcs=os.environ.get("BOT_SKILLS_FILE","").split()
-    for f in glob.glob(os.path.join(cfg,"bots","*","skills")): srcs+=open(f).read().split()
-    for s in srcs:
-        m=re.match(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/tree/([^/]+)(?:/.*)?)?/?$",s)
-        if m: used.add("%s/%s@%s"%(m.group(1),m.group(2),m.group(3) or "HEAD"))
-    for c in sorted(glob.glob(os.path.join(cfg,"skills","*","*"))):
-        if os.path.relpath(c,os.path.join(cfg,"skills")) in used: continue
+    # a skill is skills/<name>/SKILL.md, written from the board for the bots here whose profile lists it
+    # (#328); anything else under skills/ (a clone from before, a skill no bot here lists) goes, links too
+    used=set()
+    for f in glob.glob(os.path.join(cfg,"bots","*","skills")): used|=set(open(f).read().split())
+    for c in sorted(glob.glob(os.path.join(cfg,"skills","*"))):
+        if os.path.basename(c) in used and os.path.isfile(os.path.join(c,"SKILL.md")): continue
         real=os.path.realpath(c)
         for l in glob.glob(os.path.expanduser("~/.claude/skills/*"))+glob.glob(os.path.expanduser("~/.agents/skills/*")):
-            if os.path.islink(l) and (os.path.realpath(l)+"/").startswith(real+"/"): rm(l,"a link into a skill clone that is going")
-        rm(c,"a skill clone no bot and no BOT_SKILLS entry refers to")
-    for o in glob.glob(os.path.join(cfg,"skills","*")):
-        if not dry and os.path.isdir(o) and not os.listdir(o): os.rmdir(o)
+            if os.path.islink(l) and (os.path.realpath(l)+"/").startswith(real+"/"): rm(l,"a link into a skill that is going")
+        rm(c,"a skill no bot on this box lists")
 ' "$CFG" "$dry" "$full" "$days" "$live" "$@"
 }
 if [ "${1:-}" = gc ]; then
@@ -1007,34 +844,46 @@ gc_sweep "" "" "${BOT_GC_DAYS:-7}" 2>>"$LOG" | while IFS= read -r line; do log "
 log "bot $HANDLE ($HARNESS) standing by in $DIR${WORKSPACE:+, workspace $WORKSPACE}, seen=$SEEN"
 
 # ---- the profile's skills ------------------------------------------------------------
-# A bot added with a profile (/fleet) gets its skills. The ones that live on GitHub are
-# fetched and linked here, the way `bot skill add` does for BOT_SKILLS, so the harness
-# loads them; the ones written on the board the bot reads over the API, as its profile
-# tells it in the first turn. Once per start, so a skill added to a profile reaches a
-# bot at its next new session and nothing moves under a running one. $STATE/skills
-# keeps the sources, which is what keeps their clones from `bot gc`.
-install_profile_skills() {
-  local json srcs src name
+# A bot added with a profile (/fleet) gets its skills from the board, their only home
+# (#328): each SKILL.md is written under $CFG/skills/<name>/ and linked where the
+# harnesses load skills from, so a harness loads it natively and the bot reads the same
+# text over the API. Done at every start, and again when the board's skills revision
+# moves: the loop compares it at each prompt and tells the session in that prompt.
+# $STATE/skills lists the names, which keeps their files from `bot gc`;
+# $STATE/skills-rev is the revision written here.
+write_profile_skills() {
+  local json out rev names name dir tmp
   json=$(api --max-time 20 "$BOARD/api/me/profile?json" 2>/dev/null) || { log "profile: the board did not answer; skills stay as they are"; return 0; }
-  srcs=$(printf '%s' "$json" | python3 -c '
+  out=$(printf '%s' "$json" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
 if not isinstance(d,dict) or "skills" not in d: sys.exit(1)   # a board from before profiles
+print(d.get("skills_revision") or "")
 for s in d.get("skills") or []:
-    if s.get("kind")=="github" and s.get("source"): print(s["source"])' 2>/dev/null) || return 0
+    if s.get("name"): print(s["name"])' 2>/dev/null) || return 0
+  rev=${out%%$'\n'*}; if [ "$rev" = "$out" ]; then names=""; else names=${out#*$'\n'}; fi
   : > "$STATE/skills"
-  for src in $srcs; do
-    if skill_fetch "$src"; then
-      [ -z "$SKILL_WARN" ] || log "skill $src: $SKILL_WARN"
-      if [ -f "$SKILL_DIR/SKILL.md" ]; then
-        name=$(skill_meta "$SKILL_DIR" | cut -f1)
-        skill_link "$SKILL_DIR" "$name" | while IFS= read -r line; do log "skill $name: $line"; done || true
-        echo "$src" >> "$STATE/skills"
-      else log "skill $src: no SKILL.md in $SKILL_DIR; not linked"; fi
-    else log "skill $src: $SKILL_ERR"; fi
+  for name in $names; do
+    dir=$CFG/skills/$name; mkdir -p "$dir"; tmp=$dir/.SKILL.md.$$
+    if api --max-time 20 -f -o "$tmp" "$BOARD/api/skills/$name" 2>/dev/null && [ -s "$tmp" ]; then
+      mv -f "$tmp" "$dir/SKILL.md"
+      skill_link "$dir" "$name" | while IFS= read -r line; do log "skill $name: $line"; done || true
+    else
+      rm -f "$tmp"; log "skill $name: the board did not serve it; the copy here, if any, stays"
+    fi
+    [ -f "$dir/SKILL.md" ] && echo "$name" >> "$STATE/skills"
   done
+  echo "$rev" > "$STATE/skills-rev"
 }
-install_profile_skills
+write_profile_skills
+# skills_rev: the revision of this bot's skills as the board has them now (#328), or ""
+# when the board is too old to say or cannot be reached.
+skills_rev() {
+  { api --max-time 10 "$BOARD/api/me/profile?json" 2>/dev/null || true; } | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin).get("skills_revision") or "")
+except Exception: print("")'
+}
 
 # ---- run the harness once, resuming the session kept for the bot ----------------------
 # run_harness <dir> <session-file> <prompt> -> 0 when the run completed, else 1.
@@ -1118,6 +967,9 @@ for line in sys.stdin:
     bad_invocation) echo "cannot run $HARNESS since $now: $DETAIL; messages are kept, retried every $((BOT_BAD_WAIT / 60)) min" >"$STATE/health" ;;
     exhausted)      echo "last run exhausted its turn or budget limit at $now: $DETAIL" >"$STATE/health" ;;
     unknown)        echo "last run failed (exit $rc) at $now: $DETAIL" >"$STATE/health" ;;
+    context_overflow)
+                    if [ -s "$sfile" ]; then echo "last run overflowed its context at $now: starting a new session" >"$STATE/health"
+                    else echo "last run overflowed its context at $now, in a new session: $DETAIL" >"$STATE/health"; fi ;;
     retry|session_lost) ;;   # the caller tries again; the health line stays what it was
   esac
   [ "$OUTCOME" = ok ] || [ "$rc" -ne 0 ] || rc=1
@@ -1160,6 +1012,7 @@ opencode_run() {
 #   capacity        the model is overloaded or at capacity
 #   logged_out      the harness has no valid login
 #   session_lost    the session to resume no longer exists
+#   context_overflow the session has outgrown the model's context: only a new one can work
 #   bad_invocation  the harness rejected the command line, is missing, or died before a turn
 #   exhausted       the run hit its turn or budget limit before finishing
 #   unknown         a failure none of the above describes
@@ -1176,7 +1029,7 @@ with open(logp, "rb") as f:
 
 def error_text(v):
     if isinstance(v, str): return v
-    if isinstance(v, dict): return " ".join(error_text(v[k]) for k in ("message", "code", "error", "name") if k in v)
+    if isinstance(v, dict): return " ".join(error_text(v[k]) for k in ("message", "code", "error", "name", "data") if k in v)
     return ""
 
 result = None; reply = ""
@@ -1220,12 +1073,17 @@ text = "\n".join(e for e in errors if e)
 status = result.get("api_error_status") if result else None
 subtype = (result or {}).get("subtype") or ""
 LIMIT = os.environ.get("LIMIT_RE") or r"usage limit|rate.?limit|limit reached|too many requests|exceeded.*(quota|limit)"; CAP = r"at capacity|overloaded"
+CONTEXT = r"context (size|length|window) (has been )?exceeded|maximum context length|prompt is too long|input length .* exceeds|context_length_exceeded|exceeds? the context window|exceeds? the available context size|exceed_context_size_error|ran out of room in the model.s context window"
 def m(rx, s=None): return re.search(rx, text if s is None else s, re.I)
 def last(rx=None, s=None):
     ls = [l.strip() for l in (text if s is None else s).splitlines() if l.strip() and (rx is None or re.search(rx, l, re.I))]
     return re.sub(r"\x1b\[[0-9;]*m", "", ls[-1])[:200] if ls else ""
 if m(r"No conversation found with session|no rollout found for thread|Session not found|session \S+ (was )?not found"):
     o, d = "session_lost", last()
+elif m(CONTEXT) and (rc != 0 or (result and result.get("is_error"))):
+    # a failed run only: a reply can quote the words, and a run can report an overflow, recover and finish.
+    # codex exits 1 on a failed turn; its error event with exit 0 is one it went on to retry (#329)
+    o, d = "context_overflow", last(CONTEXT)
 elif rc == 127 or m(r"command not found|unknown option|unrecognized (option|subcommand|argument)|unexpected argument|Unknown argument|error: (option|missing|too many|invalid value)|is not installed|^usage: (claude|codex|copilot|opencode)"):
     o, d = "bad_invocation", last()
 elif status in (401, 403) or m(r"not logged in|please run /login|run .?(claude|codex|copilot) login|invalid api key|authentication_error|oauth (token|session) (has )?expired|could not be refreshed|failed to authenticate|no login|no authentication information found|failed to fetch pat user login \(40[13]\)"):
@@ -1594,6 +1452,14 @@ while :; do
   if [ -n "$REV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/agents-rev" 2>/dev/null)" != "$REV" ]; then
     PROMPT+="agents.md changed since you read it; read it again ($BOARD/agents.md) before handling these."$'\n'
   fi
+  # a skill of the bot's profile was written on the board since this session read it (#328): the
+  # files here are written again and one line says so, the same way; no new session either
+  SREV=$(skills_rev)
+  if [ -n "$SREV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/skills-rev" 2>/dev/null)" != "$SREV" ]; then
+    log "the skills of this bot's profile changed on the board; writing them again"
+    write_profile_skills
+    PROMPT+="Your profile's skills changed since you read them; read your profile again ($BOARD/api/me/profile) and the skills it lists before handling these."$'\n'
+  fi
   while IFS=$'\t' read -r id channel thread author why body; do
     case $why in
       "new thread") PROMPT+=$'\n'"[new thread: message $id, channel $channel, thread $thread, from @$author]"$'\n' ;;
@@ -1621,6 +1487,11 @@ while :; do
       # the harness no longer has the session: start a new one and run the same batch once more
       log "$HARNESS has lost the session $(cat "$STATE/session" 2>/dev/null || echo '?'): starting a new one and running the batch again"
       rm -f "$STATE/session"; ATTEMPT=2; continue
+    fi
+    if [ "$OUTCOME" = context_overflow ] && [ "$ATTEMPT" -eq 1 ] && [ -s "$STATE/session" ]; then
+      # resuming would only overflow again: set this session aside and run the same batch once more in a new one
+      log "the session $(cat "$STATE/session") overflowed its context: starting a new one and running the batch again"
+      retire_session "$STATE"; ATTEMPT=2; continue
     fi
     break
   done
@@ -1684,7 +1555,7 @@ while :; do
       release_claims
       tell "My harness ($HARNESS) stopped at its turn or budget limit before finishing this ($DETAIL). I have released the thread; the work is unfinished. Log on $(hostname): $LOG" ;;
     *)
-      # unknown, or a session lost twice over: one more try after a wait, then over
+      # unknown, a session lost twice over, or an overflow in a new session: one more try after a wait, then over
       if [ ! -e "$STATE/unknown" ] || [ "$(cat "$STATE/unknown")" != "$RUN_MESSAGES" ]; then
         hold_batch; echo "$RUN_MESSAGES" > "$STATE/unknown"; RETRY_UNTIL=$(( $(date +%s) + BOT_UNKNOWN_WAIT ))
         log "$HARNESS failed ($DETAIL); holding $N message(s) for one more try in ${BOT_UNKNOWN_WAIT}s"

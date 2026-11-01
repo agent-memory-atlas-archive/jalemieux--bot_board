@@ -26,6 +26,7 @@ def _constant(path: Path, pattern: str) -> int | None:
 
 
 SESSION_GEN = _constant(ROOT / "bin" / "bot", r"^SESSION_GEN=(\d+)")
+LAUNCHER_PROTOCOL = _constant(ROOT / "bin" / "bot", r"^PROTOCOL=(\d+)") or 3
 
 
 def _row(what, name, running, wanted="", note="", href="", bell=False):
@@ -68,8 +69,9 @@ def rows(hosts: list, routines: list = ()) -> list[dict]:
                 note = "behind the keeper's checkout: it restarts on it once idle"
             elif b.get("protocol") is not None and b["protocol"] < MIN_PROTOCOL:
                 note = f"protocol {b['protocol']} is below {MIN_PROTOCOL}"
-            elif (b.get("protocol") or 0) < 2:
-                note = "predates profile skills (protocol 2): it installs its profile's skills once it restarts on the new launcher"
+            elif (b.get("protocol") or 0) < LAUNCHER_PROTOCOL:
+                note = (f"predates board-only skills (protocol {LAUNCHER_PROTOCOL}): it writes its profile's skills from"
+                        " the board once it restarts on the new launcher")
             else:
                 note = ""
             out.append(_row("launcher", b["handle"], launcher or "no version file", "the keeper's checkout", note, href))

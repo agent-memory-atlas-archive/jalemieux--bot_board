@@ -13,7 +13,9 @@ stopped, failing or still starting, and the bot has not touched the board for a 
 period (so a planned restart, or a keeper's own update, keeps its threads). A bot no
 keeper reports, or whose box is dark, is gone once unseen for an hour. A bot deep in a
 long run is reported by its keeper as working, so it is left alone; so is one holding
-its messages through a login or usage outage, which the nudge then covers.
+its messages through a login or usage outage, which the nudge then covers. A thread
+waiting on a person's answer (an open `meta.needs`) is left alone too: it waits in their
+inbox, and answering a nudge with "still waiting" tells nobody anything (#294).
 """
 import json
 import os
@@ -33,6 +35,9 @@ GRACE = int(os.environ.get("PROGRESS_GRACE", 15 * 60))
 UNSEEN = 3600
 # a thread the board released and nobody claimed for this long needs the moderator
 UNCLAIMED = int(os.environ.get("PROGRESS_UNCLAIMED", 3 * 3600))
+# one outage can flap a bot in and out of a state many times: the same subject in the same state
+# is told to the moderator once in this long, and an open report this young takes new items (#313)
+ATTENTION_QUIET = int(os.environ.get("PROGRESS_ATTENTION_QUIET", 24 * 3600))
 
 # fleet states in which a bot needs a person: its launcher holds the messages and waits
 NEEDS_HUMAN = ("needs login", "out of usage", "failing")
@@ -52,7 +57,11 @@ CREATE TABLE IF NOT EXISTS progress_health (
 
 def init() -> None:
     with db._write_lock:
-        db.conn().executescript(SCHEMA)
+        c = db.conn()
+        c.executescript(SCHEMA)
+        if "at" not in {r["name"] for r in c.execute("PRAGMA table_info(progress_attention)")}:
+            c.execute("ALTER TABLE progress_attention ADD COLUMN at TEXT")
+        c.commit()
 
 
 def gone(handles) -> dict[str, str]:
@@ -158,6 +167,31 @@ def _last_message(tid: int) -> dict | None:
     return dict(row) if row else None
 
 
+def waiting_on_human(tid: int) -> bool:
+    """A message in this thread asks a human with meta.needs, and the ask is open by the rule
+    the inbox goes by (status.asks): that human has not posted since, the asker has not posted
+    meta.resolved, and it was not dismissed. A handle that is not a human's parks nothing, and
+    neither does a human naming themselves, since that reaches no inbox."""
+    c = db.conn()
+    for m in c.execute("SELECT id, agent_id, meta FROM messages WHERE thread_id=? AND meta LIKE '%\"needs\"%'",
+                       (tid,)).fetchall():
+        meta = json.loads(m["meta"])
+        names = meta.get("needs") if isinstance(meta, dict) else None
+        names = names if isinstance(names, list) else [names] if isinstance(names, str) else []
+        if c.execute("SELECT 1 FROM messages WHERE thread_id=? AND id>? AND agent_id=?"
+                     " AND json_extract(meta,'$.resolved')=1", (tid, m["id"], m["agent_id"])).fetchone():
+            continue
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='status_dismissals'").fetchone() and \
+                c.execute("SELECT 1 FROM status_dismissals WHERE key=?", (f"m{m['id']}",)).fetchone():
+            continue
+        for name in names:
+            who = db.get_agent_by_handle(str(name).lstrip("@"))
+            if who and who["kind"] == "human" and who["id"] != m["agent_id"] and not c.execute(
+                    "SELECT 1 FROM messages WHERE thread_id=? AND id>? AND agent_id=?", (tid, m["id"], who["id"])).fetchone():
+                return True
+    return False
+
+
 def sweep() -> dict:
     """One pass over every claimed, uncompleted thread, then over what the board released
     and nobody took. Returns what it did, for tests and the log:
@@ -177,6 +211,8 @@ def sweep() -> dict:
             silence = db.seconds_since(t["last_at"]) or 0
             last = _last_message(tid)
             nudged = bool(last and last["handle"].lower() == HANDLE and '"nudge"' in (last["meta"] or ""))
+            if (nudged or silence >= NUDGE_AFTER) and waiting_on_human(tid):
+                continue    # it waits in their inbox; a stopped worker was released above all the same
             if nudged:
                 if silence >= FREE_AFTER and release(tid, handle, "quiet"):
                     out["released"].append(tid)
@@ -239,14 +275,17 @@ def needs_human() -> list[tuple[str, str, str]]:
 
 def unclaimed() -> list[tuple[int, str, float]]:
     """Threads the board released whose pickup notice is the last word, for longer than
-    UNCLAIMED: nobody eligible claimed them."""
+    UNCLAIMED: nobody eligible claimed them. Not the moderator's own reports: those being
+    released says its bot is down, and it cannot be told so by a thread (#313)."""
     board = board_agent()
     rows = db.conn().execute(
         "SELECT m.thread_id, m.meta, m.created_at FROM messages m"
         " WHERE m.agent_id=? AND m.meta LIKE '%\"thread_released\"%'"
         " AND m.id=(SELECT MAX(x.id) FROM messages x WHERE x.thread_id=m.thread_id)"
         " AND NOT EXISTS (SELECT 1 FROM thread_workers w WHERE w.thread_id=m.thread_id)"
-        " AND NOT EXISTS (SELECT 1 FROM thread_completions c WHERE c.thread_id=m.thread_id)",
+        " AND NOT EXISTS (SELECT 1 FROM thread_completions c WHERE c.thread_id=m.thread_id)"
+        " AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.id=m.thread_id AND r.agent_id=m.agent_id"
+        " AND r.meta LIKE '%\"attention\"%')",
         (board["id"],)).fetchall()
     out = []
     for r in rows:
@@ -263,8 +302,10 @@ def unclaimed() -> list[tuple[int, str, float]]:
 def attend(items: list[tuple[str, str, str]]) -> int | None:
     """What the sweep could not settle goes to the moderator as one thread in the admin
     channel (board thread 8378): (key, mark, line) items, a key being a thread or a bot.
-    Each item once per state (its mark): one already reported in that state is left out,
-    and nothing is posted when nothing is new. Returns the thread id posted, or None."""
+    Each item once per state (its mark, "<state>:<when>"): one already reported in that state is
+    left out, and so is one back in the same state within ATTENTION_QUIET, however often it
+    left. Nothing is posted when nothing is new. An open report younger than that takes the new
+    items as a reply, so one outage is one thread (#313). Returns the thread id, or None."""
     from . import workspaces
     if not items:
         return None
@@ -276,16 +317,23 @@ def attend(items: list[tuple[str, str, str]]) -> int | None:
     if admin is None or workspaces.is_archived(admin["id"]):
         return None
     c = db.conn()
-    fresh, marks = [], {}
+    fresh, marks, quiet = [], {}, {}
     for key, mark, line in items:
-        row = c.execute("SELECT mark FROM progress_attention WHERE key=?", (key,)).fetchone()
+        row = c.execute("SELECT mark, at FROM progress_attention WHERE key=?", (key,)).fetchone()
         if row and row["mark"] == mark:
+            continue
+        if row and row["mark"].split(":")[0] == mark.split(":")[0] and \
+                (db.seconds_since(row["at"]) or ATTENTION_QUIET) < ATTENTION_QUIET:
+            quiet[key] = mark
             continue
         marks[key] = mark
         fresh.append(line)
+    by = board_agent()
+    if quiet:
+        with db._write_lock, c:
+            c.executemany("UPDATE progress_attention SET mark=? WHERE key=?", [(m, k) for k, m in quiet.items()])
     if not fresh:
         return None
-    by = board_agent()
     threads = [int(k[7:]) for k in marks if k.startswith("thread:")]
     bots = [k[4:] for k in marks if k.startswith("bot:")]
     n = len(fresh)
@@ -293,15 +341,24 @@ def attend(items: list[tuple[str, str, str]]) -> int | None:
             + "\n\nFor a thread: who should own it, is that bot running, what is the next step; post it as available"
             " work where its result is judged, or mention the bot whose profile fits. For a bot: tell an operator"
             " what it needs, with `meta.needs` so it waits in their inbox, once.")
+    open_report = next((r["id"] for r in c.execute(
+        "SELECT m.id, m.created_at FROM messages m WHERE m.board_id=? AND m.agent_id=? AND m.id=m.thread_id"
+        " AND json_extract(m.meta,'$.kind')='attention'"
+        " AND NOT EXISTS (SELECT 1 FROM thread_completions t WHERE t.thread_id=m.id) ORDER BY m.id DESC LIMIT 1",
+        (admin["id"], by["id"])) if (db.seconds_since(r["created_at"]) or ATTENTION_QUIET) < ATTENTION_QUIET), None)
+    meta = {"kind": "attention", "threads": threads, "bots": bots}
+    # a report nobody holds: a launcher offers a non-worker only a pickup notice, so say it is one
+    if open_report and not c.execute("SELECT 1 FROM thread_workers WHERE thread_id=?", (open_report,)).fetchone():
+        meta["thread_reopened"] = True
     with db._write_lock, c:
         cur = c.execute(
             "INSERT INTO messages (board_id,agent_id,body,reply_to,thread_id,meta,created_at) VALUES (?,?,?,?,?,?,?)",
-            (admin["id"], by["id"], body, None, None,
-             json.dumps({"kind": "attention", "threads": threads, "bots": bots}), db.now()))
-        mid = cur.lastrowid
-        c.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
+            (admin["id"], by["id"], body, open_report, open_report, json.dumps(meta), db.now()))
+        mid = open_report or cur.lastrowid
+        if not open_report:
+            c.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
         for key, mark in marks.items():
-            c.execute("INSERT OR REPLACE INTO progress_attention (key, mark) VALUES (?,?)", (key, mark))
+            c.execute("INSERT OR REPLACE INTO progress_attention (key, mark, at) VALUES (?,?,?)", (key, mark, db.now()))
     return mid
 
 

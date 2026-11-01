@@ -353,6 +353,7 @@ API_MAP = {
         "DELETE /api/agents/{handle}": "a human deletes a bot: its threads are released, its tokens revoked, it leaves"
                                        " every list; its keeper stops it and removes it from its box",
         "GET /api/me/profile": "a bot's profile as text: role, responsibilities, focus, avoid and the skills to read;"
+                               " X-Skills-Revision (and skills_revision with ?json) changes when any of them is written;"
                                " ?json for a launcher. Read it at the start of every session",
         "GET /api/status": "is the system OK: {ok, attention: [{text, href, where, key}], dismissed, fleet, workspaces, routines};"
                            " for a human also waiting (messages a bot marked meta.needs=<handle>) and mentions",
@@ -384,14 +385,14 @@ API_MAP = {
                                          " names end in _TOKEN, _KEY or _SECRET",
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
         "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
-        "GET /api/skills": "the fleet's skill registry: every skill with its kind (authored or github), revision and"
-                           " the profiles that list it",
+        "GET /api/skills": "the fleet's skill registry: every skill with its revision and the profiles that list it",
         "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields and body; ?revision=N for an older one",
         "PUT /api/skills/{name}": "humans and admin bots create or replace a skill {body, fields?, base_revision, reason};"
-                                  " body may be a whole SKILL.md; a github source without a body is fetched",
+                                  " body may be a whole SKILL.md; bots on it are told at their next prompt",
         "DELETE /api/skills/{name}": "remove a skill {base_revision, reason}; refused while a profile lists it",
+        "POST /api/skills/{name}/reset": "a human gives every bot whose profile lists the skill a new session",
+        "POST /api/profiles/{name}/reset": "a human gives every bot that carries the profile a new session",
         "GET /api/skills/{name}/history": "every revision of a skill, newest first",
-        "POST /api/skills/check": "what a GitHub folder would register {source, ref?} -> name, description, ref_kind, commit",
         "GET /api/profiles": "every profile: role, skills, the bots that carry it and the profiles cloned from it",
         "GET /api/profiles/templates": "the shipped starters a new profile can begin from",
         "GET /api/profiles/{name}": "one profile, with the text a bot of it reads",
@@ -751,7 +752,8 @@ class FleetBot(BaseModel):
     health: str = Field(default="", description="Empty when all is well; else why its last harness run failed,"
                         " or that its harness is logged out (it then holds its messages and waits).", max_length=400)
     outcome: str = Field(default="", description="How its last harness run ended, as bin/bot classifies runs: ok, retry,"
-                         " limited, capacity, logged_out, session_lost, bad_invocation, exhausted or unknown.", max_length=32)
+                         " limited, capacity, logged_out, session_lost, context_overflow, bad_invocation, exhausted"
+                         " or unknown.", max_length=32)
     launcher: str = Field(default="", description="The bin/bot revision the bot runs (git describe).", max_length=64)
     behind: bool | None = Field(default=None, description="Its bin/bot is not the keeper's checkout; null when git"
                                 " cannot tell, or the bot is not running (#238).")
@@ -787,8 +789,6 @@ class FleetReportIn(BaseModel):
     mem_free_mb: int | None = Field(default=None, ge=0, description="Memory available to new work.")
     os: str = Field(default="", max_length=80)
     bots: list[FleetBot] = Field(default_factory=list, max_length=500)
-    bot_skills: list[str] = Field(default_factory=list, max_length=50, description="The box's BOT_SKILLS sources,"
-                                  " deprecated in favour of the registry; the fleet page says which are not on it yet.")
     credentials: list[FleetCredential] = Field(default_factory=list, max_length=20, description="What bots here"
                                                " need, as the keeper last checked it. Secrets themselves never come here.")
     operators: list[str] = Field(default_factory=list, max_length=50, description="Sent by keepers from before"
@@ -1080,9 +1080,8 @@ def fleet_secret_values(agent: dict = Depends(current_agent)) -> dict:
 
 class SkillIn(BaseModel):
     body: str = Field(default="", max_length=registry.MAX_BODY, description="The instructions, or a whole SKILL.md"
-                      " with its frontmatter. Empty for a github skill: its SKILL.md is fetched from the source.")
-    fields: dict[str, Any] = Field(default_factory=dict, description="description; kind (authored|github); for"
-                                   " github: source (a GitHub folder URL) and ref.")
+                      " with its frontmatter.")
+    fields: dict[str, Any] = Field(default_factory=dict, description="description, when the body carries no frontmatter.")
     base_revision: int = Field(ge=0, description="The revision you read; 0 for a new skill.")
     reason: str = Field(default="", max_length=500)
 
@@ -1090,11 +1089,6 @@ class SkillIn(BaseModel):
 class SkillDeleteIn(BaseModel):
     base_revision: int = Field(ge=1)
     reason: str = Field(default="", max_length=500)
-
-
-class SkillCheckIn(BaseModel):
-    source: str = Field(max_length=400, description="https://github.com/<owner>/<repo>/tree/<ref>/<path>")
-    ref: str | None = Field(default=None, max_length=120)
 
 
 class SkillRef(BaseModel):
@@ -1142,14 +1136,6 @@ def skills_list(_: dict | None = Depends(optional_agent)) -> dict:
     return {"skills": registry.list_skills()}
 
 
-@app.post("/api/skills/check", tags=["skills"])
-async def skills_check(body: SkillCheckIn, agent: dict = Depends(current_agent)) -> dict:
-    """What adding a GitHub folder would register: the name and description its SKILL.md
-    carries, whether the ref follows a branch, and the commit it is at. Nothing is stored."""
-    _registry_call(registry.require_writer, agent)
-    return await asyncio.to_thread(_registry_call, registry.check_source, body.source, body.ref)
-
-
 @app.get("/api/skills/{name}/history", tags=["skills"])
 def skill_history(name: str, _: dict | None = Depends(optional_agent)) -> dict:
     return {"name": name.lower(), "revisions": _registry_call(registry.skill_history, name)}
@@ -1169,13 +1155,34 @@ def skill_get(name: str, request: Request, revision: int | None = Query(None, ge
 
 
 @app.put("/api/skills/{name}", tags=["skills"])
-async def skill_put(name: str, body: SkillIn, agent: dict = Depends(current_agent)) -> dict:
-    """Create or replace a skill: humans and admin bots. Running sessions are not told;
-    a bot reads the registry when its next session starts."""
+def skill_put(name: str, body: SkillIn, agent: dict = Depends(current_agent)) -> dict:
+    """Create or replace a skill: humans and admin bots. A running bot is not told here:
+    its launcher sees X-Skills-Revision move at its next prompt and says so (#328)."""
     _registry_call(registry.require_writer, agent)
-    skill = await asyncio.to_thread(_registry_call, registry.put_skill, name, body.body, body.fields,
-                                    body.base_revision, body.reason, agent)
+    skill = _registry_call(registry.put_skill, name, body.body, body.fields, body.base_revision, body.reason, agent)
     return {"skill": skill}
+
+
+def _reset_all(handles: list[str], agent: dict) -> dict:
+    """fleet.reset() for each bot, as a single reset is: {reset: [handles], skipped: {handle: why}}."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human resets a bot from the board")
+    out: dict = {"reset": [], "skipped": {}}
+    for h in handles:
+        why = fleet.reset(h, agent["handle"])
+        if why:
+            out["skipped"][h] = why
+        else:
+            out["reset"].append(h)
+    return out
+
+
+@app.post("/api/skills/{name}/reset", tags=["skills"])
+def skill_reset(name: str, agent: dict = Depends(current_agent)) -> dict:
+    """A human gives every bot whose profile lists the skill a new session, each as POST
+    /api/fleet/bots/{handle}/reset does: when idle, a stopped bot at its next start."""
+    _registry_call(registry.get_skill, name)
+    return _reset_all(registry.bots_of_skill(name), agent)
 
 
 @app.delete("/api/skills/{name}", tags=["skills"])
@@ -1187,6 +1194,13 @@ def skill_delete(name: str, body: SkillDeleteIn, agent: dict = Depends(current_a
 @app.get("/api/profiles", tags=["profiles"])
 def profiles_list(_: dict | None = Depends(optional_agent)) -> dict:
     return {"profiles": registry.list_profiles()}
+
+
+@app.post("/api/profiles/{name}/reset", tags=["profiles"])
+def profile_reset(name: str, agent: dict = Depends(current_agent)) -> dict:
+    """A human gives every bot that carries the profile a new session, as for a skill."""
+    _registry_call(registry.get_profile, name)
+    return _reset_all(registry.bots_by_profile().get(name.lower(), []), agent)
 
 
 @app.get("/api/profiles/templates", tags=["profiles"])
@@ -1222,12 +1236,14 @@ def profile_delete(name: str, agent: dict = Depends(current_agent)) -> dict:
 def my_profile(request: Request, agent: dict = Depends(current_agent)):
     """The profile this bot was added with, rendered for reading at the start of a
     session: role, responsibilities, focus, avoid, and the skills to read, mandatory
-    ones first. `?json` gives the structured form a launcher installs from. A bot
-    without a profile is told so, in one line."""
+    ones first. `?json` gives the structured form a launcher writes the skills from. A bot
+    without a profile is told so, in one line. X-Skills-Revision (skills_revision in the
+    JSON) changes whenever one of the profile's skills is written (#328)."""
     profile = registry.profile_of(agent["handle"])
+    rev = registry.skills_revision(profile)
     if "json" in request.query_params:
-        return {"profile": profile, "skills": registry.resolve(profile) if profile else []}
-    return PlainTextResponse(registry.profile_text(profile, str(request.base_url)))
+        return {"profile": profile, "skills": registry.resolve(profile) if profile else [], "skills_revision": rev}
+    return PlainTextResponse(registry.profile_text(profile, str(request.base_url)), headers={"X-Skills-Revision": rev})
 
 
 # ------------------------------------------------------------- workspaces

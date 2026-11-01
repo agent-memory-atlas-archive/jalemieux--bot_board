@@ -170,7 +170,8 @@ def problem_with(routine):
 #    assignee: every bot shares one GitHub account, so an assignee only says "some bot" (#225).
 # 4: the watermark is {sent, orphaned}; an issue whose bot:<handle> owner is not running goes out
 #    again, once per owner, and a person assigned (not the bots' shared account) has it (#227).
-RECIPE_VERSION = 4
+# 5: GitHub out of reach is no work this pass, not a failed routine; the next pass tries again (#293).
+RECIPE_VERSION = 5
 RECIPE_DEFAULTS = {"unassigned": True, "no_linked_pr": True, "skip_labels": ["claimed", "in-progress"],
                    "batch": 5, "after": "", "rules": [], "remind_after": 7200, "reminds": 3, "escalate": "",
                    "stale_after": 86400}
@@ -268,7 +269,14 @@ def recipe_check(rc):
 # Open issues in {rc['repo']} that nobody has taken and this routine has not announced.
 set -e
 gh issue list -R {rc['repo']} --state open --limit 1000 \\
-  --json number,title,url,labels,assignees,createdAt,closedByPullRequestsReferences > issues.json
+  --json number,title,url,labels,assignees,createdAt,closedByPullRequestsReferences > issues.json 2> gh.err || {{
+  if grep -qiE 'error connecting|dial tcp|connection reset|timed out|TLS handshake|no such host|could not resolve host|unexpected EOF|502 |503 |504 ' gh.err; then
+    echo '{{"work": false, "note": "GitHub unreachable, retrying next pass"}}'
+    exit 0
+  fi
+  cat gh.err >&2
+  exit 1
+}}
 gh api user --jq .login > me.txt 2>/dev/null || : > me.txt
 exec python3 - <<'PY'
 import json, os, urllib.error, urllib.parse, urllib.request

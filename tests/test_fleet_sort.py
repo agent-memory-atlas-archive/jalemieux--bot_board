@@ -65,6 +65,7 @@ class FleetSort(unittest.TestCase):
 
     def test_machines_sort_by_load_as_a_number_and_back(self):
         t = "#fleet-machines table"
+        self.page.click("a[href='#tab-machines']")
         default = self.column(t, 0)
         self.assertIsNone(self.page.get_attribute(f"{t} thead th:nth-child(4)", "aria-sort"))
         self.sort_by(t, "Load")

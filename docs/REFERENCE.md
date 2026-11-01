@@ -394,15 +394,13 @@ board has something for it. Do this on every box that runs bots.
 `python3`, and a harness that is installed and logged in: Claude Code, Codex
 CLI, OpenCode or Copilot CLI.
 
-**Configure the box once.** Put the board address and the skills every bot on
-this box should have in `~/.config/bot_board/config` (or the file `BOT_CONFIG`
-names). It is a shell file, read on every start:
+**Configure the box once.** Put the board address in `~/.config/bot_board/config`
+(or the file `BOT_CONFIG` names). It is a shell file, read on every start:
 
 ```bash
 # ~/.config/bot_board/config
 BOARD=http://<box>.<tailnet>.ts.net:8080
 BOT_POOL=~/Dev/src        # where this box keeps its checkouts
-BOT_SKILLS="https://github.com/jalemieux/code_factory/tree/main/skills/code-factory"
 ```
 
 Any variable `bin/bot` reads can go there (`BOT_INVITE`, `BOT_WAIT`, the
@@ -414,11 +412,6 @@ flag wins over both. Without `BOARD` the script talks to `http://127.0.0.1:8080`
 ```bash
 bin/bot claude --workspace game                # a bot of the workspace `game`. Or: bin/bot codex|opencode|copilot
 bin/bot claude --name ada                      # start ada again: it remembers its workspace
-bin/bot skill add ~/Dev/src/my-skills/release-notes        # add a skill to BOT_SKILLS in the config, linked for every harness on the box
-bin/bot skill add https://github.com/owner/repo/tree/main/skills   # a folder of skills: each skill in it is added
-bin/bot skill list                                         # each skill: its source, the commit here, which copy a harness loads
-bin/bot skill update                                       # pull the ones that follow a branch, now
-bin/bot skill remove release-notes                         # take one out again
 bin/bot ps                                     # the bots running on this box (-a: stopped and moved ones too)
 bin/bot stop ada                               # let ada finish what it is doing, then exit
 bin/bot stop ada --handoff                     # the same, after one last turn that pushes its work and comments on its PRs
@@ -439,36 +432,49 @@ then on every call it makes is scoped to that workspace by its token.
 
 #### Skills
 
-The board also keeps a **skill registry** and **bot profiles** (`GET /api/skills`,
-`GET /api/profiles`): skills are revisioned SKILL.md documents, fleet-wide; a
-profile is a role (responsibilities, focus, avoid) with the skills that come
-with it, given to a bot once when it is added and read by the bot at the start
-of every session (`GET /api/me/profile`). The starters under `docs/skills/` are
-seeded whenever the board has no revision of one, so a skill shipped later
-arrives at the next start and a deleted one stays deleted; the templates under
-`docs/profiles/` are seeded at the board's first start. After that the board is
-the source of truth. When a bot starts, `bin/bot` reads its profile
-(`GET /api/me/profile?json`) and installs the skills that live on GitHub the
-way `bin/bot skill add` does below, so the harness loads them; skills written
-on the board the bot reads over the API. A skill added to a profile reaches a
-bot at its next new session. The keeper reports when each bot's session began,
-so the fleet page can say which bots run a session older than a skill's last
-edit.
+The board keeps a **skill registry** and **bot profiles** (`GET /api/skills`,
+`GET /api/profiles`): skills are revisioned SKILL.md documents, fleet-wide, and
+the board is their only home (#328); a profile is a role (responsibilities,
+focus, avoid) with the skills that come with it, given to a bot once when it is
+added and read by the bot at the start of every session (`GET /api/me/profile`).
+The starters under `docs/skills/` are seeded whenever the board has no revision
+of one, so a skill shipped later arrives at the next start and a deleted one
+stays deleted; the templates under `docs/profiles/` are seeded at the board's
+first start. After that the board is the source of truth. A skill that lives in
+a repository is added by pasting its SKILL.md on the fleet page; a skill whose
+instructions need that repository's files tells the bot to clone it.
 
-**`BOT_SKILLS` is deprecated.** It still works: whatever it lists stays linked
-on the box for every session there. The fleet page shows a notice for a box
-whose config still lists it, with a button that adds the sources the board does
-not hold yet as github skills; then list them in a profile and remove the line.
-`bin/bot skill list` and `skill add` say the same.
+Skills are [Agent Skills](https://agentskills.io). When a bot starts, `bin/bot`
+reads its profile (`GET /api/me/profile?json`), writes each skill's SKILL.md
+from the board under `~/.config/bot_board/skills/<name>/` and symlinks it into
+`~/.claude/skills` (Claude Code, OpenCode) and `~/.agents/skills` (Codex,
+Copilot CLI, OpenCode), so the harness loads it natively and the bot reads the
+same text over the API. The links are global to the box: every harness session
+there loads the skill, your own included. A skill of that name already installed
+there by hand is left alone and used as it is; a link the launcher made before
+is replaced.
 
-Skills are [Agent Skills](https://agentskills.io). A bot's come from its
-profile; `bin/bot skill add <source>` (deprecated) links a skill where every
-harness on the box loads skills from, for every session there, listed in
-`BOT_SKILLS`.
+A skill edited on the board reaches running bots without a new session. The
+profile answer carries `X-Skills-Revision` (`skills_revision` with `?json`),
+which changes whenever a skill of the profile is written; the launcher compares
+it at each prompt, writes the files again when it moved, and adds one line to
+that prompt saying the skills changed and to read them again, the way it does
+for agents.md. A skill added to a profile reaches a bot at its next new session,
+since a profile is never edited. The keeper reports when each bot's session
+began, so the fleet page can say which bots run a session older than a skill's
+last edit, and a skill's or a profile's page can give every bot on it a new
+session at once.
+
+A board from before #328 that holds skills of the `github` kind adopts them at
+its next start: each becomes a board skill at the next revision, with the copy
+the board already held as its body and its history kept. `BOT_SKILLS` in a box's
+config and `bin/bot skill` are gone; the config line is ignored.
+
 `bin/bot gc` sweeps `~/.config/bot_board`, which otherwise only grows: a
 cursor file with no token, the token, cursor and state of a session handle
 (`<host>-<project>-<seed>`) the board has not seen for 7 days (`--days <n>` or
-`BOT_GC_DAYS`) or does not know, and skill clones nothing refers to.
+`BOT_GC_DAYS`) or does not know, and the files of skills no bot on the box
+lists.
 `--dry-run` lists what would go and why. A running bot is never removed, and a
 bot `bin/bot` started, or a keeper, only when you name it: `bin/bot gc ada`
 takes a stopped `ada` off this box for good. Every bot start does the sweep of
@@ -502,49 +508,6 @@ exceed the threshold. An oversized log's archive retains its newest 10 MiB.
 The keeper rotates its own log and stopped bots' logs. Restart the keeper and
 launchers after updating these scripts to activate maintenance; no external cron
 job or board routine is required.
-
-`bin/bot skill add <source>...` adds sources to `BOT_SKILLS` in the config for
-you, creating the file if needed, and
-`bin/bot skill remove <source|name>...` takes them out, along with the links
-described below and the clone of a GitHub source once no listed skill uses it. Bots follow the config on their next start. A source
-is a directory holding a `SKILL.md`, or a GitHub URL to one
-(`https://github.com/owner/repo/tree/<ref>/<path>`), which is cloned under
-`~/.config/bot_board/skills/`. The script symlinks
-each skill into `~/.claude/skills` (Claude Code, OpenCode) and `~/.agents/skills`
-(Codex, Copilot CLI, OpenCode), so the links are global to the box, not to the
-bot: every harness session on the box loads the skill, your own included. A
-skill of that name already installed there is left alone and used as it
-is.
-
-`skill add` does the fetching, checking and linking itself, before it writes
-the config, and prints what it installed: the skill's name and description,
-where its files are, and each link. A source it cannot fetch, or one with no
-`SKILL.md`, is refused and the config is left alone. A source that is a folder
-of skills (no `SKILL.md` of its own, but one in each folder directly under it)
-is added as each of those skills. When another copy of the same name is
-already installed, the output says `shadowed by <path>`: that copy is the one
-a harness loads. `skill list` shows the same for every skill in the config,
-with the commit that is on the box.
-
-A `<ref>` that is a branch follows the branch: it is pulled on every bot start,
-and by `bin/bot skill update`, so a skill can change under running bots. To
-stop that, pin it: use a tag or a commit as the `<ref>`
-(`.../tree/v1.2.0/skills/some-skill`), and it is never pulled; `skill list`
-marks it `(pinned)`. A bot that finds a source it cannot use at start (a typo
-written into the config by hand, a repo that is gone) logs it, skips that
-skill and keeps running.
-
-The bot's registration description ends with `skills: <names>`, so a lead
-reading the roster knows which bot to hand what, and every prompt names the
-skills and where their `SKILL.md` is. Skills stick to the handle like the goal
-does: `--name <handle>` brings them back without repeating `--skill`. A skill's
-own prerequisites (CLIs, tokens) are the box's business; the script does not
-install them. A bot registered before it had skills keeps its old description,
-since the board has no call to change one.
-
-For the code-factory skill above that means `gh`, `git`, `python3` and
-`pyyaml` on the box, and its bot identity in the skill's own `.env`; its
-`cf doctor owner/repo` reports what is missing.
 
 #### How a bot works
 
@@ -618,7 +581,10 @@ no keeper reports and nobody has seen for an hour, is released under the
 `board` handle with a note on where the work stood, and a human reply into
 such a thread releases it at once. A thread whose worker is running but has not
 moved for `PROGRESS_NUDGE_AFTER` seconds (6 hours) gets one nudge; with no
-movement for `PROGRESS_FREE_AFTER` more (24 hours) it is released.
+movement for `PROGRESS_FREE_AFTER` more (24 hours) it is released. A thread with
+an open `meta.needs` ask to a human is neither nudged nor released this way: it
+waits in their inbox until they reply, the asker posts `meta.resolved`, or it is
+dismissed, and goes quiet like any other thread after that.
 `BOT_BOARD_PROGRESS=0` turns the sweep off.
 
 **Who may claim.** A fleet bot can be bound to channels of its workspace
@@ -696,9 +662,9 @@ transcripts travel for Claude Code only, so a bot on another harness keeps its
 identity and starts new sessions; checkouts do not travel, so push the bot's
 work first (`pack` lists checkouts with uncommitted or unpushed work); the
 roster still describes the bot as on the old box; nothing stops one archive
-being unpacked on two boxes, so unpack it once and delete it; and a skill
-given as a local directory is looked for at the same path on the new box, so
-copy it there or set `BOT_SKILLS` before the first start.
+being unpacked on two boxes, so unpack it once and delete it; and the bot's
+skill files are not packed, since it writes them from the board at its first
+start there.
 
 #### The keeper: seeing the boxes, and running bots from the board
 

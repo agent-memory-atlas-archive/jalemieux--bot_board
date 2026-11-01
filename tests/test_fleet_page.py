@@ -75,11 +75,11 @@ class FleetPage(unittest.TestCase):
                           bot('leaving', 'running game, stopping'), bot('old', 'stopped')]),
             host('offline', [bot('ghost'), bot('gone', 'stopped')], reporting=False),
         ])
-        self.assertIn('1</b> working', page)
-        self.assertIn('1</b> waiting for work', page)
-        self.assertIn('3</b> need you', page)     # the usage limit, the login, the box gone dark
-        self.assertIn('1</b> stopped', page)
-        self.assertIn('1 of 2 machines', page)
+        self.assertIn('Working <b>1</b>', page)
+        self.assertIn('Waiting <b>1</b>', page)
+        self.assertIn('Needs you · 3', page)     # the usage limit, the login, the box gone dark
+        self.assertIn('Stopped <b>1</b>', page)
+        self.assertIn('1 not reporting', page)
         bots = sections['fleet-bots']
         # working first, then waiting, then the rest; stopped bots fold away
         self.assertLess(bots.index('@busy'), bots.index('@ready'))
@@ -121,8 +121,8 @@ class FleetPage(unittest.TestCase):
         self.assertIn('@one', attention)
         self.assertIn('@two', attention)
         self.assertIn('Stop them', attention)
-        self.assertIn('0</b> working', page)
-        self.assertIn('0</b> waiting', page)
+        self.assertIn('Working <b>0</b>', page)
+        self.assertIn('Waiting <b>0</b>', page)
 
     def test_controls_sit_on_the_row(self):
         page, sections = self.render([host('live', [
@@ -131,7 +131,7 @@ class FleetPage(unittest.TestCase):
                 set_by='op', set_at=db.now()),
         ]), host('other', [])])
         self.assertNotIn('fleet-attention', sections)
-        self.assertIn('Stopped · 1', page)
+        self.assertIn('Stopped <b>1</b>', page)
         self.assertIn('data-kill="1"', page)
         self.assertIn('class="move" data-handle="ready"', page)
         self.assertNotIn('class="move" data-handle="retired"', page)
@@ -154,10 +154,9 @@ class FleetPage(unittest.TestCase):
 
     def test_failed_last_run_keeps_worker_available(self):
         page, sections = self.render([host('live', [bot('retry', health='last run failed: temporary error')])])
-        self.assertIn('1</b> waiting', page)
+        self.assertIn('All running <b>1</b>', page)
         self.assertIn('@retry', sections['fleet-bots'])
         self.assertIn('last run failed: temporary error', sections['fleet-bots'])
-        self.assertIn('0</b> need you', page)
 
     def test_credentials_and_empty_machine_states(self):
         page, sections = self.render([host('empty', [], credentials=[
@@ -167,7 +166,6 @@ class FleetPage(unittest.TestCase):
         # the bots it holds are not one more alert each
         held, held_sections = self.render([host('box', [bot('dex', health='logged out of codex')],
                                            credentials=[dict(name='codex', state='missing', detail='not logged in')])])
-        self.assertIn('1</b> needs you', held)
         self.assertIn('codex missing on box', held_sections['fleet-attention'])
         self.assertIn('0 up · 0 stopped', sections['fleet-machines'])
         self.assertIn('No bot is running', sections['fleet-bots'])

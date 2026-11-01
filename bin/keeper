@@ -474,9 +474,7 @@ def snapshot():
     except OSError:
         load = None
     return {"cores": os.cpu_count(), "load": load, "mem_total_mb": total, "mem_free_mb": free,
-            "os": f"{platform.system()} {platform.release()}"[:80], "bots": bots(),
-            # the box's BOT_SKILLS, deprecated: /fleet says which are not on the board yet
-            "bot_skills": setting("BOT_SKILLS").split()[:50]}
+            "os": f"{platform.system()} {platform.release()}"[:80], "bots": bots()}
 
 
 class Handover:

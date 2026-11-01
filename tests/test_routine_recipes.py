@@ -58,7 +58,7 @@ class Definitions(unittest.TestCase):
         self.assertEqual(cli.problem_with(old), "")
 
     # What recipe_check and recipe_prompt write for one fixed recipe, per RECIPE_VERSION (#242).
-    WRITER = {4: "fa15eb3fe87753c106b63248b97ec8d6ee0d0bee733c18d1e9eee8461ce62670"}
+    WRITER = {5: "89b05609a7b8f8a5d7e7e230c344874340d3d38d374cc6d95548c2c2f5889be0"}
 
     def test_the_recipe_writer_does_not_change_without_a_new_recipe_version(self):
         cli = load_cli()
@@ -355,6 +355,34 @@ class Recipes(unittest.TestCase):
         got = json.loads(out.stdout)
         self.assertEqual([i["number"] for i in got["items"]], [62], out.stderr)
         self.assertEqual(got["watermark"], {"sent": [61, 62], "orphaned": {}})
+
+    def run_with_failing_gh(self, said):
+        cli = load_cli()
+        rc = cli.recipe_of({"type": "github-issues", "repo": "o/game", "workspace": "game"})
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "gh"), "w") as fh:
+                fh.write(f"#!/bin/sh\necho '{said}' >&2\nexit 1\n")
+            os.chmod(os.path.join(tmp, "gh"), 0o755)
+            return subprocess.run(["sh", "-c", cli.recipe_check(rc)], capture_output=True, text=True, cwd=tmp,
+                                  env=dict(os.environ, HOME=self.home, BOARD=self.board, ROUTINE_WATERMARK="[61]",
+                                           PATH=tmp + os.pathsep + os.environ["PATH"]))
+
+    def test_github_out_of_reach_is_no_work_and_any_other_gh_error_still_fails(self):
+        # #293: one connection error used to stop the routine until a human said yes again
+        for said in ("error connecting to api.github.com", "HTTP 503 Service Unavailable", "net/http: TLS handshake timeout"):
+            with self.subTest(said=said):
+                out = self.run_with_failing_gh(said)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                got = json.loads(out.stdout)
+                self.assertFalse(got["work"])
+                self.assertNotIn("watermark", got)      # a pass with no work leaves the runner's as it is
+        # not a passing trouble: a missing repo also says "could not resolve", and must stop the routine
+        for said, shown in (("HTTP 401: Bad credentials", "Bad credentials"),
+                            ("GraphQL: Could not resolve to a Repository with the name o/game. (repository)", "Could not resolve")):
+            with self.subTest(said=said):
+                out = self.run_with_failing_gh(said)
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn(shown, out.stderr)
 
     def test_a_workspace_that_goes_away_stops_the_routine_with_the_reason(self):
         self.api("POST", "/api/workspaces", {"slug": "gone", "name": "Gone", "purpose": "soon archived"}, self.human)

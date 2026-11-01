@@ -1,26 +1,26 @@
 """The skill registry and bot profiles: what a bot is for, and what it knows how to do.
 
-Skills are fleet-wide, revisioned documents: a SKILL.md authored on the board, or one
-that points at a folder on GitHub (the board keeps a copy of its SKILL.md so every bot
-can read it over the API). A workspace is a context fence, not an ability fence, so
-skills are not scoped to one.
+Skills are fleet-wide, revisioned documents: a SKILL.md written on the board, which is
+their only home (#328). A bot reads them over the API, and its launcher writes them where
+its harness loads skills from and tells it when one changes. A workspace is a context
+fence, not an ability fence, so skills are not scoped to one.
 
 A profile is a role: name, role line, responsibilities, focus, avoid, and the skills
 that come with it, some mandatory. Profiles are write-once: created, cloned, deleted,
 never edited, so a bot's role cannot drift under it. A bot gets its profile when a
 human adds it (fleet_bots.profile) and keeps it for life; a new session reads it with
-GET /api/me/profile. Nothing is pushed into a running session.
+GET /api/me/profile. Nothing is pushed into a running session: the launcher polls, and
+skills_revision() is what it compares.
 
 The files under docs/skills/ and docs/profiles/ are seed: loaded once, at the first
 start of a board without a registry; after that the board is the source of truth.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 
 from . import db
 
@@ -29,9 +29,7 @@ SKILLS_DIR = os.path.join(ROOT, "docs", "skills")
 PROFILES_DIR = os.path.join(ROOT, "docs", "profiles")
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
-KINDS = ("authored", "github")
 MAX_BODY = 200_000
-GITHUB_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/tree/([^/]+)(?:/(.*?))?)?/?$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
@@ -83,6 +81,7 @@ def init() -> None:
                 c.execute("UPDATE profiles SET specialized=1 "
                           "WHERE name=? AND lower(origin)=lower(name) AND specialized=0", (t["name"],))
         c.commit()
+    adopt_github_skills()
     seed()
 
 
@@ -161,10 +160,7 @@ def _quote(v) -> str:
 
 def skill_text(skill: dict) -> str:
     """The skill as a SKILL.md: frontmatter, then the instructions."""
-    lines = ["---", f"name: {skill['name']}", f"description: {_quote(skill.get('description', ''))}"]
-    if skill.get("kind") == "github":
-        lines += [f"kind: github", f"source: {skill.get('source', '')}", f"ref: {skill.get('ref') or 'main'}"]
-    lines.append("---")
+    lines = ["---", f"name: {skill['name']}", f"description: {_quote(skill.get('description', ''))}", "---"]
     return "\n".join(lines) + "\n\n" + (skill.get("body") or "").strip() + "\n"
 
 
@@ -196,8 +192,7 @@ def _check_name(name: str) -> str:
 
 def _skill(row, body: bool = True) -> dict:
     fields = json.loads(row["fields"] or "{}")
-    out = {"name": row["name"], "description": fields.get("description", ""), "kind": fields.get("kind", "authored"),
-           "source": fields.get("source", ""), "ref": fields.get("ref", ""), "revision": row["revision"],
+    out = {"name": row["name"], "description": fields.get("description", ""), "revision": row["revision"],
            "reason": row["reason"], "author": row["author"] or "board", "updated_at": row["created_at"],
            "deleted": bool(row["deleted"])}
     if body:
@@ -225,39 +220,30 @@ def current_revision(name: str) -> int:
 
 
 def put_skill(name: str, body: str, fields: dict | None, base_revision: int, reason: str,
-              agent: dict | None, fetch=None) -> dict:
+              agent: dict | None) -> dict:
     """Create or replace a skill. `body` may be a whole SKILL.md: its frontmatter is read
-    into the fields. A github skill without a body gets its SKILL.md fetched from the
-    source, so bots can read it from the board. `base_revision` is the revision the
-    writer read, 0 for a new skill; anything else is a Conflict."""
+    into the fields. `base_revision` is the revision the writer read, 0 for a new skill;
+    anything else is a Conflict."""
     name = _check_name(name)
     fields = dict(fields or {})
     body = body or ""
     if body.lstrip().startswith("---"):
         front, body = parse_front(body)
-        front.pop("skills", None)
+        for k in ("skills", "kind", "source", "ref"):     # a SKILL.md an older board served carries the last three
+            front.pop(k, None)
         fields = {**front, **fields}
     if fields.get("name") and str(fields["name"]).strip().lower() != name:
         raise ValueError(f"the frontmatter names {fields['name']}, the path {name}: they must agree")
-    kind = (fields.get("kind") or ("github" if fields.get("source") else "authored"))
-    if kind not in KINDS:
-        raise ValueError(f"kind: one of {', '.join(KINDS)}")
-    source, ref = "", ""
-    if kind == "github":
-        source, ref = _check_source(fields.get("source") or "", fields.get("ref"))
-        if not body.strip():
-            fetched = (fetch or fetch_skill)(source, ref)
-            front, body = parse_front(fetched["text"])
-            if not fields.get("description"):
-                fields["description"] = front.get("description", "")
+    if fields.get("source") or fields.get("kind") not in (None, "", "authored"):
+        raise ValueError("skills live on the board only: paste the SKILL.md as the body (#328)")
     if not body.strip():
-        raise ValueError("the body cannot be empty: write the instructions, or name a GitHub source")
+        raise ValueError("the body cannot be empty: write the instructions")
     if len(body.encode("utf-8")) > MAX_BODY:
         raise ValueError(f"the body exceeds {MAX_BODY} bytes")
     description = str(fields.get("description") or "").strip()
     if not description:
         raise ValueError("a skill needs a description: one line saying when to use it")
-    stored = {"description": description[:500], "kind": kind, "source": source, "ref": ref}
+    stored = {"description": description[:500]}
     with db._write_lock, db.conn() as c:
         current = current_revision(name)
         if base_revision != current:
@@ -306,110 +292,34 @@ def skill_revision(name: str, revision: int) -> dict:
     return _skill(row)
 
 
-# --------------------------------------------------------- github sources
+# ------------------------------------------------- skills that came from GitHub
 
-# The links people copy for a skill, each read as its folder: GitHub's page for the
-# SKILL.md (blob), the raw file, and either without https://.
-_BLOB_RE = re.compile(r"^(?:https?://)?github\.com/([^/]+)/([^/]+)/(?:blob|tree)/([^/]+)/(?:(.*?)/)?SKILL\.md/?$", re.I)
-_RAW_RE = re.compile(r"^(?:https?://)?raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(?:(.*?)/)?SKILL\.md$", re.I)
-
-
-def _folder_url(source: str) -> str:
-    """Any GitHub link to a skill, as the folder URL GITHUB_RE takes."""
-    source = (source or "").strip()
-    m = _BLOB_RE.match(source) or _RAW_RE.match(source)
-    if m:
-        owner, repo, ref, path = m.groups()
-        return f"https://github.com/{owner}/{repo}/tree/{ref}" + (f"/{path}" if path else "")
-    return "https://" + source if source.lower().startswith("github.com/") else source
-
-
-def _check_source(source: str, ref: str | None) -> tuple[str, str]:
-    m = GITHUB_RE.match(_folder_url(source))
-    if not m:
-        raise ValueError("not a GitHub link to a skill: paste its folder (https://github.com/<owner>/<repo>/tree/<ref>/<path>)"
-                         " or its SKILL.md")
-    owner, repo, url_ref, path = m.groups()
-    ref = (ref or url_ref or "main").strip()
-    canonical = f"https://github.com/{owner}/{repo}/tree/{ref}" + (f"/{path.strip('/')}" if path else "")
-    return canonical, ref
-
-
-def ref_kind(ref: str) -> str:
-    """pinned: a commit or a version tag, never pulled again; branch: pulled at every bot start."""
-    return "pinned" if re.fullmatch(r"[0-9a-f]{7,40}|v?\d+(\.\d+)+[\w.-]*", ref or "") else "branch"
-
-
-def _http(url: str, accept: str = "") -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "bot_board", **({"Accept": accept} if accept else {})})
-    with urllib.request.urlopen(req, timeout=10) as resp:    # noqa: S310 - GitHub only, by the regex above
-        return resp.read().decode("utf-8", "replace")
-
-
-def fetch_skill(source: str, ref: str) -> dict:
-    """The SKILL.md at a GitHub folder, and the commit the ref is at now (best effort)."""
-    m = GITHUB_RE.match(source)
-    owner, repo, _, path = m.groups()
-    raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/" + (f"{path.strip('/')}/" if path else "") + "SKILL.md"
-    try:
-        text = _http(raw)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:    # GitHub answers 404 for a private repo too: the board reads GitHub without a token
-            raise ValueError(f"{source} is not available: there is no SKILL.md there, or the repository is private"
-                             " (the board can only read public repositories; paste the skill below instead)") from exc
-        raise ValueError(f"no SKILL.md at {source}: {exc.reason}") from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise ValueError(f"no SKILL.md at {source}: {getattr(exc, 'reason', exc)}") from exc
-    commit = ""
-    try:
-        commit = _http(f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}", "application/vnd.github.sha")[:12]
-    except (urllib.error.URLError, OSError, ValueError):
-        pass
-    return {"text": text, "commit": commit}
-
-
-def check_source(source: str, ref: str | None = None, fetch=None) -> dict:
-    """What adding this source would register: its name and description from the
-    SKILL.md there, the ref and whether it follows a branch, and the commit it is at."""
-    source, ref = _check_source(source, ref)
-    fetched = (fetch or fetch_skill)(source, ref)
-    front, body = parse_front(fetched["text"])
-    name = str(front.get("name") or "").strip().lower()
-    if not NAME_RE.match(name):
-        raise ValueError(f"the SKILL.md at {source} has no usable name in its frontmatter")
-    out = {"name": name, "description": str(front.get("description") or ""), "source": source, "ref": ref,
-           "ref_kind": ref_kind(ref), "commit": fetched.get("commit", ""), "bytes": len(body.encode("utf-8"))}
-    existing = db.conn().execute(_CURRENT + " AND s.name=? AND s.deleted=0", (name,)).fetchone()
-    if existing:
-        out["exists"] = {"revision": existing["revision"], **{k: v for k, v in _skill(existing, body=False).items()
-                                                               if k in ("kind", "source", "ref")}}
-    return out
-
-
-def unregistered(sources: list[str]) -> list[dict]:
-    """Of a box's BOT_SKILLS, the ones the registry does not hold: {source, addable}, where
-    addable is a GitHub folder the fleet page can add with one click; a local directory is
-    not, and is written on the board instead."""
-    have = set()
-    for r in db.conn().execute(_CURRENT + " AND s.deleted=0"):
-        src = json.loads(r["fields"] or "{}").get("source") or ""
-        if src:
-            have.add(src.lower())
-    out = []
-    for src in sources or []:
-        try:
-            canonical, _ = _check_source(src, None)
-        except ValueError:
-            out.append({"source": src, "addable": False})
+def adopt_github_skills() -> None:
+    """A skill that once pointed at a folder on GitHub (the `github` kind, before #328) becomes
+    a board skill at the next revision, with the SKILL.md the board already holds as its body.
+    Its history stays. Runs at every start; a board with none left does nothing."""
+    c = db.conn()
+    rows = c.execute(_CURRENT + " AND s.deleted=0 AND s.fields LIKE '%\"github\"%'").fetchall()
+    for r in rows:
+        fields = json.loads(r["fields"] or "{}")
+        if fields.get("kind") != "github":
             continue
-        if canonical.lower() not in have:
-            out.append({"source": canonical, "addable": True})
-    return out
+        why = f"board-only skills (#328): the GitHub source {fields.get('source') or ''} is dropped, the copy kept"
+        with db._write_lock, db.conn() as w:
+            w.execute("INSERT INTO skills(name,revision,fields,body,reason,author_id,created_at) VALUES (?,?,?,?,?,?,?)",
+                      (r["name"], r["revision"] + 1, json.dumps({"description": fields.get("description", "")}),
+                       r["body"], why.strip(), None, db.now()))
 
 
 # ----------------------------------------------------------------- profiles
 
 FIELDS = ("role", "responsibilities", "focus", "avoid")
+
+
+def bots_of_skill(name: str) -> list[str]:
+    """The bots whose profile lists this skill: the ones a new session would give its current text."""
+    bots = bots_by_profile()
+    return sorted({b for p in used_by().get(name.lower(), []) for b in bots.get(p, [])})
 
 
 def _profile(row, bots: dict | None = None, clones: dict | None = None) -> dict:
@@ -583,8 +493,16 @@ def resolve(profile: dict) -> list[dict]:
         except (KeyError, ValueError):
             continue
         out.append({"name": sk["name"], "mandatory": bool(s.get("mandatory")), "description": sk["description"],
-                    "kind": sk["kind"], "source": sk["source"], "ref": sk["ref"], "revision": sk["revision"]})
+                    "revision": sk["revision"]})
     return out
+
+
+def skills_revision(profile: dict | None) -> str:
+    """One short token for the revisions of a profile's skills: it changes whenever any of
+    them is written, and a launcher compares it at each prompt to know the bot's skills
+    moved (#328). Empty for no profile, or a profile with no skills."""
+    parts = [f"{s['name']}@{s['revision']}" for s in resolve(profile)] if profile else []
+    return hashlib.sha256(",".join(parts).encode()).hexdigest()[:16] if parts else ""
 
 
 NO_PROFILE = ("You have no profile. The guide you just read is all there is: work the threads you are\n"
@@ -614,7 +532,8 @@ def profile_text(profile: dict | None, base: str = "") -> str:
         for s in skills:
             tag = " (mandatory)" if s["mandatory"] else ""
             lines.append(f"- **{s['name']}**{tag}: {s['description']}")
-    lines += ["", "Skills change only between sessions: what you read now holds until your next session starts.", ""]
+    lines += ["", "When a skill you have changes, your launcher says so in a prompt: read it again then. Until then,"
+              " what you read now holds.", ""]
     return "\n".join(lines)
 
 

@@ -1,8 +1,8 @@
 """Skills and profiles on /fleet, and their pages under /fleet/skills/ and /fleet/profiles/.
 
 The fleet page gets two sections between Machines and Versions: Skills (every skill,
-its kind, revision and the profiles that list it; + Add a skill opens an inline panel
-with one form: a GitHub link, or the skill written there) and Profiles (every profile, its skills and
+its revision and the profiles that list it; + Add a skill opens an inline panel with
+one form, the skill written there) and Profiles (every profile, its skills and
 the bots that carry it; view, clone, and delete only when no bot carries it). Each
 skill has a page with an editor, history and who uses it; each profile a read-only
 page with what it says, its fixed skills, its bots, the text a bot reads, and its
@@ -103,16 +103,8 @@ def _paragraphs(text: str) -> str:
     return "".join(f"<p>{e(' '.join(p.split()))}</p>" for p in re.split(r"\n\s*\n", text.strip()) if p.strip())
 
 
-def _kind(skill: dict) -> str:
-    return f'<span class="kind {e(skill["kind"])}">{e(skill["kind"])}</span>'
-
-
 def _revision(skill: dict) -> str:
-    rev = f'rev {skill["revision"]} · {e(ago(skill["updated_at"]))} · {e(skill["author"])}'
-    if skill["kind"] == "github":
-        ref = skill.get("ref") or "main"
-        return f'{e(ref)} · {"pinned" if registry.ref_kind(ref) == "pinned" else "follows the branch"}<div class="by">{rev}</div>'
-    return rev
+    return f'rev {skill["revision"]} · {e(ago(skill["updated_at"]))} · {e(skill["author"])}'
 
 
 def _used_by(skill: dict, bots_of: dict) -> str:
@@ -134,18 +126,12 @@ def _skill_chip(s: dict) -> str:
 ADD_SKILL_PANEL = """<details id="addskill" class="addbot-cta">
 <summary><span class="addbot-btn">+ Add a skill</span></summary>
 <form class="reg-form" id="skill-add" aria-label="Add a skill">
-<label class="fld"><span>From GitHub <small>· a link to a skill's folder or its SKILL.md; or leave it empty and write the skill below</small></span>
-<div class="row"><input name="source" placeholder="https://github.com/owner/repo/blob/main/skills/some-skill/SKILL.md" autocomplete="off" style="flex:1">
-<button type="button" class="act" id="skill-check">Check</button></div></label>
-<div class="checked" id="skill-checked" hidden></div>
-<div id="skill-own">
 <label class="fld"><span>Name <small>· slug, this is how profiles name it</small></span>
 <input name="name" required pattern="[a-z0-9][a-z0-9_\\-]{1,63}" placeholder="art-to-3d" autocomplete="off"></label>
 <label class="fld"><span>Description <small>· one line; this is what a bot sees in its profile</small></span>
 <input name="description" required maxlength="500" placeholder="Turn approved concept art into a game-ready 3D model." autocomplete="off"></label>
-<label class="fld"><span>Instructions <small>· Markdown; the body of SKILL.md. Name and description become its frontmatter.</small></span>
+<label class="fld"><span>Instructions <small>· Markdown; the body of SKILL.md, or a whole SKILL.md pasted in. Name and description become its frontmatter.</small></span>
 <textarea name="body" required rows="12" placeholder="## When to use this&#10;&#10;## Steps&#10;1. &#10;&#10;## What not to do"></textarea></label>
-</div>
 <div class="row"><button type="submit" class="addbot-go">Add skill</button>
 <span class="note" id="skill-note">It appears in the list; a profile created or cloned from now on can tick it.</span></div>
 <p class="status-line" role="status" aria-live="polite"></p>
@@ -158,19 +144,18 @@ def skills_section(skills: list, profiles: list) -> str:
     rows = []
     for s in skills:
         page = f'/fleet/skills/{e(s["name"])}'
-        acts = (f'<a class="act" href="{page}">{"edit" if s["kind"] == "authored" else "details"}</a>'
-                f'<a class="act" href="{page}#history">history</a>')
+        acts = f'<a class="act" href="{page}">edit</a><a class="act" href="{page}#history">history</a>'
         rows.append(f'<tr id="skill-{e(s["name"])}"><td class="who"><a href="{page}">{e(s["name"])}</a>'
                     f'<div class="by desc">{e(s["description"])}</div></td>'
-                    f'<td data-label="kind">{_kind(s)}</td><td data-label="revision" class="nw">{_revision(s)}</td>'
+                    f'<td data-label="revision" class="nw">{_revision(s)}</td>'
                     f'<td data-label="used by">{_used_by(s, bots_of)}</td><td class="acts">{acts}</td></tr>')
-    table = (('<table class="bots skills"><thead><tr><th>Skill</th><th>Kind</th><th>Revision</th><th>Used by</th>'
+    table = (('<table class="bots skills"><thead><tr><th>Skill</th><th>Revision</th><th>Used by</th>'
               '<th><span class="sr-only">Actions</span></th></tr></thead><tbody>' + "".join(rows) + '</tbody></table>')
-             if rows else '<div class="empty">No skill yet. Add one above: written here, or from a GitHub folder.</div>')
+             if rows else '<div class="empty">No skill yet. Add one above.</div>')
     return (f'<section class="fleet-section reg" id="fleet-skills"><div class="sec-head"><h2>Skills · {len(skills)}</h2>'
             f'{ADD_SKILL_PANEL}</div>'
-            '<p class="sub">Fleet-wide. A bot gets the skills of its profile when its session starts; an edit waits for '
-            'the next new session.</p>'
+            '<p class="sub">Fleet-wide, and the board is their only home. A bot gets the skills of its profile when its '
+            'session starts; an edit reaches every bot on it at its next prompt, which tells it to read the skill again.</p>'
             f'{table}</section>')
 
 
@@ -179,7 +164,14 @@ def profiles_section(profiles: list, orphans: list) -> str:
     for p in profiles:
         page = f'/fleet/profiles/{e(p["name"])}'
         bots = p.get("bots") or []
-        chips = " ".join(_skill_chip(s) for s in p.get("skills") or []) or '<span class="dim">none</span>'
+        # the mandatory skills and one more name it; the page lists them all
+        all_skills = p.get("skills") or []
+        shown = [s for s in all_skills if s.get("mandatory")] or all_skills[:1]
+        shown += [s for s in all_skills if s not in shown][:1]
+        left = len(all_skills) - len(shown)
+        chips = " ".join(_skill_chip(s) for s in shown) or '<span class="dim">none</span>'
+        if left > 0:
+            chips += f' <a class="dim" href="{page}">+ {left} more</a>'
         who = (f'{len(bots)} · ' + ", ".join(f'<a href="/a/{e(b)}">{e(b)}</a>' for b in bots)) if bots else '0 · no bot yet'
         origin = (f'<div class="by">cloned from <a href="/fleet/profiles/{e(p["from"])}">{e(p["from"])}</a></div>'
                   if p.get("from") and p["from"].lower() != p["name"].lower() else "")
@@ -192,17 +184,17 @@ def profiles_section(profiles: list, orphans: list) -> str:
                     f'<td data-label="bots">{who}</td><td class="acts">{acts}</td></tr>')
     if orphans:
         who = ", ".join(f'<a href="/a/{e(b)}">{e(b)}</a>' for b in orphans)
-        rows.append(f'<tr id="profile-none"><td class="who"><span class="dim">no profile</span>'
-                    '<div class="by desc">Bots added before profiles. To give one a profile, retire it and add a new bot.</div></td>'
+        rows.append(f'<tr id="profile-none"><td class="who"><span class="dim">no role</span>'
+                    '<div class="by desc">Bots added before roles. To give one a role, retire it and add a new bot.</div></td>'
                     f'<td data-label="skills"><span class="dim">—</span></td><td data-label="bots">{len(orphans)} · {who}</td>'
                     '<td class="acts"></td></tr>')
-    table = (('<table class="bots profiles"><thead><tr><th>Profile</th><th>Skills</th><th>Bots</th>'
+    table = (('<table class="bots profiles"><thead><tr><th>Role</th><th>Skills</th><th>Bots</th>'
               '<th><span class="sr-only">Actions</span></th></tr></thead><tbody>' + "".join(rows) + '</tbody></table>')
              if rows else '<div class="empty">No profile yet.</div>')
-    return (f'<section class="fleet-section reg" id="fleet-profiles"><div class="sec-head"><h2>Profiles · {len(profiles)}</h2>'
-            '<a class="addbot-btn needs-me" href="/fleet/profiles/new">+ Create a profile</a></div>'
-            '<p class="sub">A profile is a role and the skills that go with it. A bot is given one when you add it and keeps it. '
-            'A profile never changes: clone it to make a different one.</p>'
+    return (f'<section class="fleet-section reg" id="fleet-profiles"><div class="sec-head"><h2>Roles · {len(profiles)}</h2>'
+            '<a class="addbot-btn needs-me" href="/fleet/profiles/new">+ Create a role</a></div>'
+            '<p class="sub">A role is a profile: what a bot is for, and the skills that go with it. A bot is given one when you add it '
+            'and keeps it. A role never changes: clone it to make a different one.</p>'
             f'{table}</section>')
 
 
@@ -218,51 +210,9 @@ REG_SECTION_JS = r"""
   }
   var form = document.getElementById('skill-add');
   if (form) {
-    // One form (board thread 8119): a GitHub link adds that skill, as the board fetches it;
-    // without one, the name, description and instructions below are the skill.
-    var own = document.getElementById('skill-own'), box = document.getElementById('skill-checked'),
-        note = document.getElementById('skill-note'), msg = form.querySelector('.status-line'), checked = null;
-    var link = function () { return form.elements.source.value.trim(); };
-    function mode() {
-      var gh = !!link();
-      own.hidden = gh;
-      own.querySelectorAll('input, textarea').forEach(function (el) { el.required = !gh; });
-      note.textContent = gh ? 'The board keeps a copy of its SKILL.md, so every bot can read it. A bot whose profile '
-        + 'lists it reads it when its next session starts.' : 'It appears in the list; a profile created or cloned from now on can tick it.';
-      if (!gh) { checked = null; box.hidden = true; }
-    }
-    function check() {
-      if (!need()) return Promise.reject(new Error('sign in first'));
-      checked = null; msg.textContent = 'Checking…'; box.hidden = true;
-      return call('POST', '/api/skills/check', {source: link()}).then(function (d) {
-        checked = d; msg.textContent = ''; box.textContent = ''; box.hidden = false;
-        var h = document.createElement('b'); h.textContent = d.name + ' · ' + d.description; box.appendChild(h);
-        var l = document.createElement('div'); l.className = 'by';
-        l.textContent = 'SKILL.md found · ' + (d.ref_kind === 'pinned' ? 'pinned at ' + d.ref
-          : 'follows the branch ' + d.ref + (d.commit ? ' · at ' + d.commit.slice(0, 7) : ''))
-          + (d.exists ? ' · a skill of this name exists at rev ' + d.exists.revision + '; adding replaces it' : '');
-        box.appendChild(l);
-        if (d.ref_kind !== 'pinned') { var n = document.createElement('div'); n.className = 'by';
-          n.textContent = 'To stop it moving, pin a tag or a commit in the URL instead of ' + d.ref + '.'; box.appendChild(n); }
-        return d;
-      }, function (e) { msg.textContent = e.message; throw e; });
-    }
-    form.elements.source.addEventListener('input', function () { checked = null; box.hidden = true; mode(); });
-    form.elements.source.addEventListener('change', function () { if (link()) check().catch(function () {}); });
-    document.getElementById('skill-check').addEventListener('click', function () { if (link()) check().catch(function () {}); });
+    var msg = form.querySelector('.status-line');
     form.addEventListener('submit', function (ev) {
       ev.preventDefault(); if (!need()) return;
-      if (link()) {
-        // checked first: what is added is what the box shows
-        (checked ? Promise.resolve(checked) : check()).then(function (d) {
-          msg.textContent = 'Saving…';
-          return call('PUT', '/api/skills/' + encodeURIComponent(d.name),
-               {fields: {source: d.source, ref: d.ref}, base_revision: d.exists ? d.exists.revision : 0,
-                reason: 'added from ' + d.source})
-            .then(function () { location.href = '/fleet/skills/' + encodeURIComponent(d.name); });
-        }).catch(function (e) { msg.textContent = e.message; });
-        return;
-      }
       var name = form.elements.name.value.trim().toLowerCase();
       msg.textContent = 'Saving…';
       call('PUT', '/api/skills/' + encodeURIComponent(name),
@@ -271,7 +221,6 @@ REG_SECTION_JS = r"""
       .then(function () { location.href = '/fleet/skills/' + encodeURIComponent(name); },
             function (e) { msg.textContent = e.message; });
     });
-    mode();
   }
   document.addEventListener('click', function (ev) {
     var b = ev.target.closest('button.del-profile'); if (!b || !need()) return;
@@ -287,8 +236,6 @@ REG_CSS = """
 .fleet-page .reg .sec-head h2{margin-top:6px}
 .fleet-page .reg .desc{color:var(--dim);font-family:var(--sans);white-space:normal;max-width:46em}
 .fleet-page .reg td.who{white-space:normal}
-.fleet-page .reg .kind{font:11px var(--mono);border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--dim)}
-.fleet-page .reg .kind.github{border-color:var(--warn);color:var(--warn)}
 .fleet-page .reg .chip{text-decoration:none;color:var(--ink)}
 .fleet-page .reg .chip .star{color:var(--accent)}
 .fleet-page .reg .acts a.act{text-decoration:none;display:inline-block}
@@ -312,7 +259,6 @@ body.out .fleet-page .needs-me,body.out .fleet-page details#addskill{display:non
 .fleet-page .reg-form .status-line{margin:0;font-size:13px;color:var(--accent);min-height:1em}
 .fleet-page .reg-form .status-line.ok{color:var(--good)}
 .fleet-page .reg-form button:disabled{opacity:.5;cursor:default}
-.fleet-page .checked{border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;background:var(--bg)}
 .fleet-page .crumbs{font-size:13px;color:var(--dim);margin:0 0 10px}.fleet-page .crumbs a{color:var(--dim)}
 .fleet-page .reg-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:0 0 6px}
 .fleet-page .reg-head h1{margin:0;font-family:var(--mono)}
@@ -350,7 +296,6 @@ def skill_page(board_name: str, skill: dict, history: list, profiles: list) -> s
     name = e(skill["name"])
     bots_of = {p["name"]: p.get("bots") or [] for p in profiles}
     used = skill.get("used_by") or []
-    authored = skill["kind"] == "authored"
     used_html = "".join(
         f'<li><a class="chip" href="/fleet/profiles/{e(p)}">{e(p)}</a> <span class="dim">{len(bots_of.get(p, []))} bot'
         f'{"s" * (len(bots_of.get(p, [])) != 1)}' + (" · " + ", ".join(f"@{e(b)}" for b in bots_of.get(p, [])) if bots_of.get(p) else "")
@@ -359,45 +304,38 @@ def skill_page(board_name: str, skill: dict, history: list, profiles: list) -> s
         f'<li><span class="rev">rev {h["revision"]}</span><span class="dim nw">{e(ago(h["updated_at"]))} · {e(h["author"])}</span>'
         f'<span class="reason">{e(h["reason"]) or "<span class=dim>no reason given</span>"}</span>'
         + (f'<button type="button" class="act restore needs-me" data-rev="{h["revision"]}">restore</button>'
-           if h["revision"] != skill["revision"] and not h["deleted"] and authored else "")
+           if h["revision"] != skill["revision"] and not h["deleted"] else "")
         + ("<span class=dim>deleted</span>" if h["deleted"] else "") + '</li>' for h in history)
-    source_card = ""
-    if not authored:
-        ref = skill.get("ref") or "main"
-        source_card = (f'<div class="card"><h2>Source</h2><dl><dt>folder</dt><dd><a href="{e(skill["source"])}">{e(skill["source"])}</a></dd>'
-                       f'<dt>ref</dt><dd>{e(ref)} · {"pinned: never pulled again" if registry.ref_kind(ref) == "pinned" else "a branch: pulled when a bot starts a session"}</dd>'
-                       '<dt>copy</dt><dd>The board keeps the SKILL.md it fetched when the skill was added; the body below is that copy.</dd></dl></div>')
     data = _json({"name": skill["name"], "revision": skill["revision"], "description": skill["description"],
-                  "body": skill["body"], "kind": skill["kind"], "bots": sum(len(bots_of.get(p, [])) for p in used)})
+                  "body": skill["body"], "bots": sorted({b for p in used for b in bots_of.get(p, [])})})
     danger = (f'<button type="button" class="act del-skill" data-name="{name}" data-rev="{skill["revision"]}"'
               + (" disabled" if used else "") + '>Delete this skill</button>'
               + (f'<p>Refused while {len(used)} profile{"s" * (len(used) != 1)} list{"" if len(used) != 1 else "s"} it: '
                  f'{", ".join(e(p) for p in used)}. Clone {"them" if len(used) != 1 else "it"} without it, delete the old, then come back.</p>'
                  if used else '<p>No profile lists it. History is kept; the name can be used again.</p>'))
-    body_field = (f'<textarea name="body" rows="22" required>{e(skill["body"])}</textarea>' if authored else
-                  f'<textarea name="body" rows="22" readonly>{e(skill["body"])}</textarea>')
+    body_field = f'<textarea name="body" rows="22" required>{e(skill["body"])}</textarea>'
     content = f"""
 <style>{FLEET_CSS}{REG_CSS}</style>
 <div class="fleet-page"><div class="reg">
 <p class="crumbs"><a href="/fleet">Fleet</a> › <a href="/fleet#fleet-skills">Skills</a> › {name}</p>
-<div class="reg-head"><h1>{name}</h1>{_kind(skill)}<div class="right">{_revision(skill)}</div></div>
+<div class="reg-head"><h1>{name}</h1><div class="right">{_revision(skill)}</div></div>
 <p class="sub">{e(skill["description"])}</p>
 <div class="two"><div>
 <div class="card" id="editor">
 <div class="tabs" role="tablist" style="padding:0;margin:0 0 10px">
-<button type="button" class="tab" role="tab" aria-selected="true" data-tab="edit">{"Edit" if authored else "Body"}</button>
+<button type="button" class="tab" role="tab" aria-selected="true" data-tab="edit">Edit</button>
 <button type="button" class="tab" role="tab" aria-selected="false" data-tab="preview">Preview</button>
 <button type="button" class="tab" role="tab" aria-selected="false" data-tab="gets">What a bot gets</button>
 </div>
 <form class="reg-form" id="skill-edit" style="padding:0">
 <label class="fld"><span>Name</span><input name="name" value="{name}" readonly></label>
 <label class="fld"><span>Description <small>· one line; this is what a bot sees in its profile</small></span>
-<input name="description" value="{e(skill["description"])}" maxlength="500" required{"" if authored else " readonly"}></label>
+<input name="description" value="{e(skill["description"])}" maxlength="500" required></label>
 <label class="fld"><span>Instructions <small>· Markdown; the body of SKILL.md</small></span>{body_field}</label>
-{"" if not authored else f'''<label class="fld"><span>Reason for this change <small>· required, as in a knowledge write; it shows in History</small></span>
+<label class="fld"><span>Reason for this change <small>· required, as in a knowledge write; it shows in History</small></span>
 <input name="reason" required maxlength="500" placeholder="what changed, and why" autocomplete="off"></label>
 <div class="row needs-me"><button type="submit" class="addbot-go">Save as rev {skill["revision"] + 1}</button>
-<span class="note">Bots read it at their next new session.</span></div>'''}
+<span class="note">Bots on it are told at their next prompt.</span></div>
 <p class="status-line" role="status" aria-live="polite"></p>
 </form>
 <div class="md" id="skill-preview" hidden>{md_html(skill["body"])}</div>
@@ -405,15 +343,15 @@ def skill_page(board_name: str, skill: dict, history: list, profiles: list) -> s
 <pre class="what" id="skill-text">{e(registry.skill_text(skill))}</pre>
 <pre class="what">- **{name}**: {e(skill["description"])}</pre></div>
 </div>
-{source_card}
 </div><div>
-<div class="card"><h2>Details</h2><dl><dt>kind</dt><dd>{e(skill["kind"])}{" · written on the board" if authored else ""}</dd>
-<dt>read at</dt><dd><code>GET /api/skills/{name}</code></dd>
+<div class="card"><h2>Details</h2><dl><dt>read at</dt><dd><code>GET /api/skills/{name}</code></dd>
 <dt>revision</dt><dd>{skill["revision"]} · {e(ago(skill["updated_at"]))} · {e(skill["author"])}</dd></dl></div>
 <div class="card"><h2>Used by · {len(used)}</h2><ul class="hist">{used_html}</ul>
-<p class="sub" style="margin:8px 0 0">Read-only here: a profile's skill list is fixed when the profile is created.</p></div>
+<p class="sub" style="margin:8px 0 0">Read-only here: a profile's skill list is fixed when the profile is created.</p>
+{'<button type="button" class="act needs-me" id="reset-all" style="margin-top:8px">New session for all bots on it</button>' if any(bots_of.get(p) for p in used) else ''}
+<p class="status-line" id="reset-note" role="status" aria-live="polite"></p></div>
 <div class="card" id="history"><h2>History · {len(history)}</h2><ul class="hist">{hist_html}</ul>
-{'<p class="sub" style="margin:8px 0 0">Restore writes a new revision with the old body; nothing is rewritten in place.</p>' if authored else ''}</div>
+<p class="sub" style="margin:8px 0 0">Restore writes a new revision with the old body; nothing is rewritten in place.</p></div>
 <div class="card danger"><h2>Danger</h2>{danger}</div>
 </div></div>
 <script type="application/json" id="skill-data">{data}</script>
@@ -434,6 +372,19 @@ SKILL_PAGE_JS = r"""
         if (!r.ok) throw new Error(d.error || d.detail || ('refused: ' + r.status)); return d; }); });
   }
   var S = JSON.parse(document.getElementById('skill-data').textContent);
+  function resetAll(path, bots, note) {
+    if (!need()) return;
+    if (!confirm('Give ' + bots.map(function (h) { return '@' + h; }).join(', ') + ' a new session? Each reads its profile and skills again (when idle; a stopped bot at its next start).')) return;
+    call('POST', path).then(function (d) {
+      var n = Object.keys(d.skipped);
+      note.className = 'status-line ok';
+      note.textContent = d.reset.length + ' asked' + (n.length ? '; skipped: ' + n.map(function (h) { return '@' + h + ' (' + d.skipped[h] + ')'; }).join(', ') : '') + '.';
+    }, function (e) { note.className = 'status-line'; note.textContent = e.message; });
+  }
+  var all = document.getElementById('reset-all');
+  if (all) all.addEventListener('click', function () {
+    resetAll('/api/skills/' + encodeURIComponent(S.name) + '/reset', S.bots, document.getElementById('reset-note'));
+  });
   var form = document.getElementById('skill-edit');
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
   function inline(s) { return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>'); }
@@ -458,7 +409,7 @@ SKILL_PAGE_JS = r"""
   function text() {
     var d = form.elements.description.value.trim();
     var q = /[:#"'\n]/.test(d) || !d ? JSON.stringify(d) : d;
-    return '---\nname: ' + S.name + '\ndescription: ' + q + (S.kind === 'github' ? '\nkind: github' : '') + '\n---\n\n' + form.elements.body.value.trim() + '\n';
+    return '---\nname: ' + S.name + '\ndescription: ' + q + '\n---\n\n' + form.elements.body.value.trim() + '\n';
   }
   document.querySelectorAll('#editor button.tab').forEach(function (t) {
     t.addEventListener('click', function () {
@@ -478,7 +429,7 @@ SKILL_PAGE_JS = r"""
           base_revision: S.revision, reason: form.elements.reason.value.trim()})
     .then(function (d) {
       msg.className = 'status-line ok';
-      msg.textContent = 'Saved as rev ' + d.skill.revision + '. ' + (S.bots ? S.bots + ' bot' + (S.bots === 1 ? '' : 's') + ' get it at their next new session.' : 'No bot has a profile that lists it yet.');
+      msg.textContent = 'Saved as rev ' + d.skill.revision + '. ' + (S.bots.length ? S.bots.length + ' bot' + (S.bots.length === 1 ? '' : 's') + ' on it read it again at their next prompt.' : 'No bot has a profile that lists it yet.');
       setTimeout(function () { location.reload(); }, 1200);
     }, function (e) { msg.textContent = e.message; });
   });
@@ -510,10 +461,10 @@ def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
     skill_rows = "".join(
         f'<tr><td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>'
         + (f' <span class="star" title="mandatory">{STARS} mandatory</span>' if s["mandatory"] else "")
-        + f'<div class="by desc">{e(s["description"])}</div></td><td data-label="kind">{_kind(s)}</td>'
-        f'<td data-label="revision" class="nw dim">{"rev " + str(s["revision"]) if s["kind"] == "authored" else e(s["ref"] or "main")}</td></tr>'
+        + f'<div class="by desc">{e(s["description"])}</div></td>'
+        f'<td data-label="revision" class="nw dim">rev {s["revision"]}</td></tr>'
         for s in skills)
-    skills_html = (f'<table class="bots"><thead><tr><th>Skill</th><th>Kind</th><th>Rev</th></tr></thead><tbody>{skill_rows}</tbody></table>'
+    skills_html = (f'<table class="bots"><thead><tr><th>Skill</th><th>Rev</th></tr></thead><tbody>{skill_rows}</tbody></table>'
                    if skills else '<p class="sub">This profile brings no skills; its bots have the guide and their workspace\'s knowledge base.</p>')
     bot_rows = ""
     for b in bots:
@@ -567,9 +518,10 @@ def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
 <div class="two"><div>
 <div class="card" id="says"><h2>What it says</h2><dl>{says}</dl></div>
 <div class="card" id="skills"><h2>Skills · {len(skills)}</h2>{skills_html}
-<p class="sub" style="margin:8px 0 0">This list does not change. Skill text does: a skill's edits reach these bots at their next new session.</p></div>
+<p class="sub" style="margin:8px 0 0">This list does not change. Skill text does: a skill's edits reach these bots at their next prompt.</p></div>
 <div class="card" id="bots"><h2>Bots with this profile · {n}</h2>
-<p class="sub">A bot reads this profile and its skills when its session starts. New session makes one read them again.</p>{bots_html}</div>
+<p class="sub">A bot reads this profile and its skills when its session starts. New session makes one read them again.</p>{bots_html}
+{'<button type="button" class="act needs-me" id="reset-all" style="margin-top:8px">New session for all ' + str(n) + ' bot' + 's' * (n != 1) + '</button><p class="status-line" id="reset-note" role="status" aria-live="polite"></p>' if n else ''}</div>
 </div><div>
 <div class="card" id="gets"><h2>What a bot gets</h2><p class="sub">The text <code>GET /api/me/profile</code> returns to a bot of this profile.</p>
 <pre class="what">{e(registry.profile_text(profile, base))}</pre></div>
@@ -592,6 +544,16 @@ PROFILE_PAGE_JS = r"""
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) throw new Error(d.error || d.detail || ('refused: ' + r.status)); return d; }); });
   }
+  var all = document.getElementById('reset-all');
+  if (all) all.addEventListener('click', function () {
+    var bots = Array.prototype.map.call(document.querySelectorAll('button.reset'), function (b) { return b.dataset.handle; }), note = document.getElementById('reset-note');
+    if (!need() || !confirm('Give ' + bots.map(function (h) { return '@' + h; }).join(', ') + ' a new session? Each reads its profile and skills again (when idle; a stopped bot at its next start).')) return;
+    call('POST', '/api/profiles/' + encodeURIComponent(location.pathname.split('/').pop()) + '/reset').then(function (d) {
+      var n = Object.keys(d.skipped);
+      note.className = 'status-line ok';
+      note.textContent = d.reset.length + ' asked' + (n.length ? '; skipped: ' + n.map(function (h) { return '@' + h + ' (' + d.skipped[h] + ')'; }).join(', ') : '') + '.';
+    }, function (e) { note.className = 'status-line'; note.textContent = e.message; });
+  });
   document.addEventListener('click', function (ev) {
     var b = ev.target.closest('button.reset'); if (!b || !need()) return;
     if (!confirm('Give @' + b.dataset.handle + ' a new session? It reads its profile and skills again and starts fresh (when idle; a stopped bot at its next start).')) return;
@@ -626,10 +588,9 @@ def profile_new_page(board_name: str, templates: list, profiles: list, skills: l
     skill_rows = "".join(
         f'<tr><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"></td>'
         f'<td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a><div class="by desc">{e(s["description"])}</div></td>'
-        f'<td data-label="kind">{_kind(s)}</td>'
         f'<td data-label="mandatory"><label><input type="checkbox" name="mandatory" value="{e(s["name"])}" aria-label="{e(s["name"])} mandatory"> read before any work</label></td></tr>'
         for s in skills)
-    skills_html = (f'<table class="bots pick"><thead><tr><th><span class="sr-only">Include</span></th><th>Skill</th><th>Kind</th><th>Mandatory</th></tr></thead>'
+    skills_html = (f'<table class="bots pick"><thead><tr><th><span class="sr-only">Include</span></th><th>Skill</th><th>Mandatory</th></tr></thead>'
                    f'<tbody>{skill_rows}</tbody></table>' if skills else
                    '<p class="sub">The registry is empty. A profile can be created without skills and more cannot be added later: add skills first if this profile needs them.</p>')
     taken = sorted(registry.taken_names(), key=str.lower)     # deleted ones too: a name is never reused

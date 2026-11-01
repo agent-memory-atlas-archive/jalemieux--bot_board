@@ -4,7 +4,6 @@ import os
 import tempfile
 import threading
 import unittest
-import urllib.error
 from pathlib import Path
 import sys
 
@@ -59,7 +58,6 @@ class Registry(unittest.TestCase):
     def test_first_start_seeds_the_shipped_skills_and_profiles_once(self):
         skills, profiles = self.skills(), self.profiles()
         self.assertIn("github-lifecycle", skills)
-        self.assertEqual(skills["github-lifecycle"]["kind"], "authored")
         self.assertEqual(skills["github-lifecycle"]["revision"], 1)
         self.assertEqual(skills["github-lifecycle"]["author"], "board")
         self.assertEqual(sorted(skills["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager"])
@@ -92,7 +90,8 @@ class Registry(unittest.TestCase):
                             json={"body": SKILL, "base_revision": 0, "reason": "first draft"})
         self.assertEqual(r.status_code, 200, r.text)
         skill = r.json()["skill"]
-        self.assertEqual((skill["revision"], skill["kind"], skill["author"]), (1, "authored", "op"))
+        self.assertEqual((skill["revision"], skill["author"]), (1, "op"))
+        self.assertNotIn("kind", skill)
         self.assertEqual(skill["description"], "Write the release notes for a tagged version.")
         self.assertEqual(skill["used_by"], [])
         # a bot reads it as a SKILL.md; the fields travel in the frontmatter
@@ -140,73 +139,62 @@ class Registry(unittest.TestCase):
         self.assertEqual(r.status_code, 422, r.text)
         self.assertIn("must agree", r.json()["error"])
 
-    def test_a_github_skill_is_checked_then_stored_with_its_fetched_skill_md(self):
-        fetched = {"text": SKILL, "commit": "abc1234def56"}
-        calls = []
+    def test_a_github_source_is_refused_skills_live_on_the_board(self):
+        # #328: no github kind; a SKILL.md from anywhere is pasted as the body
+        r = self.client.put("/api/skills/release-notes", headers=self.human,
+                            json={"fields": {"source": "https://github.com/acme/skills/tree/main/release-notes"},
+                                  "base_revision": 0})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("live on the board", r.json()["error"])
+        r = self.client.put("/api/skills/release-notes", headers=self.human,
+                            json={"body": SKILL, "fields": {"kind": "github"}, "base_revision": 0})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn(self.client.post("/api/skills/check", headers=self.human, json={"source": "x"}).status_code, (404, 405))
+        # a SKILL.md's frontmatter is read, the lines an older board served (kind, source, ref) dropped
+        old = SKILL.replace("---\n\n", "kind: github\nsource: https://github.com/acme/skills/tree/main/release-notes\nref: main\n---\n\n", 1)
+        r = self.client.put("/api/skills/release-notes", headers=self.human, json={"body": old, "base_revision": 0})
+        self.assertEqual(r.status_code, 200, r.text)
+        text = self.client.get("/api/skills/release-notes", headers=self.bot).text
+        self.assertEqual(text.split("---")[1], "\nname: release-notes\ndescription: Write the release notes for a tagged version.\n")
 
-        def fake_fetch(source, ref):
-            calls.append((source, ref))
-            return fetched
-        real = registry.fetch_skill
-        registry.fetch_skill = fake_fetch
-        try:
-            r = self.client.post("/api/skills/check", headers=self.bot,
-                                 json={"source": "https://github.com/acme/skills/tree/main/release-notes"})
-            self.assertEqual(r.status_code, 403, r.text)
-            r = self.client.post("/api/skills/check", headers=self.human,
-                                 json={"source": "https://github.com/acme/skills/tree/main/release-notes"})
-            self.assertEqual(r.status_code, 200, r.text)
-            self.assertEqual(r.json(), {"name": "release-notes", "description": "Write the release notes for a tagged version.",
-                                        "source": "https://github.com/acme/skills/tree/main/release-notes", "ref": "main",
-                                        "ref_kind": "branch", "commit": "abc1234def56", "bytes": r.json()["bytes"]})
-            r = self.client.post("/api/skills/check", headers=self.human,
-                                 json={"source": "https://github.com/acme/skills/tree/v1.2.0/release-notes"})
-            self.assertEqual(r.json()["ref_kind"], "pinned")
-            r = self.client.post("/api/skills/check", headers=self.human, json={"source": "https://example.com/x"})
-            self.assertEqual(r.status_code, 422, r.text)
-            # the board keeps the SKILL.md so every bot can read it over the API
-            r = self.client.put("/api/skills/release-notes", headers=self.human,
-                                json={"fields": {"source": "https://github.com/acme/skills/tree/main/release-notes"},
-                                      "base_revision": 0, "reason": "from GitHub"})
-            self.assertEqual(r.status_code, 200, r.text)
-            skill = r.json()["skill"]
-            self.assertEqual((skill["kind"], skill["ref"]), ("github", "main"))
-            self.assertEqual(skill["source"], "https://github.com/acme/skills/tree/main/release-notes")
-            text = self.client.get("/api/skills/release-notes", headers=self.bot).text
-            self.assertIn("kind: github\nsource: https://github.com/acme/skills/tree/main/release-notes\nref: main", text)
-            self.assertIn("grouped by area", text)
-            # the check names an existing skill of that name
-            r = self.client.post("/api/skills/check", headers=self.human,
-                                 json={"source": "https://github.com/acme/skills/tree/main/release-notes"})
-            self.assertEqual(r.json()["exists"]["revision"], 1)
-        finally:
-            registry.fetch_skill = real
-        self.assertEqual(len(calls), 4)       # the bot's 403 and the bad URL never fetch
+    def test_a_github_skill_from_before_becomes_a_board_skill_at_the_next_start(self):
+        # #328: a board that holds github-kind skills adopts them, body kept, history kept
+        with db._write_lock, db.conn() as c:
+            c.execute("INSERT INTO skills(name,revision,fields,body,reason,created_at) VALUES (?,?,?,?,?,?)",
+                      ("pony", 1, '{"description": "Lazy.", "kind": "github", "source": "https://github.com/acme/skills/tree/main/pony", "ref": "main"}',
+                       "Be lazy.\n", "added from GitHub", db.now()))
+            c.execute("INSERT INTO skills(name,revision,fields,body,reason,created_at) VALUES (?,?,?,?,?,?)",
+                      ("pony", 2, '{"description": "Lazier.", "kind": "github", "source": "https://github.com/acme/skills/tree/main/pony", "ref": "main"}',
+                       "Be lazier.\n", "refetched main", db.now()))
+        registry.adopt_github_skills()
+        registry.adopt_github_skills()        # idempotent
+        skill = self.client.get("/api/skills/pony?json", headers=self.bot).json()["skill"]
+        self.assertEqual((skill["revision"], skill["description"], skill["body"]), (3, "Lazier.", "Be lazier.\n"))
+        self.assertNotIn("kind", skill)
+        self.assertIn("GitHub source https://github.com/acme/skills/tree/main/pony is dropped", skill["reason"])
+        self.assertEqual([h["revision"] for h in self.client.get("/api/skills/pony/history", headers=self.bot).json()["revisions"]], [3, 2, 1])
+        self.assertNotIn("kind: github", self.client.get("/api/skills/pony", headers=self.bot).text)
 
-    def test_any_github_link_to_a_skill_is_read_as_its_folder(self):
-        # board thread 8119: the link people copy is the SKILL.md's page, or the raw file
-        folder = "https://github.com/acme/skills/tree/main/release-notes"
-        for link in (folder, folder + "/", "https://github.com/acme/skills/blob/main/release-notes/SKILL.md",
-                     "https://github.com/acme/skills/tree/main/release-notes/SKILL.md",
-                     "https://raw.githubusercontent.com/acme/skills/main/release-notes/SKILL.md",
-                     "github.com/acme/skills/blob/main/release-notes/SKILL.md"):
-            with self.subTest(link=link):
-                self.assertEqual(registry._check_source(link, None), (folder, "main"))
-        self.assertEqual(registry._check_source("https://github.com/acme/skills/blob/v1.2.0/SKILL.md", None),
-                         ("https://github.com/acme/skills/tree/v1.2.0", "v1.2.0"))
-        with self.assertRaises(ValueError):
-            registry._check_source("https://example.com/release-notes/SKILL.md", None)
-
-    def test_a_skill_github_will_not_serve_is_reported_as_not_available(self):
-        # board thread 8273: a private repo's SKILL.md answers 404 to the board, which has no token
-        def not_found(url, accept=""):
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-        orig, registry._http = registry._http, not_found
-        try:
-            with self.assertRaisesRegex(ValueError, "is not available.*private"):
-                registry.fetch_skill("https://github.com/acme/secret/tree/main/release-notes", "main")
-        finally:
-            registry._http = orig
+    def test_the_skills_revision_moves_when_a_profiles_skill_is_written(self):
+        # #328: what a launcher compares at each prompt, instead of a new session
+        self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": True, "harness": "claude",
+                                                                          "workspace": "proj", "profile": "developer"}).raise_for_status()
+        jane = self.register("jane", "claude-code", "proj")
+        r = self.client.get("/api/me/profile", headers=jane)
+        before = r.headers["X-Skills-Revision"]
+        self.assertRegex(before, r"^[0-9a-f]{16}$")
+        self.assertEqual(self.client.get("/api/me/profile?json", headers=jane).json()["skills_revision"], before)
+        # another skill moving changes nothing for jane
+        self.client.put("/api/skills/release-notes", headers=self.human, json={"body": SKILL, "base_revision": 0}).raise_for_status()
+        self.assertEqual(self.client.get("/api/me/profile", headers=jane).headers["X-Skills-Revision"], before)
+        # hers does
+        self.client.put("/api/skills/github-lifecycle", headers=self.human,
+                        json={"body": "Shorter.", "fields": {"description": "Take an issue to a merged PR."},
+                              "base_revision": 1, "reason": "shorter"}).raise_for_status()
+        after = self.client.get("/api/me/profile", headers=jane).headers["X-Skills-Revision"]
+        self.assertNotEqual(after, before)
+        # a bot without a profile, or whose profile brings no skills, gets an empty one
+        self.assertEqual(self.client.get("/api/me/profile", headers=self.bot).headers["X-Skills-Revision"], "")
 
     def test_deleting_a_skill_a_profile_lists_is_refused(self):
         r = self.client.request("DELETE", "/api/skills/github-lifecycle", headers=self.human, json={"base_revision": 1})
@@ -311,11 +299,11 @@ class Registry(unittest.TestCase):
         self.assertIn("**Role.** A software developer", r.text)
         self.assertIn("## Responsibilities", r.text)
         self.assertIn("- **github-lifecycle** (mandatory): Take a GitHub issue", r.text)
-        self.assertIn("Skills change only between sessions", r.text)
+        self.assertIn("When a skill you have changes, your launcher says so in a prompt", r.text)
         j = self.client.get("/api/me/profile?json", headers=jane).json()
         self.assertEqual(j["profile"]["name"], "developer")
-        self.assertEqual([(s["name"], s["mandatory"], s["kind"], s["revision"]) for s in j["skills"]],
-                         [("github-lifecycle", True, "authored", 1)])
+        self.assertEqual([(s["name"], s["mandatory"], s["revision"]) for s in j["skills"]], [("github-lifecycle", True, 1)])
+        self.assertNotIn("kind", j["skills"][0])
 
     def test_a_bots_page_shows_its_profile(self):
         # board thread 8318
@@ -371,13 +359,14 @@ class Registry(unittest.TestCase):
         r = self.client.get("/api/me/profile", headers=self.bot)
         self.assertEqual(r.status_code, 200)
         self.assertIn("You have no profile.", r.text)
-        self.assertEqual(self.client.get("/api/me/profile?json", headers=self.bot).json(), {"profile": None, "skills": []})
+        self.assertEqual(self.client.get("/api/me/profile?json", headers=self.bot).json(),
+                         {"profile": None, "skills": [], "skills_revision": ""})
 
     def test_the_guide_sends_a_new_session_to_its_profile(self):
         text = self.client.get("/agents.md").text
         self.assertIn("`GET /api/me/profile`", text)
         self.assertIn("Read it at the start of every session", text)
-        self.assertIn("nothing is pushed into a running one", text)
+        self.assertIn("when one of yours changes, your launcher says so in a prompt", text)
 
 
 class Frontmatter(unittest.TestCase):

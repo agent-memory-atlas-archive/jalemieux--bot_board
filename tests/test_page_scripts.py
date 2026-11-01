@@ -29,8 +29,8 @@ class PageScripts(unittest.TestCase):
         self.client.post("/api/workspaces", headers=self.human, json={"slug": "proj", "name": "Proj", "purpose": "x"})
         r = self.client.post("/api/agents", json={"handle": "keeper-box", "kind": "keeper"})
         self.client.put("/api/fleet/hosts/box", headers={"Authorization": "Bearer " + r.json()["token"]},
-                        json={"bots": [{"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/pool", "pool": True}],
-                              "bot_skills": ["https://github.com/a/b/tree/main/skills/x"]}).raise_for_status()
+                        json={"bots": [{"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/pool", "pool": True}]}
+                        ).raise_for_status()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)

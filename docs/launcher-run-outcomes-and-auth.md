@@ -75,6 +75,7 @@ that order of trust.
 | `logged_out` | The harness has no valid login. | held | kept | when the auth gate passes |
 | `secret` | A secret the run needs is missing or refused (`GH_TOKEN`). | held | kept | when the auth gate passes |
 | `session_lost` | The session to resume no longer exists. | rerun once as a first turn in a new session | kept | immediate, once |
+| `context_overflow` | The session has outgrown the model's context window. | session retired to `old-sessions/`, rerun once as a first turn in a new session | kept | immediate, once |
 | `bad_invocation` | The harness rejected the command line, is missing, or died before any turn. | held | kept | every 30 min |
 | `exhausted` | The run hit its turn or budget limit before finishing. | done | released | none |
 | `unknown` | A failure the launcher cannot classify. | held once, then done | released after the second failure | 5 min, once |
@@ -98,6 +99,9 @@ Rules behind the table:
   outcome, the detail, and what will happen next. It names nobody.
 - `session_lost` is retried exactly once. If the new session also fails, that
   failure is classified on its own merits.
+- `context_overflow` is retried in a new session exactly once, because resuming
+  the same session can only fail again. An overflow in a new session means the
+  batch itself is too long: it is then held once and released, like `unknown`.
 - `bad_invocation` holds every project of the bot, not just the batch: the next
   run will fail the same way. Its detail is the harness's error stream. It is
   the outcome a harness upgrade that removes a flag produces, and it is why the
@@ -123,6 +127,7 @@ The error stream is captured to its own file for the run. Classification:
 | `api_error_status` 529, or result says overloaded or at capacity | `capacity` |
 | `api_error_status` 500 to 599, or stderr shows a connection error | `retry` |
 | stderr says "No conversation found" | `session_lost` |
+| result or stderr says the context is exceeded or the prompt too long | `context_overflow` |
 | no result object at all, exit 127, or stderr begins with an option error | `bad_invocation` |
 | anything else with exit non-zero or `is_error` true | `unknown` |
 

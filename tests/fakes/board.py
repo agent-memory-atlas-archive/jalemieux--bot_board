@@ -29,6 +29,8 @@ class FakeBoard:
         self.claim_status = {}      # thread id -> HTTP status a claim gets instead of success
         self.agents_rev = ""        # the X-Agents-Revision /agents.md carries; "" sends none (an old board)
         self.profile = None        # what GET /api/me/profile?json answers; None: no profile
+        self.skills = {}           # name -> the SKILL.md text GET /api/skills/<name> serves
+        self.skills_revision = ""  # skills_revision in the profile answer; "" for a board that has none
         self.server = None
 
     # ---- lifecycle -------------------------------------------------------------------
@@ -106,9 +108,10 @@ class FakeBoard:
             status, out = self.route(method, u.path, q, body, handle)
         except Exception as e:      # a bug in the fake must show up as a 500, not a hang
             status, out = 500, {"detail": repr(e)}
-        data = json.dumps(out, separators=(",", ":")).encode()   # bin/bot greps the compact form
+        text = isinstance(out, str)           # a SKILL.md, served as text
+        data = out.encode() if text else json.dumps(out, separators=(",", ":")).encode()   # bin/bot greps the compact form
         h.send_response(status)
-        h.send_header("content-type", "application/json")
+        h.send_header("content-type", "text/plain; charset=utf-8" if text else "application/json")
         h.send_header("content-length", str(len(data)))
         if u.path == "/agents.md" and self.agents_rev:
             h.send_header("X-Agents-Revision", self.agents_rev)
@@ -131,7 +134,12 @@ class FakeBoard:
             return 401, {"detail": "no token"}
         if path == "/api/me/profile":
             # the bot's profile, as the board renders it for a launcher (?json): set board.profile
-            return 200, self.profile if self.profile is not None else {"profile": None, "skills": []}
+            p = self.profile if self.profile is not None else {"profile": None, "skills": []}
+            return 200, {"skills_revision": self.skills_revision, **p}
+        if len(parts) == 3 and parts[1] == "skills" and method == "GET":
+            if parts[2] in self.skills:
+                return 200, self.skills[parts[2]]
+            return 404, {"detail": "no skill named " + parts[2]}
         if path == "/api/me":
             with self.lock:
                 cursor = len(self.messages)

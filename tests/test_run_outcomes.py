@@ -94,6 +94,30 @@ class Outcomes(unittest.TestCase):
             self.settled(L, 3)
             self.assertTrue((L.state / "held").exists() and (L.state / "unknown").exists(), "held for one more try")
 
+    # ---- context_overflow: the session is set aside, the same batch runs in a new one, once --
+    def test_an_overflowed_session_is_retired_and_the_batch_runs_in_a_new_one(self):
+        for harness in ("claude", "codex", "opencode", "copilot"):
+            with self.subTest(harness=harness), FakeBoard() as board:
+                L, root = self.launch(board, harness, fh.step(harness, "context_overflow"), fh.step(harness, "ok", "done", new_session="fresh-2"))
+                L.wait_for(lambda: L.read("session"), "the first turn's session")
+                old = L.read("session")
+                self.settled(L, 3)
+                self.assertTrue(L.prompts()[2].startswith("Read "), "the new session reads the rules first")
+                self.assertIn("please fix the widget", L.prompts()[2])
+                self.assertNotEqual(L.read("session"), old)
+                self.assertEqual([p.read_text() for p in (L.state / "old-sessions").glob("*/session")], [old + "\n"])
+                self.assertEqual(board.worker(root), "tbot")
+                self.assertEqual(L.read("health"), "")
+                self.assertIn("overflowed its context", L.log())
+
+    def test_an_overflow_in_the_new_session_is_held_once_then_released(self):
+        with FakeBoard() as board:
+            L, root = self.launch(board, "opencode", *[fh.step("opencode", "context_overflow")] * 3)
+            self.settled(L, 4)
+            L.wait_for(lambda: board.worker(root) is None, "the claim to be released")
+            self.assertEqual(len(list((L.state / "old-sessions").glob("*/session"))), 1, "only the session that grew is retired")
+            self.assertIn("Context size has been exceeded", L.read("health"))
+
     # ---- exhausted: over, unfinished, released -------------------------------------------
     def test_a_run_at_its_turn_limit_releases_the_thread(self):
         for harness in ("claude", "codex"):

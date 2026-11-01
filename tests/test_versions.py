@@ -20,7 +20,8 @@ def keeper(**k):
 
 def bot(handle, **extra):
     return {"handle": handle, "harness": "claude", "status": "waiting", "launcher": "v1.0.1",
-            "behind": False, "restartable": True, "protocol": 2, "session_gen": str(versions.SESSION_GEN), **extra}
+            "behind": False, "restartable": True, "protocol": versions.LAUNCHER_PROTOCOL,
+            "session_gen": str(versions.SESSION_GEN), **extra}
 
 
 def host(name, bots=(), **extra):
