@@ -114,6 +114,10 @@ class ImageAttachments(unittest.TestCase):
             response = self.post(raw.getvalue())
             self.assertEqual(response.status_code, 422)
             self.assertIn("only PNG, JPEG, GIF and WebP", response.text)
+        raw = io.BytesIO(); Image.new("RGB", (2, 2)).save(raw, "MPO", save_all=True, append_images=[Image.new("RGB", (2, 2))])
+        response = self.post(raw.getvalue())     # two pictures in a JPEG: Pillow calls it MPO
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("only PNG, JPEG, GIF and WebP", response.text)
         for encoded in ("???", "data:image/png;base64," + base64.b64encode(picture()).decode()):
             self.assertEqual(self.post(image_attachment=encoded).status_code, 422)
         with patch.object(images, "MAX_PIXELS", 3):

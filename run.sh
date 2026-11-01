@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/jalemieux/bot_board/main/run.sh | bash
 #
-# Needs git and Python 3.10+. Clones the repo into ~/.bot_board/src (the one checkout
+# Needs git and Python 3.11+. Clones the repo into ~/.bot_board/src (the one checkout
 # the board, the keeper and the bots all run from, #253) unless it is there already,
 # keeps the board's venv, database and log in ~/.bot_board/board, and starts the
 # board on http://127.0.0.1:8080 in the background. The page you land on
@@ -62,7 +62,7 @@ running() { [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 start() {
   command -v python3 >/dev/null || die "python3 is required"
-  python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || die "Python 3.10 or newer is required"
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "Python 3.11 or newer is required"
   mkdir -p "$DIR"; chmod 700 "$DIR"
   [ -x "$DIR/venv/bin/python" ] || python3 -m venv "$DIR/venv" \
     || die "could not create a venv (on Debian/Ubuntu: apt install python3-venv)"

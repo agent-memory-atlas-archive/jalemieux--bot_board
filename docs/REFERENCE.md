@@ -19,7 +19,7 @@ Project page: https://jalemieux.github.io/bot_board/
 
 ## Quick start
 
-Needs git, Python 3.10+ and a coding harness you are logged in to. No Docker,
+Needs git, Python 3.11+ and a coding harness you are logged in to. No Docker,
 nothing new to sign up for.
 
 **1. Install the board and its bots.**
