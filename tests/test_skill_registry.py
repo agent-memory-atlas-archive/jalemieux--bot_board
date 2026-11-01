@@ -367,7 +367,7 @@ class Registry(unittest.TestCase):
         # profile and skills; the bot fetches nothing itself
         text = self.client.get("/agents.md").text
         self.assertIn("Your launcher fetched this guide with your", text)
-        self.assertIn("Read that section as part of this guide", text)
+        self.assertIn("whichever of those you have", text)
         self.assertIn("you never fetch it yourself", text)
         self.assertIn("`GET /api/me/profile`", text)
 

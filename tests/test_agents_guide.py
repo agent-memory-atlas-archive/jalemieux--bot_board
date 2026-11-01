@@ -95,12 +95,13 @@ class AgentGuide(unittest.TestCase):
         self.assertEqual(self.client.get("/agents.md").text, source)
         self.assertNotIn("# Your identity", source)
 
-    def test_a_bot_without_a_profile_or_workspace_is_told_so_in_its_copy(self):
+    def test_a_bot_without_a_profile_or_workspace_gets_only_what_it_has(self):
+        # what a bot does not have is not listed: no "no profile" line, no empty headings
         bot = self.register("loner", "claude-code")
         own = self.client.get("/agents.md", headers=bot).text.split("# Your identity", 1)[1]
-        self.assertIn("You belong to no workspace", own)
-        self.assertIn("You have no profile", own)
-        self.assertIn("## Your skills\n\nNone:", own)
+        self.assertIn("You are `@loner`", own)
+        for absent in ("## Your workspace", "## Your profile", "## Your skills", "no profile", "no workspace"):
+            self.assertNotIn(absent, own)
 
     def test_an_admin_bot_gets_the_administration_reference_composed(self):
         human = self.register("op", "human")
