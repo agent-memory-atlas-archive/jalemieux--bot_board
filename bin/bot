@@ -388,23 +388,24 @@ else:
 # a skill no bot here lists any more) goes, and the links this script made into it. One
 # line per thing removed. Run after every reconcile and by `bot gc`.
 sweep_skills() {
-  python3 - "$CFG" "${1:-}" <<'PY'
-import glob, os, shutil, sys
-cfg, dry = sys.argv[1], sys.argv[2]
-def rm(p, why):
-    print(("would remove %s: %s" if dry else "removed %s: %s") % (p, why))
-    if dry: return
-    if os.path.islink(p) or os.path.isfile(p): os.remove(p)
-    else: shutil.rmtree(p, ignore_errors=True)
-used = set()
-for f in glob.glob(os.path.join(cfg, "bots", "*", "skills")): used |= set(open(f).read().split())
-for c in sorted(glob.glob(os.path.join(cfg, "skills", "*"))):
-    if os.path.basename(c) in used and os.path.isfile(os.path.join(c, "SKILL.md")): continue
-    real = os.path.realpath(c)
-    for l in glob.glob(os.path.expanduser("~/.claude/skills/*")) + glob.glob(os.path.expanduser("~/.agents/skills/*")):
-        if os.path.islink(l) and (os.path.realpath(l) + "/").startswith(real + "/"): rm(l, "a link into a skill that is going")
-    rm(c, "a skill no bot on this box lists")
-PY
+  local dry=${1:-} verb=removed used="" f c name real l have
+  [ -z "$dry" ] || verb="would remove"
+  for f in "$CFG"/bots/*/skills; do [ -f "$f" ] && used+=" $(cat "$f" | tr '\n' ' ')"; done
+  for c in "$CFG"/skills/*/; do
+    [ -d "$c" ] || continue
+    c=${c%/}; name=${c##*/}
+    case " $used " in *" $name "*) [ -f "$c/SKILL.md" ] && continue ;; esac
+    real=$(cd "$c" && pwd -P)
+    for l in ~/.claude/skills/* ~/.agents/skills/*; do
+      [ -L "$l" ] || continue
+      have=$(cd "$l" 2>/dev/null && pwd -P || true)
+      [ "$have" = "$real" ] || continue
+      echo "$verb $l: a link into a skill that is going"
+      [ -n "$dry" ] || rm -f "$l"
+    done
+    echo "$verb $c: a skill no bot on this box lists"
+    [ -n "$dry" ] || rm -rf "$c"
+  done
 }
 if [ "${1:-}" = gc ]; then
   shift; DRY=""; DAYS=${BOT_GC_DAYS:-7}; NAMES=()
