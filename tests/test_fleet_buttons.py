@@ -65,10 +65,9 @@ class FleetButtons(unittest.TestCase):
         self.page.goto("http://board.test/fleet")
 
     def click(self, selector):
-        self.page.click("tr.bot-row td.doing")      # a bot's actions are in its side panel
-        self.page.wait_for_selector(".bot-panel button")
-        self.page.evaluate("document.querySelectorAll('.p-more').forEach(d => d.open = true)")
-        self.page.click(".bot-panel " + selector)
+        self.page.click("tr.bot-row td.doing")      # a bot's actions are in the drawer under its row
+        self.page.wait_for_selector("tr.bot-drawer button")
+        self.page.click("tr.bot-drawer " + selector)
         self.page.wait_for_timeout(300)
 
     def test_delete_only_deletes(self):

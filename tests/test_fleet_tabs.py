@@ -1,5 +1,5 @@
 """/fleet in tabs: the hash picks the tab, so older links land where they point; a bot's actions
-are in its side panel; the filters narrow the rows. Needs Playwright and Chromium; skipped
+are in the drawer under its row; the filters narrow the rows. Needs Playwright and Chromium; skipped
 without them. Run with python -m unittest discover -s tests."""
 import json
 import os
@@ -79,23 +79,24 @@ class FleetTabs(unittest.TestCase):
                 self.assertTrue(self.page.is_visible(target), "a folded list opens for the link")
         self.assertEqual(self.errors, [])
 
-    def test_a_bots_actions_move_to_its_panel_and_back(self):
+    def test_a_bots_row_opens_its_drawer_and_a_second_click_closes_it(self):
         self.go()
-        self.assertFalse(self.page.is_visible("#bot-panel"))
+        self.assertFalse(self.page.is_visible("#drawer-ann"))
+        self.assertEqual(self.page.inner_text("#bot-bob td[data-label='harness']").strip(), "codex", "the harness is on the row")
         self.page.click("#bot-ann td.doing")
-        self.page.wait_for_selector("#bot-panel button[data-handle='ann']")
+        self.page.wait_for_selector("#drawer-ann button[data-handle='ann']")
         self.assertIn("#bot-ann", self.page.url)
-        self.assertTrue(self.page.is_visible("#bot-panel .p-acts button[data-handle='ann'][data-run='0']"), "stop")
-        self.assertFalse(self.page.is_visible("#bot-panel .p-danger button.delete-bot"), "behind a click")
-        self.page.click("#bot-panel .p-more summary")
-        self.assertTrue(self.page.is_visible("#bot-panel .p-danger button.delete-bot"))
+        self.assertTrue(self.page.is_visible("#drawer-ann .d-acts button[data-handle='ann'][data-run='0']"), "stop")
+        self.assertTrue(self.page.is_visible("#drawer-ann .d-danger button.delete-bot"), "delete, set apart")
+        self.assertEqual(self.page.get_attribute("#bot-ann button.open-bot", "aria-expanded"), "true")
         self.page.click("#bot-bob td.doing")
-        self.page.wait_for_selector("#bot-panel .p-acts button[data-handle='bob'][data-run='0']")
-        self.assertEqual(self.page.locator("#bot-ann td.acts button[data-run='0']").count(), 2, "stop and kill are back on the row")
+        self.page.wait_for_selector("#drawer-bob .d-acts button[data-handle='bob'][data-run='0']")
+        self.assertFalse(self.page.is_visible("#drawer-ann"), "one drawer at a time")
         self.page.reload()
-        self.assertTrue(self.page.is_visible("#bot-panel button[data-handle='bob'][data-run='0']"), "a reload keeps the bot open")
-        self.page.click("#bot-panel .panel-close")
-        self.page.wait_for_selector("#bot-panel", state="hidden")
+        self.assertTrue(self.page.is_visible("#drawer-bob button[data-handle='bob'][data-run='0']"), "a reload keeps the bot open")
+        self.page.click("#bot-bob td.doing")
+        self.page.wait_for_selector("#drawer-bob", state="hidden")
+        self.assertNotIn("#bot-bob", self.page.url)
         self.assertEqual(self.errors, [])
 
     def test_filters_narrow_the_rows_and_a_link_to_a_stopped_bot_shows_it(self):
@@ -111,10 +112,10 @@ class FleetTabs(unittest.TestCase):
         self.go("#bot-cat")
         self.page.reload()
         self.assertEqual(self.rows(), ["bot-cat"])
-        self.assertTrue(self.page.is_visible("#bot-panel button[data-handle='cat'][data-run='1']"), "start")
+        self.assertTrue(self.page.is_visible("#drawer-cat button[data-handle='cat'][data-run='1']"), "start")
         self.assertEqual(self.errors, [])
 
-    def test_a_tab_link_leaves_the_tabs_in_view_and_a_phone_gets_only_the_panels_actions(self):
+    def test_a_tab_link_leaves_the_tabs_in_view_and_a_phone_opens_the_drawer_under_the_row(self):
         self.go("#tab-settings")
         self.page.wait_for_timeout(300)
         self.assertEqual(self.page.evaluate("window.scrollY"), 0)
@@ -124,10 +125,10 @@ class FleetTabs(unittest.TestCase):
         self.page.set_viewport_size({"width": 420, "height": 800})
         self.go("#bot-ann")
         self.page.reload()
-        self.assertFalse(self.page.is_visible("#bot-bob td.acts"))
-        self.assertTrue(self.page.is_visible("#bot-panel button[data-handle='ann'][data-run='0']"))
-        self.assertLess(self.page.eval_on_selector("#bot-panel", "p => p.getBoundingClientRect().top"),
-                        self.page.eval_on_selector("#fleet-bots", "t => t.getBoundingClientRect().top"), "the panel comes first")
+        self.assertFalse(self.page.is_visible("#drawer-bob"))
+        self.assertTrue(self.page.is_visible("#drawer-ann button[data-handle='ann'][data-run='0']"))
+        self.assertGreater(self.page.eval_on_selector("#drawer-ann", "d => d.getBoundingClientRect().top"),
+                           self.page.eval_on_selector("#bot-ann", "r => r.getBoundingClientRect().top"), "the drawer is under its row")
         self.assertEqual(self.errors, [])
 
     def hold_a_thread(self, handle="ann"):
@@ -141,10 +142,10 @@ class FleetTabs(unittest.TestCase):
         self.go()
         self.page.focus("#bot-bob button.open-bot")
         self.page.keyboard.press("Enter")
-        self.page.wait_for_selector("#bot-panel button[data-handle='bob']")
-        self.assertTrue(self.page.evaluate("document.activeElement.closest('#bot-panel') !== null"), "focus goes to the panel")
-        self.assertEqual(self.page.locator("#bot-panel .open-bot").count(), 0)
-        self.page.click("#bot-panel .panel-close")
+        self.page.wait_for_selector("#drawer-bob button[data-handle='bob']")
+        self.assertTrue(self.page.evaluate("document.activeElement.closest('#drawer-bob') !== null"), "focus goes to the drawer")
+        self.page.keyboard.press("Escape")
+        self.page.wait_for_selector("#drawer-bob", state="hidden")
         self.assertEqual(self.page.evaluate("document.activeElement.getAttribute('aria-label')"), "Actions for @bob", "focus comes back")
         self.assertEqual(self.errors, [])
 
@@ -163,24 +164,23 @@ class FleetTabs(unittest.TestCase):
         self.assertEqual(self.rows(), ["bot-cat"])
         self.assertEqual(self.errors, [])
 
-    def test_the_stop_question_stays_in_view_whatever_the_filter(self):
+    def test_the_stop_question_opens_in_the_drawer_on_any_screen(self):
         self.hold_a_thread()
         for size in ({"width": 1280, "height": 760}, {"width": 420, "height": 800}):
             with self.subTest(size):
                 self.page.set_viewport_size(size)
                 self.go("#bot-ann")
                 self.page.reload()
-                self.page.click("button.bot-filter[data-filter='stopped']")      # the row goes, the panel stays
-                self.page.click("#bot-panel button[data-handle='ann'][data-run='0'][data-open]")
-                self.assertTrue(self.page.is_visible("#bot-panel #stop-ann input[value='handoff']"))
+                self.page.click("#drawer-ann button[data-handle='ann'][data-run='0'][data-open]")
+                self.assertTrue(self.page.is_visible("#drawer-ann #stop-ann input[value='handoff']"))
                 box = self.page.locator("#stop-ann .stop-go").bounding_box()
                 self.assertLess(box["y"] + box["height"], size["height"], "the question is on screen")
                 self.page.click("#stop-ann .stop-cancel")
                 self.assertFalse(self.page.is_visible("#stop-ann"))
+                self.page.click("button.bot-filter[data-filter='stopped']")      # the row goes, and its drawer with it
+                self.assertFalse(self.page.is_visible("#drawer-ann"))
                 self.page.click("button.bot-filter[data-filter='running']")
-                self.page.click("#bot-bob td.doing")
-                self.page.wait_for_selector("#bot-panel button[data-handle='bob']")
-                self.assertEqual(self.page.eval_on_selector("#bot-ann + tr.stop-panel", "r => r.id"), "stop-ann", "it goes back after its row")
+                self.assertTrue(self.page.is_visible("#drawer-ann"), "and comes back with it")
         self.assertEqual(self.errors, [])
 
 

@@ -121,11 +121,11 @@ class RegistryPages(unittest.TestCase):
         # a fleet bot's row says where it claims, and offers to change it (board thread 8378)
         self.assertIn('<div class="by dim">any channel</div>', page)
         self.assertIn('class="act chan-edit needs-me" data-handle="jane"', page)
-        self.assertIn('<select name="channels" multiple', page)
+        self.assertIn('<div class="chan-chips" id="newbot-channels"', page)
         self.assertIn('<select name="profile"', page)
         self.assertIn('<option value="">none</option>', page)
         self.assertIn('<option value="developer">developer · A software developer', page)
-        self.assertIn("keeps that profile for life", page)
+        self.assertIn("keeps its role for life", page)
         self.assertIn("f.elements.profile.value", page)
 
     def test_skill_page_edits_previews_and_lists_history_and_users(self):

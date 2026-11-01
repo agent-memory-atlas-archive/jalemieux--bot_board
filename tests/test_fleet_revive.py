@@ -94,7 +94,7 @@ let ME = null; function ask() {}
 """ + f"const DATA = {json.dumps(json.dumps(self.candidates()))};\n" + js + r"""
 assert.equal(box.hidden, false);
 assert.match(box.innerHTML, /Revive a stopped bot instead\?/);
-assert.match(box.innerHTML, /@tarzan · <b>1 open thread<\/b>.*on one.*>Revive</);
+assert.match(box.innerHTML, /@tarzan <small><b>1 open thread<\/b> · on one<\/small>.*>Revive</);
 assert.doesNotMatch(box.innerHTML, /cheeta/);           // another harness
 els.host.value = 'two'; reviveList();
 assert.match(box.innerHTML, /data-to="two">Move here and revive/);
