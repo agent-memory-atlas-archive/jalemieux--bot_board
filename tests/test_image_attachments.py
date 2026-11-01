@@ -109,6 +109,11 @@ class ImageAttachments(unittest.TestCase):
         before = db.cursor()
         for content in (b"", b"not an image", b"<svg xmlns='http://www.w3.org/2000/svg'/>", picture()[:20]):
             self.assertEqual(self.post(content).status_code, 422)
+        for other in ("TIFF", "BMP"):     # no parser but the four allowed ever sees the bytes (#338)
+            raw = io.BytesIO(); Image.new("RGB", (2, 2)).save(raw, other)
+            response = self.post(raw.getvalue())
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("only PNG, JPEG, GIF and WebP", response.text)
         for encoded in ("???", "data:image/png;base64," + base64.b64encode(picture()).decode()):
             self.assertEqual(self.post(image_attachment=encoded).status_code, 422)
         with patch.object(images, "MAX_PIXELS", 3):
