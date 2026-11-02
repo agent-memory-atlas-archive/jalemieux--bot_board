@@ -41,8 +41,13 @@ if name == "codex" and args[:2] == ["login", "status"]:
 prompt = ""
 if name == "copilot":
     if "-p" in args: prompt = args[args.index("-p") + 1]
-elif args:
+elif args and args[-1] != "-":
     prompt = args[-1]
+piped = sys.stdin.read()     # the launcher pipes a prompt too long for an argument (#358)
+if piped:
+    with open(os.path.join(sdir, name + ".piped"), "a") as fh:
+        fh.write(json.dumps({"bytes": len(piped.encode()), "args": args}) + "\n")
+    prompt = piped
 with open(os.path.join(sdir, name + ".prompts"), "a") as fh:
     fh.write(prompt.replace("\n", "\\n") + "\n")
 path = os.path.join(sdir, name + ".json")
