@@ -1892,9 +1892,10 @@ def _harness(h: str) -> str:
     return f'<span class="hz hz-{e(h)}">{e(h)}</span>' if h in HARNESS_NAMES else e(h or "?")
 
 
-def _bot_row(b: dict, host: str, others: list) -> str:
+def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
     """One bot as one table row: who, what it is doing, its workspace, role, harness, box and when last
-    active. Its buttons, facts and open threads are in a drawer row beneath, opened by clicking the row."""
+    active. Its buttons, facts and open threads are in a drawer row beneath, opened by clicking the row. key names the row in
+    its ids, the handle unless this bot already has a row (live on two boxes, #364)."""
     st = b.get("state") or fleet_mod.bot_state(b)    # the words /status and /projects use too (#100)
     up = b["status"].startswith(fleet_mod.UP)
     tone = ("run" if st["state"] == "working" else "ok" if st["can_work"] and not st["reason"]
@@ -1959,7 +1960,8 @@ def _bot_row(b: dict, host: str, others: list) -> str:
                 '<option value="">move to…</option>' + "".join(f"<option>{e(o)}</option>" for o in others) + "</select>")
     srt = _sort_value
     h = e(b["handle"])
-    row = (f'<tr id="bot-{h}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}">'
+    k = e(key or b["handle"])
+    row = (f'<tr id="bot-{k}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}">'
            f'<td class="who"{srt(b["handle"])}><a href="/a/{h}">@{h}</a></td>'
            f'<td class="doing"{srt(DOING_ORDER.get(st["state"], len(DOING_ORDER)))}><span class="pip {tone}"></span>{e(st["words"])}{why}</td>'
            f'<td data-label="workspace"{srt(b.get("workspace") or b.get("serves") or "")}>{group}</td>'
@@ -1968,14 +1970,13 @@ def _bot_row(b: dict, host: str, others: list) -> str:
            f'<td data-label="machine"{srt(host)}><a href="#box-{e(host)}">{e(host)}</a></td>'
            f'<td data-label="active" class="dim nw"{srt(last)}>{e(ago(last)) if last else "never"}</td>'
            f'<td class="tog"><button type="button" class="open-bot" aria-label="Actions for @{h}" aria-expanded="false" '
-           f'aria-controls="drawer-{h}" title="its actions and details"></button></td></tr>')
-    return row + _drawer(b, host, btn, danger, _stop_panel(b, host) if asks and can else "")
+           f'aria-controls="drawer-{k}" title="its actions and details"></button></td></tr>')
+    return row + _drawer(b, host, btn, danger, _stop_panel(b, host, k) if asks and can else "", k)
 
 
-def _drawer(b: dict, host: str, acts: str, danger: str, question: str) -> str:
+def _drawer(b: dict, host: str, acts: str, danger: str, question: str, k: str) -> str:
     """The row beneath a bot's: its everyday buttons on the left, kill and delete set apart on the right,
     then what its keeper and the board know about it, and the threads it holds."""
-    h = e(b["handle"])
     buttons = (f'<div class="acts d-acts">{acts}'
                + (f'<span class="gap"></span><div class="d-danger">{danger}</div>' if danger else "") + '</div>') if acts or danger else ""
     facts = [(k, v) for k, v in (
@@ -1991,16 +1992,16 @@ def _drawer(b: dict, host: str, acts: str, danger: str, question: str) -> str:
     more = held - min(len(listed), 3)
     items += f'<li class="dim">and {more} more</li>' if more > 0 else ""
     threads = f'<ul class="d-threads">{items}</ul>' if items else ""
-    return (f'<tr class="bot-drawer" id="drawer-{h}" hidden><td colspan="8">{buttons}{facts_html}{threads}{question}</td></tr>')
+    return (f'<tr class="bot-drawer" id="drawer-{k}" hidden><td colspan="8">{buttons}{facts_html}{threads}{question}</td></tr>')
 
 
-def _stop_panel(b: dict, host: str) -> str:
+def _stop_panel(b: dict, host: str, k: str) -> str:
     """Opened by stop or kill on a bot that holds open threads: hand them off once it has
     stopped (the default, #217), keep them, or retire it (#167). Lives in the bot's drawer."""
     h, n = e(b["handle"]), b["open_threads"]
-    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{h}" value="{v}"{on}> <b>{label}</b>'
+    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{k}" value="{v}"{on}> <b>{label}</b>'
                                          f' <span class="dim">{note}</span></label>')
-    return (f'<div class="stop-panel" id="stop-{h}" hidden>'
+    return (f'<div class="stop-panel" id="stop-{k}" hidden>'
             f'<p>@{h} holds {n} open thread{"s" * (n != 1)}. What should happen to {"them" if n != 1 else "it"} when it stops?</p>'
             '<div class="opts">'
             # hand off by default: a stopped bot that keeps its threads holds them from everyone (#217)
@@ -2013,7 +2014,11 @@ def _stop_panel(b: dict, host: str) -> str:
 
 def _bot_table(entries: list, others_of) -> str:
     head = f'<thead><tr>{_sortable("Bot", "Doing", "Workspace", "Role", "Harness", "Machine", "Active", None)}</tr></thead>'
-    rows = "".join(_bot_row(b, h["name"], others_of(h)) for h, b in entries)
+    seen, rows = set(), ""
+    for h, b in entries:
+        name = b["handle"].lower()
+        rows += _bot_row(b, h["name"], others_of(h), f'{b["handle"]}~{h["name"]}' if name in seen else b["handle"])
+        seen.add(name)
     return f'<table class="bots">{head}<tbody>{rows}</tbody></table>'
 
 
@@ -2160,7 +2165,7 @@ document.addEventListener('click', function (ev) {
   // only the bot rows' start, stop and kill, the buttons that carry data-run: others are styled .act too (Check
   // on, + Add a skill, delete, channels) and have handlers of their own (#314)
   var b = ev.target.closest('button.act[data-handle][data-run]'); if (!b) return;
-  var panel = document.getElementById('stop-' + b.dataset.handle);
+  var drawer = b.closest('.bot-drawer'), panel = drawer && drawer.querySelector('.stop-panel');   // a bot live on two boxes has two (#364)
   if (b.dataset.open && panel) {
     panel.hidden = false;
     if (b.dataset.kill) panel.dataset.kill = '1'; else delete panel.dataset.kill;
