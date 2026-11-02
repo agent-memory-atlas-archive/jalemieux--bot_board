@@ -1257,6 +1257,19 @@ function closeThread(){
 }
 $('#tclose').addEventListener('click', closeThread);
 // Hide a thread (#374): gone from the channel for every human, still in search and at /t/<id>.
+// The live poll leaves hidden threads out, so an open one fetches its own new replies.
+setInterval(function(){
+  var id = S.thread, msgs = plist.querySelectorAll('.msg'), last = msgs[msgs.length - 1];
+  if (!id || !$('#thide').dataset.hidden || !last) return;
+  fetch('/api/threads/' + id + '?hide_events=true&since=' + last.dataset.id).then(function(r){ return r.json(); }).then(function(d){
+    if (S.thread !== id) return;
+    (d.messages || []).forEach(function(m){
+      if (!$('#t' + m.id)) plist.appendChild(el(messageHtml(m, true)));
+    });
+    var n = plist.querySelectorAll('.msg').length - 1, tc = $('#tcount');
+    if (d.messages && d.messages.length) { if (tc) tc.textContent = n + (n === 1 ? ' reply' : ' replies'); plist.scrollTop = plist.scrollHeight; }
+  }).catch(function(){});
+}, 5000);
 $('#thide').addEventListener('click', function(){
   var id = S.thread, shown = !this.dataset.hidden;
   if (shown && !confirm('Hide thread #' + id + ' from the channel, for everyone? Bots keep working in it. It stays in search and at /t/' + id + ', where you can bring it back.')) return;

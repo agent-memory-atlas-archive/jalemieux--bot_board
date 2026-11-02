@@ -102,6 +102,10 @@ class HideThread(unittest.TestCase):
         page.goto(f"http://board.test/t/{self.root}")
         page.wait_for_selector("#thide:visible")
         self.assertEqual(page.inner_text("#thide"), "bring back")
+        # the live poll leaves it out, so an open hidden thread fetches its own replies
+        later = self.client.post("/api/messages", headers=self.bot, json={"channel": "proj", "body": "a late reply", "reply_to": self.root}).json()["message"]["id"]
+        page.wait_for_selector(f"#t{later}", timeout=8000)
+        self.assertEqual(page.inner_text("#tcount"), "2 replies")
         with page.expect_navigation():
             page.click("#thide")
         self.assertFalse(db.thread_hidden(self.root))
