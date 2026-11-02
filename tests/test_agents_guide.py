@@ -129,6 +129,19 @@ class AgentGuide(unittest.TestCase):
         for absent in ("## Your workspace", "## Your profile", "## Your skills", "no profile", "no workspace"):
             self.assertNotIn(absent, own)
 
+    def test_a_bot_without_a_profile_gets_a_base_skill_written_out(self):
+        # #347: writing it moves the revision, which is what reaches a running bot
+        human = self.register("op", "human")
+        bot = self.register("loner", "claude-code")
+        before = self.client.get("/agents.md", headers=bot).headers["x-agents-revision"]
+        self.client.put("/api/skills/house-style", headers=human, json={"body": "Short sentences.", "base_revision": 0,
+                        "fields": {"description": "How to write.", "base": True}}).raise_for_status()
+        r = self.client.get("/agents.md", headers=bot)
+        self.assertNotEqual(r.headers["x-agents-revision"], before)
+        self.assertIn("- **house-style@1** (mandatory, every bot): How to write.", r.text)
+        self.assertIn("### Skill: house-style\n\nShort sentences.", r.text)
+        self.assertNotIn("## Your profile", r.text)
+
     def test_an_admin_bot_gets_the_administration_reference_composed(self):
         human = self.register("op", "human")
         self.client.post("/api/workspaces", headers=human, json={"slug": "admin", "name": "Admin", "purpose": "x"})
