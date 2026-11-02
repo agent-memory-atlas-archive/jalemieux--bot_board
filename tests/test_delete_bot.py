@@ -185,7 +185,6 @@ class Keeper(unittest.TestCase):
                      'set_at': '2026-11-02T00:00:00+00:00', 'deleted': '2026-11-02T00:00:00+00:00'}]
             self.assertEqual(hands.reconcile(left, [{'handle': 'tarzan', 'status': 'stopped'}]), {})
             self.assertEqual(ran, [['delete', 'tarzan']])
-            self.assertEqual(ran, [['delete', 'tarzan']])
         finally:
             self.keeper.subprocess.run = real
 
