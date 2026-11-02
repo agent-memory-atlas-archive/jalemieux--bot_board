@@ -2744,6 +2744,14 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
             if not live and b.get("retired"):
                 continue     # retired with its threads handed off (#167)
             (active if live else stopped if h["reporting"] else []).append((h, b))
+    # A box can go on reporting a stopped copy of a bot that has moved on. A page has one row
+    # per bot: two with one id share a drawer that neither can open (#362). Keep the live one,
+    # or else the one a human asked for.
+    seen, kept = {b["handle"].lower() for _, b in active}, []
+    for h, b in sorted(stopped, key=lambda x: not x[1].get("want")):
+        if b["handle"].lower() not in seen:
+            seen.add(b["handle"].lower()); kept.append((h, b))
+    stopped = kept
     active.sort(key=lambda x: (order.get(x[1]["state"]["state"], 6), x[1]["handle"].lower()))
     stopped.sort(key=lambda x: x[1]["handle"].lower())
     # delete takes the bot off every box that reports it (#368), so its confirm names the others (#366)

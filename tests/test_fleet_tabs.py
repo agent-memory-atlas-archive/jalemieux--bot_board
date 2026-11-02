@@ -99,6 +99,24 @@ class FleetTabs(unittest.TestCase):
         self.assertNotIn("#bot-bob", self.page.url)
         self.assertEqual(self.errors, [])
 
+    def test_a_bot_two_boxes_report_has_one_row_and_its_drawer_opens(self):
+        # #362: a stopped copy left on another box gave two rows one id, and no drawer opened
+        keeper = self.client.post("/api/agents", json={"handle": "keeper-old", "kind": "keeper"}).json()["token"]
+        self.client.put("/api/fleet/hosts/old", headers={"Authorization": "Bearer " + keeper}, json={
+            "load": 1, "cores": 4, "mem_total_mb": 1000, "mem_free_mb": 500, "bots": [
+                {"handle": "ann", "harness": "claude", "status": "stopped", "serves": "/old", "pool": True},
+                {"handle": "cat", "harness": "claude", "status": "stopped", "serves": "/old", "pool": True}]}).raise_for_status()
+        self.go()
+        count = lambda i: self.page.evaluate("i => document.querySelectorAll('[id=\"' + i + '\"]').length", i)
+        self.assertEqual((count("bot-ann"), count("drawer-ann")), (1, 1), "a stopped copy of a running bot")
+        self.assertEqual((count("bot-cat"), count("drawer-cat")), (1, 1), "stopped on both")
+        self.page.click("#bot-ann button.open-bot")
+        self.assertTrue(self.page.is_visible("#drawer-ann"))
+        self.page.click(".bot-filter[data-filter=stopped]")
+        self.page.click("#bot-cat button.open-bot")
+        self.assertTrue(self.page.is_visible("#drawer-cat"))
+        self.assertEqual(self.errors, [])
+
     def test_filters_narrow_the_rows_and_a_link_to_a_stopped_bot_shows_it(self):
         self.go()
         self.assertEqual(self.rows(), ["bot-ann", "bot-bob"])
