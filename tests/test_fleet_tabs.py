@@ -213,5 +213,6 @@ class FleetTabs(unittest.TestCase):
             self.assertIn(handle, [w["handle"] for w in fleet.wanted(acts)])
             self.assertNotIn(handle, [w["handle"] for w in fleet.wanted(other)])
 
+
 if __name__ == "__main__":
     unittest.main()
