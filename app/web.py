@@ -489,7 +489,7 @@ IMAGE_JS = """
 # Deleting a bot (#280), from /fleet or its page: one confirm, then DELETE /api/agents/<handle>.
 DELETE_BOT_JS = """
 function deleteBot(handle, token, done, also) {
-  if (!confirm('Delete @' + handle + '? ' + (also ? 'It is also live on ' + also + ', and this deletes it there too. ' : '') + 'Its threads are released for pickup, its token stops working and it leaves '
+  if (!confirm('Delete @' + handle + '? ' + (also ? also + ' ' : '') + 'Its threads are released for pickup, its token stops working and it leaves '
                + 'the board; its keeper stops it (a busy bot finishes its run first) and removes its config, token, '
                + 'working directory and sessions from its box. Its old messages keep its name. This cannot be undone.')) return;
   fetch('/api/agents/' + encodeURIComponent(handle), {method: 'DELETE', headers: {'Authorization': 'Bearer ' + token}})
@@ -1951,7 +1951,7 @@ def _bot_row(b: dict, host: str, others: list) -> str:
     btn += chans
     # delete (#280): gone from the board at once, and from its box once its keeper has removed it
     if b["status"] != "moved" and not b.get("deleted"):
-        danger += (f'<button type="button" class="act delete-bot" data-handle="{e(b["handle"])}" data-also="{e(", ".join(b.get("also_on") or []))}" '
+        danger += (f'<button type="button" class="act delete-bot" data-handle="{e(b["handle"])}" data-also="{e(b.get("also_on") or "")}" '
                    'title="release its threads, revoke its token, remove it from its box and from the board">delete</button>')
     # a running pool bot can go to any other box that is reporting; its keeper packs it, the other unpacks it
     if up and can and b.get("pool") and others and not b.get("move_to") and not b.get("fetch"):
@@ -2741,9 +2741,16 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
             (active if live else stopped if h["reporting"] else []).append((h, b))
     active.sort(key=lambda x: (order.get(x[1]["state"]["state"], 6), x[1]["handle"].lower()))
     stopped.sort(key=lambda x: x[1]["handle"].lower())
-    # delete takes the bot off every box, so its confirm names the other boxes it is live on (#366)
+    # a delete reaches one box: the one asked for the bot, else the first that reports it (fleet.delete).
+    # With a copy on another box, its confirm says so (#366, #368)
     for h, b in active + stopped:
-        b["also_on"] = [o["name"] for o, x in active if x["handle"].lower() == b["handle"].lower() and o is not h]
+        same = lambda x: x["handle"].lower() == b["handle"].lower()
+        others = [o["name"] for o, x in active if same(x) and o is not h]
+        if others:
+            acts = (next((o["name"] for o in hosts for x in o["bots"] if same(x) and x.get("want")), None)
+                    or next(o["name"] for o in hosts for x in o["bots"] if same(x) and x["status"] != "moved"))
+            b["also_on"] = (f'It is also listed on {", ".join(others)}. Only {acts} removes it. '
+                            "On the other boxes its token stops working, but its files stay.")
     # bots with no profile, gathered on the Profiles table's last row so they are not forgotten
     orphans = sorted({b["handle"] for _, b in active + stopped if not b.get("profile")}, key=str.lower)
     working = sum(b["state"]["state"] == "working" for _, b in active)
