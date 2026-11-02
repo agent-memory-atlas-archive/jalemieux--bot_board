@@ -131,7 +131,9 @@ class AgentGuide(unittest.TestCase):
         self.assertNotIn("## Your personality", changed.text)
         self.assertEqual((row()["voice"], row()["personality"]), ("Warm.", ""))
 
+        self.assertIn("Warm.", self.client.get("/a/jane").text)
         self.client.put(url, headers=human, json={"voice": "", "personality": ""}).raise_for_status()
+        self.assertNotIn("<h2>Voice</h2>", self.client.get("/a/jane").text)
         self.assertNotIn("## Your voice", self.client.get("/agents.md", headers=jane).text)
 
     def test_a_bot_added_without_naming_it_can_have_a_voice(self):

@@ -164,6 +164,46 @@ class FleetTabs(unittest.TestCase):
         self.assertEqual(self.rows(), ["bot-cat"])
         self.assertEqual(self.errors, [])
 
+    def test_a_bots_voice_is_set_when_adding_it_and_edited_in_its_drawer(self):
+        # #348: two full-width fields in the form; shown in the drawer, Edit turns them into fields
+        calls = []
+        self.page.on("request", lambda q: calls.append((q.method, q.url, q.post_data)) if "/api/fleet/bots" in q.url else None)
+        self.go()
+        self.page.click("button.addbot-btn")
+        self.assertTrue(self.page.is_visible("form.newbot-top textarea[name=voice]"))
+        self.assertTrue(self.page.is_visible("form.newbot-top textarea[name=personality]"))
+        self.page.fill("form.newbot-top input[name=handle]", "dee")
+        self.page.fill("form.newbot-top textarea[name=voice]", " Plain. ")
+        self.page.fill("form.newbot-top textarea[name=personality]", "<b>Dry</b>")
+        with self.page.expect_navigation():
+            self.page.click("form.newbot-top button.addbot-go")
+        sent = json.loads(calls[-1][2])
+        self.assertEqual((sent["voice"], sent["personality"]), ("Plain.", "<b>Dry</b>"))
+
+        self.page.click("#bot-dee button.open-bot")
+        box = "#drawer-dee .d-voice"
+        self.assertEqual(self.page.inner_text(box + " .quote:first-child span"), "Plain.")
+        self.assertEqual(self.page.inner_text(box + " .quote:last-child span"), "<b>Dry</b>", "shown as text")
+        self.assertIn("new session", self.page.inner_text(box + " p"))
+
+        self.page.click(box + " button.voice-edit")
+        self.assertEqual(self.page.input_value(box + " textarea[name=personality]"), "<b>Dry</b>")
+        self.page.click(box + " button.voice-cancel")
+        self.assertFalse(self.page.is_visible(box + " textarea"))
+        self.assertTrue(self.page.is_visible(box + " .d-voice-two"))
+
+        self.page.click(box + " button.voice-edit")
+        self.page.fill(box + " textarea[name=voice]", "Warm.")
+        self.page.fill(box + " textarea[name=personality]", "")
+        with self.page.expect_navigation():
+            self.page.click(box + " button[type=submit]")
+        self.assertEqual(calls[-1][:1], ("PUT",))
+        self.assertTrue(calls[-1][1].endswith("/api/fleet/bots/dee/voice"))
+        self.assertTrue(self.page.is_visible(box), "the drawer stays open across the reload")
+        self.assertEqual(self.page.inner_text(box + " .quote:first-child span"), "Warm.")
+        self.assertEqual(self.page.inner_text(box + " .quote:last-child span"), "none set")
+        self.assertEqual(self.errors, [])
+
     def test_the_stop_question_opens_in_the_drawer_on_any_screen(self):
         self.hold_a_thread()
         for size in ({"width": 1280, "height": 760}, {"width": 420, "height": 800}):
