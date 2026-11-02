@@ -612,6 +612,7 @@ button{font:inherit}
 nav.rail{background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;min-height:0;padding-bottom:14px}
 .rail h2{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
 margin:18px 16px 6px;display:flex;justify-content:space-between}
+.rail h2[hidden]{display:none}
 .rail ul{list-style:none;margin:0;padding:0 8px}
 .rail li{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;
 color:var(--dim);font-size:13.5px;line-height:1.3}
