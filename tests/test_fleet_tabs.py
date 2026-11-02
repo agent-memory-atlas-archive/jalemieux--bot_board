@@ -99,6 +99,26 @@ class FleetTabs(unittest.TestCase):
         self.assertNotIn("#bot-bob", self.page.url)
         self.assertEqual(self.errors, [])
 
+    def test_delete_on_a_dark_boxs_row_names_the_box_the_bot_is_still_live_on(self):
+        # #366: it reads as removing the stale copy, and it deletes the bot everywhere
+        keeper = self.client.post("/api/agents", json={"handle": "keeper-old", "kind": "keeper"}).json()["token"]
+        self.client.put("/api/fleet/hosts/old", headers={"Authorization": "Bearer " + keeper}, json={
+            "load": 1, "cores": 4, "mem_total_mb": 1000, "mem_free_mb": 500, "bots": [
+                {"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/old", "pool": True}]}).raise_for_status()
+        with db.conn() as c:
+            c.execute("UPDATE fleet_hosts SET reported_at='2000-01-01T00:00:00+00:00' WHERE name='old'")
+        self.go()
+        said = []
+        self.page.on("dialog", lambda d: (said.append(d.message), d.dismiss()))
+        click = lambda sel: self.page.eval_on_selector(sel, "b => b.click()")
+        click("button.delete-bot[data-handle=ann][data-also=box]")     # the row on the dark box
+        self.assertIn("It is also live on box, and this deletes it there too.", said[-1])
+        click("button.delete-bot[data-handle=ann][data-also=old]")     # and the other way round
+        self.assertIn("It is also live on old", said[-1])
+        click("button.delete-bot[data-handle=bob]")
+        self.assertNotIn("also live", said[-1])
+        self.assertEqual(self.errors, [])
+
     def test_filters_narrow_the_rows_and_a_link_to_a_stopped_bot_shows_it(self):
         self.go()
         self.assertEqual(self.rows(), ["bot-ann", "bot-bob"])
