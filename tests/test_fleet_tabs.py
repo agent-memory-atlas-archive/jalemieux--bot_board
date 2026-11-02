@@ -183,35 +183,30 @@ class FleetTabs(unittest.TestCase):
                 self.assertTrue(self.page.is_visible("#drawer-ann"), "and comes back with it")
         self.assertEqual(self.errors, [])
 
-    def test_delete_on_a_dark_boxs_row_says_which_box_removes_the_bot(self):
-        # #366: it reads as removing the stale copy, and it takes the token from every copy; #368: only one box removes it
+    def test_delete_on_a_dark_boxs_row_names_the_other_box_and_both_are_asked(self):
+        # #366: it reads as removing the stale copy, and it deletes the bot on every box (#368)
         keeper = self.client.post("/api/agents", json={"handle": "keeper-old", "kind": "keeper"}).json()["token"]
         self.client.put("/api/fleet/hosts/old", headers={"Authorization": "Bearer " + keeper}, json={
             "load": 1, "cores": 4, "mem_total_mb": 1000, "mem_free_mb": 500, "bots": [
-                {"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/old", "pool": True},
-                {"handle": "bob", "harness": "codex", "status": "waiting", "serves": "/old", "pool": True}]}).raise_for_status()
-        fleet.want("bob", "old", False, None, "jac")      # asked for on old, so old is the box a delete reaches
+                {"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/old", "pool": True}]}).raise_for_status()
         with db.conn() as c:
             c.execute("UPDATE fleet_hosts SET reported_at='2000-01-01T00:00:00+00:00' WHERE name='old'")
         self.go()
         said = []
         self.page.on("dialog", lambda d: (said.append(d.message), d.dismiss()))
         click = lambda sel: self.page.eval_on_selector(sel, "b => b.click()")
-        tail = "On the other boxes its token stops working, but its files stay."
         click("button.delete-bot[data-handle=ann][data-also^='It is also listed on box']")     # the row on the dark box
-        self.assertIn("It is also listed on box. Only box removes it. " + tail, said[-1])
+        self.assertIn("It is also listed on box, and this deletes it there too; a box not reporting does that when it returns.", said[-1])
         click("button.delete-bot[data-handle=ann][data-also^='It is also listed on old']")
-        self.assertIn("It is also listed on old. Only box removes it. " + tail, said[-1])
-        click("button.delete-bot[data-handle=bob][data-also^='It is also listed on box']")
-        self.assertIn("Only old removes it.", said[-1])
+        self.assertIn("It is also listed on old, and this deletes it there too", said[-1])
         click("button.delete-bot[data-handle=cat]")
         self.assertNotIn("also listed", said[-1])
         self.assertEqual(self.errors, [])
-        # what it says is what a delete does
-        for handle, acts, other in (("ann", "box", "old"), ("bob", "old", "box")):
-            self.assertFalse(fleet.delete(handle, {"handle": "jac"}))
-            self.assertIn(handle, [w["handle"] for w in fleet.wanted(acts)])
-            self.assertNotIn(handle, [w["handle"] for w in fleet.wanted(other)])
+        # what it says is what a delete does: both boxes are asked
+        self.client.post("/api/agents", json={"handle": "ann", "kind": "claude-code"}).raise_for_status()
+        self.assertFalse(fleet.delete("ann", {"handle": "jac"}))
+        asked = [[w["handle"] for w in fleet.wanted(box) + fleet.leftovers(box) if w.get("deleted")] for box in ("box", "old")]
+        self.assertEqual(asked, [["ann"], ["ann"]])
 
 
 if __name__ == "__main__":

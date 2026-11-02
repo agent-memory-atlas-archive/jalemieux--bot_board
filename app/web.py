@@ -2741,16 +2741,12 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
             (active if live else stopped if h["reporting"] else []).append((h, b))
     active.sort(key=lambda x: (order.get(x[1]["state"]["state"], 6), x[1]["handle"].lower()))
     stopped.sort(key=lambda x: x[1]["handle"].lower())
-    # a delete reaches one box: the one asked for the bot, else the first that reports it (fleet.delete).
-    # With a copy on another box, its confirm says so (#366, #368)
+    # delete takes the bot off every box that reports it (#368), so its confirm names the others (#366)
     for h, b in active + stopped:
-        same = lambda x: x["handle"].lower() == b["handle"].lower()
-        others = [o["name"] for o, x in active if same(x) and o is not h]
+        others = [o["name"] for o, x in active if x["handle"].lower() == b["handle"].lower() and o is not h]
         if others:
-            acts = (next((o["name"] for o in hosts for x in o["bots"] if same(x) and x.get("want")), None)
-                    or next(o["name"] for o in hosts for x in o["bots"] if same(x) and x["status"] != "moved"))
-            b["also_on"] = (f'It is also listed on {", ".join(others)}. Only {acts} removes it. '
-                            "On the other boxes its token stops working, but its files stay.")
+            b["also_on"] = (f'It is also listed on {", ".join(others)}, and this deletes it there too; '
+                            "a box not reporting does that when it returns.")
     # bots with no profile, gathered on the Profiles table's last row so they are not forgotten
     orphans = sorted({b["handle"] for _, b in active + stopped if not b.get("profile")}, key=str.lower)
     working = sum(b["state"]["state"] == "working" for _, b in active)
