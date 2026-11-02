@@ -363,15 +363,18 @@ API_MAP = {
         "PUT /api/fleet/hosts/{name}": "a keeper's report of its box {cores, load, mem_total_mb,"
                                        " mem_free_mb, os, bots: [{handle, harness, status, serves, last_run}],"
                                        " credentials: [{name, kind, state, detail, held}]}",
-        "POST /api/fleet/bots": "a human starts a new bot on a box {host, harness, workspace, profile?}; the board picks"
+        "POST /api/fleet/bots": "a human starts a new bot on a box {host, harness, workspace, profile?, voice?,"
+                                " personality?}; the board picks"
                                 " its name -> {handle}",
         "PUT /api/fleet/bots/{handle}": "a human asks for a bot to run on a box, or to stop {host, run, harness,"
-                                        " workspace, profile, kill, threads}; profile is set once, for a new bot;"
+                                        " workspace, profile, voice, personality, kill, threads}; profile is set once, for a new bot;"
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
+        "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
+                                              " clears; in its composed AGENTS.md at its next wake",
         "POST /api/fleet/bots/{handle}/move": "a human moves a pool bot to another box {to, start?}; the keepers of"
                                              " both boxes carry it out over ssh",
         "POST /api/fleet/bots/{handle}/reset": "a human gives a bot a new harness session; the old one is set aside"
@@ -751,6 +754,13 @@ def agent_profile(handle: str, agent: dict | None = Depends(optional_agent)) -> 
 
 # ----------------------------------------------------------------- fleet
 
+MAX_VOICE = 2000     # characters of a bot's voice, and of its personality (#348)
+
+
+def _text_or_none(text: str | None) -> str | None:
+    return text.strip() if text is not None else None
+
+
 class FleetBot(BaseModel):
     handle: str = Field(max_length=64)
     harness: str = Field(default="", max_length=32)
@@ -842,6 +852,10 @@ class FleetWantIn(BaseModel):
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of its workspace the"
                                        " bot claims new threads in. Required with a specialized profile; empty"
                                        " means any channel. Changed later with PUT /api/fleet/bots/{handle}/channels.")
+    voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people. Changed"
+                              " later with PUT /api/fleet/bots/{handle}/voice.")
+    personality: str | None = Field(default=None, max_length=MAX_VOICE, description="Who the bot is: expression only,"
+                                    " task rules still win. Changed later with PUT /api/fleet/bots/{handle}/voice.")
 
 
 class FleetChannelsIn(BaseModel):
@@ -905,7 +919,8 @@ def fleet_want(handle: str, body: FleetWantIn, agent: dict = Depends(current_age
     why = fleet.want(handle, body.host, body.run, body.harness, agent["handle"], body.kill,
                      workspace=(body.workspace or "").lower() or None, threads=body.threads,
                      profile=(body.profile or "").strip().lower() or None,
-                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None)
+                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None,
+                     voice=_text_or_none(body.voice), personality=_text_or_none(body.personality))
     if why:
         raise HTTPException(409, why)
     return {"ok": True}
@@ -924,6 +939,24 @@ def fleet_channels(handle: str, body: FleetChannelsIn, agent: dict = Depends(cur
     return {"ok": True, "channels": db.bot_channels(handle)}
 
 
+class FleetVoiceIn(BaseModel):
+    voice: str = Field(max_length=MAX_VOICE, description="How the bot writes to people; empty clears.")
+    personality: str = Field(max_length=MAX_VOICE, description="Who the bot is, expression only; empty clears.")
+
+
+@app.put("/api/fleet/bots/{handle}/voice", tags=["fleet"])
+def fleet_voice(handle: str, body: FleetVoiceIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human sets how a fleet bot writes to people and who it is. Both go in its composed
+    AGENTS.md, so an edit reaches it at its next wake; a long session may keep some of its old
+    tone until it gets a new one."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human sets a bot's voice")
+    why = fleet.set_voice(handle, body.voice.strip(), body.personality.strip())
+    if why:
+        raise HTTPException(409, why)
+    return {"ok": True, "voice": body.voice.strip(), "personality": body.personality.strip()}
+
+
 class FleetNewIn(BaseModel):
     host: str = Field(description="The box to start it on.", max_length=64)
     harness: str = Field(description="claude, codex, opencode or copilot.", max_length=32)
@@ -931,6 +964,8 @@ class FleetNewIn(BaseModel):
     profile: str | None = Field(default=None, max_length=64, description="The profile it is added with, for life.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of the workspace it"
                                        " claims new threads in; required with a specialized profile.")
+    voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people.")
+    personality: str | None = Field(default=None, max_length=MAX_VOICE, description="Who the bot is, expression only.")
 
 
 @app.post("/api/fleet/bots", tags=["fleet"])
@@ -942,7 +977,8 @@ def fleet_new(body: FleetNewIn, agent: dict = Depends(current_agent)) -> dict:
     handle = fleet.free_name()
     why = fleet.want(handle, body.host, True, body.harness, agent["handle"], workspace=body.workspace.lower(),
                      profile=(body.profile or "").strip().lower() or None,
-                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None)
+                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None,
+                     voice=_text_or_none(body.voice), personality=_text_or_none(body.personality))
     if why:
         raise HTTPException(409, why)
     return {"ok": True, "handle": handle}

@@ -95,6 +95,54 @@ class AgentGuide(unittest.TestCase):
         self.assertEqual(self.client.get("/agents.md").text, source)
         self.assertNotIn("# Your identity", source)
 
+    def test_a_bots_voice_and_personality_are_set_by_a_human_and_composed_in(self):
+        # #348: set at add time and later, humans only, empty clears, in the report and the guide
+        human = self.register("op", "human")
+        keeper = self.register("keeper-box", "keeper")
+        self.client.post("/api/workspaces", headers=human, json={"slug": "proj", "name": "Proj"}).raise_for_status()
+        self.client.put("/api/fleet/hosts/box", headers=keeper, json={"bots": []}).raise_for_status()
+        self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": True, "harness": "claude", "workspace": "proj",
+                                                                      "voice": " Short sentences. ", "personality": "Dry."}).raise_for_status()
+        jane = self.register("jane", "claude-code", "proj")
+        guide = self.client.get("/agents.md", headers=jane)
+        self.assertIn("## Your voice\n\nHow you write to people.\n\nShort sentences.\n", guide.text)
+        self.assertIn("Dry.\n", guide.text.split("## Your personality")[1])
+
+        def row():
+            for h in self.client.get("/api/fleet", headers=human).json()["hosts"]:
+                for b in h["bots"]:
+                    if b["handle"] == "jane":
+                        return b
+        self.assertEqual((row()["voice"], row()["personality"]), ("Short sentences.", "Dry."))
+
+        # a later request about the bot leaves them as they are
+        self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": False}).raise_for_status()
+        self.assertEqual(row()["voice"], "Short sentences.")
+
+        url = "/api/fleet/bots/jane/voice"
+        body = {"voice": "Warm.", "personality": ""}
+        self.assertEqual(self.client.put(url, headers=jane, json=body).status_code, 403)
+        self.assertEqual(self.client.put(url, headers=human, json={"voice": "x" * 2001, "personality": ""}).status_code, 422)
+        self.assertEqual(self.client.put("/api/fleet/bots/nobody/voice", headers=human, json=body).status_code, 409)
+        self.client.put(url, headers=human, json=body).raise_for_status()
+        changed = self.client.get("/agents.md", headers=jane)
+        self.assertNotEqual(changed.headers["X-Agents-Revision"], guide.headers["X-Agents-Revision"], "an edit reaches the bot")
+        self.assertIn("Warm.", changed.text)
+        self.assertNotIn("## Your personality", changed.text)
+        self.assertEqual((row()["voice"], row()["personality"]), ("Warm.", ""))
+
+        self.client.put(url, headers=human, json={"voice": "", "personality": ""}).raise_for_status()
+        self.assertNotIn("## Your voice", self.client.get("/agents.md", headers=jane).text)
+
+    def test_a_bot_added_without_naming_it_can_have_a_voice(self):
+        human = self.register("op", "human")
+        keeper = self.register("keeper-box", "keeper")
+        self.client.post("/api/workspaces", headers=human, json={"slug": "proj", "name": "Proj"}).raise_for_status()
+        self.client.put("/api/fleet/hosts/box", headers=keeper, json={"bots": []}).raise_for_status()
+        handle = self.client.post("/api/fleet/bots", headers=human, json={"host": "box", "harness": "claude", "workspace": "proj",
+                                                                           "voice": "Plain."}).json()["handle"]
+        self.assertIn("Plain.", self.client.get("/agents.md", headers=self.register(handle, "claude-code", "proj")).text)
+
     def test_a_bot_without_a_profile_or_workspace_gets_only_what_it_has(self):
         # what a bot does not have is not listed: no "no profile" line, no empty headings
         bot = self.register("loner", "claude-code")
