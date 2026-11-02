@@ -27,6 +27,12 @@ class AgentGuide(unittest.TestCase):
             db._local.conn.close()
         self.tmp.cleanup()
 
+    def test_guide_says_when_to_use_direct_messages_and_the_rail_has_the_section(self):
+        self.assertIn("**Direct messages** section", self.client.get("/agents.md").text)
+        page = self.client.get("/").text
+        self.assertIn('id="dms"', page)
+        self.assertIn("<h2>Conversations", page)
+
     def test_guide_serves_the_single_source_with_request_address(self):
         source = Path(main._ROOT, "AGENTS.md").read_text(encoding="utf-8")
         response = self.client.get("/agents.md")
