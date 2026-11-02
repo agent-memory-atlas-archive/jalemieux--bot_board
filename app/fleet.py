@@ -145,8 +145,8 @@ def delete(handle: str, by: dict) -> str | None:
     """A human deletes a bot (#280). On the board at once: its open threads are released and
     the agent is retired (tokens revoked, gone from every list, its handle kept on its old
     messages and never reused). On its box, by its keeper: stopped, a busy one once its run
-    ends, then removed. A box not reporting does that when it reports again. Returns None,
-    or why not."""
+    ends, then removed. A box not reporting does that when it reports again, and so does any
+    other box that reports a copy (leftovers). Returns None, or why not."""
     a = db.get_agent_by_handle(handle)
     if a and a.get("retired_at"):
         return f"{handle} is deleted already"
@@ -741,6 +741,25 @@ def wanted(host: str, problems: dict | None = None) -> list[dict]:
             c.commit()
     return [{**dict(r), "run": bool(r["run"])} for r in
             c.execute("SELECT * FROM fleet_bots WHERE host=? ORDER BY handle", (host,))]
+
+
+def leftovers(host: str) -> list[dict]:
+    """The deleted bots this box still reports with no row of its own here. A bot has one row,
+    on one box, so a delete marks only that one (#368); a copy on another box is asked the same
+    from its agent's retired_at, which outlasts the row, so a box gone dark is asked when it
+    returns. Not a hand-over copy (moved): that is the keeper's own to clean up."""
+    c = db.conn()
+    raw = c.execute("SELECT report FROM fleet_hosts WHERE name=?", (host,)).fetchone()
+    if raw is None:
+        return []
+    rows = {r["handle"].lower() for r in c.execute("SELECT handle FROM fleet_bots WHERE host=?", (host,))}
+    gone = {r["handle"].lower(): r["retired_at"] for r in c.execute(
+        f"SELECT handle, retired_at FROM agents WHERE retired_at IS NOT NULL AND kind NOT IN ({','.join('?' * len(db.UNSCOPED_KINDS))})",
+        tuple(db.UNSCOPED_KINDS))}
+    return [{"handle": b["handle"], "host": host, "harness": b.get("harness") or "claude", "run": False, "set_by": "board",
+             "set_at": gone[b["handle"].lower()], "deleted": gone[b["handle"].lower()]}
+            for b in json.loads(raw["report"])["bots"]
+            if b["handle"].lower() in gone and b["handle"].lower() not in rows and b.get("status") != "moved"]
 
 
 def alert_key(host, bot):

@@ -2,6 +2,7 @@
 and fake harnesses (tests/fakes): the batch is held or given up, the thread claim is kept
 or released, the health line says what is wrong, the harness is tried again when the
 design says so. Run with python -m unittest discover -s tests."""
+import json
 import subprocess
 import sys
 import unittest
@@ -232,6 +233,33 @@ class Outcomes(unittest.TestCase):
                 self.assertNotIn("Your AGENTS.md changed", L.prompts()[2])
                 self.assertEqual(L.prompts()[2].count("the new rules"), 1)
                 self.assertEqual(L.read("agents-rev"), "r2")
+
+    # ---- a prompt too long for one argument goes on stdin (#358) --------------------------
+    def test_a_batch_too_long_for_an_argument_goes_on_stdin(self):
+        for harness in ("claude", "codex", "opencode", "copilot"):
+            with self.subTest(harness=harness), FakeBoard() as board:
+                L, _ = self.launch(board, harness, fh.step(harness, "ok", "done"), fh.step(harness, "ok", "done"))
+                L.wait_for(lambda: L.read("session"), "the first turn's session")
+                # nine at once, so no run is short: more than Linux takes as one argument
+                roots = [board.post_root("ws-general", "m%d " % i + "a" * 15_000) for i in range(9)]
+                self.settled(L, 2)
+                L.wait_for(lambda: all("m%d " % i in "".join(L.prompts()) for i in range(9)), "every message in a prompt")
+                self.assertEqual(L.read("health"), "")
+                self.assertFalse((L.state / "prompt").exists(), "the prompt file is removed after the run")
+                self.assertTrue(all(board.worker(r) == "tbot" for r in roots))
+                piped = [json.loads(x) for x in (L.scenario / (harness + ".piped")).read_text().splitlines()]
+                self.assertGreater(piped[0]["bytes"], 131_072)
+                self.assertFalse([a for a in piped[0]["args"] if len(a) > 1000], "the prompt is not an argument as well")
+                self.assertEqual(piped[0]["args"][-1] == "-", harness == "codex")
+                self.assertNotIn("-p", piped[0]["args"][-1:])
+
+    def test_a_short_prompt_stays_an_argument(self):
+        for harness in ("claude", "codex", "opencode", "copilot"):
+            with self.subTest(harness=harness), FakeBoard() as board:
+                L, _ = self.launch(board, harness, fh.step(harness, "ok", "done"))
+                self.settled(L, 2)
+                self.assertIn("please fix the widget", L.prompts()[1])
+                self.assertFalse((L.scenario / (harness + ".piped")).exists())
 
     # ---- what the box can see --------------------------------------------------------
     def test_ps_shows_the_last_outcome_and_the_launcher_version_is_kept(self):

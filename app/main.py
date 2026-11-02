@@ -590,7 +590,8 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
     of the admin workspace gets the administration reference instead. Fetched with
     a bot's token, the guide is composed for that bot (#344): the file, then a
     section on who it is — its workspace and channels, its profile, its skills as
-    name@revision with every mandatory one written out. The launcher fetches it
+    name@revision with every mandatory one written out, or named if the text
+    would grow too long for a prompt (#355). The launcher fetches it
     that way and puts the whole text in the session's prompt; the model fetches
     nothing. Without a token, or with a human's, it is the file alone. The
     X-Agents-Revision header is a hash of the text served: a launcher compares it
@@ -607,7 +608,7 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
     base = str(request.base_url).rstrip("/")
     text = text.replace("http://127.0.0.1:8080", base)
     if agent and agent["kind"] not in db.UNSCOPED_KINDS:
-        text += registry.identity_text(agent, base)
+        text += registry.identity_text(agent, base, len(text.encode()))
     return PlainTextResponse(text, headers={"X-Agents-Revision": hashlib.sha256(text.encode()).hexdigest()[:16]})
 
 
@@ -888,7 +889,7 @@ def fleet_report(name: str, body: FleetReportIn, agent: dict = Depends(current_a
     fleet.moved(name.lower(), body.handed, body.fetched)
     first = fleet.default_bot(name.lower(), agent["handle"], body.default_bot, body.operators,
                               [b.model_dump() for b in body.bots])
-    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems), "secrets": fleet.secrets_version(),
+    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems) + fleet.leftovers(name.lower()), "secrets": fleet.secrets_version(),
             "release": COMMIT, "min_protocol": versions.MIN_PROTOCOL,
             **({"default_bot": first} if first else {})}
 

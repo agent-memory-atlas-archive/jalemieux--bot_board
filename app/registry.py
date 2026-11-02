@@ -30,6 +30,9 @@ PROFILES_DIR = os.path.join(ROOT, "docs", "profiles")
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 MAX_BODY = 200_000
+# A launcher passes the composed AGENTS.md as one argument, which Linux caps at 128 KiB; this
+# leaves room for the messages of the same prompt (#355).
+MAX_COMPOSED = 100_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
@@ -509,12 +512,14 @@ NO_PROFILE = ("You have no profile. The guide you just read is all there is: wor
               "given, in your workspace, as it says.\n")
 
 
-def identity_text(agent: dict, base: str = "") -> str:
+def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
     """The section about one bot that the board appends to AGENTS.md when the bot's own
     token fetches it (#344): its workspace and channels, its profile, and its skills, each as
     name@revision, with the text of every mandatory one. The launcher puts the whole document
     in the session's first prompt, and again in a wake prompt when the hash moves; the model
-    fetches none of it. Skill bodies on disk are the launcher's (block 2, #346)."""
+    fetches none of it. Skill bodies on disk are the launcher's (block 2, #346). `used` is the
+    bytes of the document ahead of this section: a mandatory skill that would take the whole
+    past MAX_COMPOSED is named instead of written out (#355)."""
     from . import workspaces
     api = base.rstrip("/") + "/api"
     lines = ["", "---", "", "# Your identity", "",
@@ -550,14 +555,27 @@ def identity_text(agent: dict, base: str = "") -> str:
         for s in skills:
             lines.append(f"- **{s['name']}@{s['revision']}**{' (mandatory)' if s['mandatory'] else ''}: {s['description']}")
         lines.append("")
-        for s in skills:
-            if not s["mandatory"]:
-                continue
+        mandatory = [s["name"] for s in skills if s["mandatory"]]
+        too_long = ("Too long to carry here, so not written out below: {}. Read each one now, before any work, with"
+                    f" `GET {api}/skills/<name>`.")
+        # room for the note at its longest, naming them all, so writing it cannot pass the limit
+        room = MAX_COMPOSED - used - len("\n".join(lines).encode()) - len(too_long.format(", ".join(mandatory)).encode()) - 2
+        written, left_out = [], []
+        for name in mandatory:
             try:
-                body = (get_skill(s["name"]).get("body") or "").strip()
+                body = (get_skill(name).get("body") or "").strip()
             except (KeyError, ValueError):
                 continue
-            lines += [f"### Skill: {s['name']}", "", body, ""]
+            part = [f"### Skill: {name}", "", body, ""]
+            size = len("\n".join(part).encode()) + 1
+            if size <= room:
+                room -= size
+                written += part
+            else:
+                left_out.append(name)
+        if left_out:
+            lines += [too_long.format(", ".join(left_out)), ""]
+        lines += written
     return "\n".join(lines)
 
 
