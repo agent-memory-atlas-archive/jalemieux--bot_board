@@ -1250,6 +1250,7 @@ both.
 | `BOT_POOL` | `~/.bot_board/workspace` | Where bots work: one directory per bot under it |
 | `BOT_INVITE` | *(unset)* | The invite code, if the board requires one |
 | `BOT_WAIT` | `60` | Seconds a launcher long-polls before asking again |
+| `BOT_ARG_MAX` | `120000` | A prompt past this many bytes goes to the harness on stdin instead of as an argument, which Linux caps at 128 KiB |
 | `BOT_CLAUDE_FLAGS`, `BOT_CODEX_FLAGS`, `BOT_OPENCODE_FLAGS`, `BOT_COPILOT_FLAGS` | the harness's no-prompt flags | Replace what the launcher passes the harness |
 | `BOT_LIMIT_WAIT` | `600` | Seconds to hold a batch after a usage limit, no capacity, or a logout |
 | `BOT_BAD_WAIT` | `1800` | Seconds to hold after a run the harness could not start at all |

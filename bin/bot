@@ -890,7 +890,15 @@ BOT_RETRY_WAITS=${BOT_RETRY_WAITS:-60 300 900}   # transient failures, one wait 
 BOT_UNKNOWN_WAIT=${BOT_UNKNOWN_WAIT:-300}    # a failure the launcher cannot name: one more try, then the batch is given up
 RUN_MESSAGES=""     # the message ids a run is for, for last.json; the caller sets it
 run_harness() {
-  local dir=$1 sfile=$2 prompt=$3 rc=0 sid="" off started now
+  local dir=$1 sfile=$2 prompt=$3 rc=0 sid="" off started now input=/dev/null bytes
+  local arg=("$prompt") codex_arg=("$prompt") copilot_arg=(-p "$prompt")
+  # Linux caps one argument at 128 KiB. A prompt past BOT_ARG_MAX bytes goes on stdin (#358);
+  # the others stay arguments, the form every harness version here has been run with.
+  bytes=$(LC_ALL=C; echo "${#prompt}")
+  if [ "$bytes" -gt "${BOT_ARG_MAX:-120000}" ]; then
+    input=$STATE/prompt; printf '%s' "$prompt" >"$input"
+    arg=(); codex_arg=(-); copilot_arg=()
+  fi
   off=$(wc -c <"$LOG" 2>/dev/null || echo 0); started=$(date -u +%FT%TZ)
   [ -s "$sfile" ] && sid=$(cat "$sfile")
   load_fleet_env
@@ -901,17 +909,17 @@ run_harness() {
   # their first event so later runs can resume it
   case $HARNESS in claude|copilot) [ -n "$sid" ] || sid=$(python3 -c 'import uuid;print(uuid.uuid4())') ;; esac
   # In a subshell: the harness runs in its directory, the launcher stays where it was.
-  # Stdin is /dev/null: the caller's loop feeds stdin, and a harness that read it would
-  # eat the loop's input.
+  # Stdin is /dev/null or the prompt too long for an argument, never the caller's: its
+  # loop feeds stdin, and a harness that read it would eat the loop's input.
   (cd "$dir" && case $HARNESS in
     claude)
-      if [ ! -s "$sfile" ]; then claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS "$prompt"
-      else                       claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS "$prompt"; fi \
+      if [ ! -s "$sfile" ]; then claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS "${arg[@]}"
+      else                       claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS "${arg[@]}"; fi \
         >"$STATE/run.out" 2>"$STATE/run.err" ;;
     codex)
       if [ ! -s "$sfile" ]; then
         # Keep reading to EOF: closing the pipe early kills the harness with SIGPIPE.
-        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "$prompt" 2>"$STATE/run.err" \
+        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -920,10 +928,10 @@ for line in sys.stdin:
     except ValueError: continue
     if d.get("type")=="thread.started" and not seen: print(d["thread_id"]); seen=True' > "$sfile.new"
       # the flags go before "resume": the subcommand takes neither -C nor -s
-      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "$prompt" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
     opencode)
       if [ ! -s "$sfile" ]; then
-        opencode run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS "$prompt" 2>"$STATE/run.err" \
+        opencode run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS "${arg[@]}" 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -931,12 +939,13 @@ for line in sys.stdin:
     try: d=json.loads(line)
     except ValueError: continue
     if d.get("sessionID") and not seen: print(d["sessionID"]); seen=True' > "$sfile.new"
-      else opencode run --format json --session "$sid" $BOT_OPENCODE_FLAGS "$prompt" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else opencode run --format json --session "$sid" $BOT_OPENCODE_FLAGS "${arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
     copilot)
       # -s keeps copilot's stats out of the log
-      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS -p "$prompt"
-      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS -p "$prompt"; fi >>"$LOG" 2>"$STATE/run.err" ;;
-  esac </dev/null) || rc=$?
+      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS "${copilot_arg[@]}"
+      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS "${copilot_arg[@]}"; fi >>"$LOG" 2>"$STATE/run.err" ;;
+  esac <"$input") || rc=$?
+  rm -f "$STATE/prompt"
   if [ -s "$sfile.new" ]; then sid=$(cat "$sfile.new"); fi; rm -f "$sfile.new"
   classify_run "$rc" "$off" "$sid" "$started"
   now=$(date -u +%FT%TZ)
