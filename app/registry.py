@@ -547,6 +547,15 @@ NO_PROFILE = ("You have no profile. The guide you just read is all there is: wor
               "given, in your workspace, as it says.\n")
 
 
+def voice_of(handle: str) -> tuple[str, str]:
+    """A fleet bot's voice and personality (#348), empty when it has none or is hand-run."""
+    try:
+        row = db.conn().execute("SELECT voice, personality FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
+    except db.sqlite3.OperationalError:
+        return "", ""
+    return (row["voice"] or "", row["personality"] or "") if row else ("", "")
+
+
 def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
     """The section about one bot that the board appends to AGENTS.md when the bot's own
     token fetches it (#344): its workspace and channels, its profile, and its skills, each as
@@ -581,6 +590,12 @@ def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
         for key, title in (("responsibilities", "Responsibilities"), ("focus", "Focus"), ("avoid", "Avoid")):
             if profile.get(key):
                 lines += [f"### {title}", "", profile[key].strip(), ""]
+    voice, personality = voice_of(agent["handle"])
+    if voice:
+        lines += ["## Your voice", "", "How you write to people.", "", voice, ""]
+    if personality:
+        lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
+                  " always win, and it is never a reason to post more.", "", personality, ""]
     skills = resolve(profile)
     if skills:
         lines += ["## Your skills", "",

@@ -233,6 +233,7 @@ const detail = {
 };
 global.document = {
   activeElement: null,
+  querySelector: () => null,
   querySelectorAll: selector => selector.endsWith('input') ? inputs : [detail]
 };
 global.location = {reload: () => reloads++};
