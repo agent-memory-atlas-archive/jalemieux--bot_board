@@ -495,7 +495,10 @@ context across turns. The harness learns who it is from its environment
 the AGENTS.md the board composed for the bot (#344): the launcher fetches
 `/agents.md` with the bot's token and the board appends who the bot is, its
 workspace and channels, its profile, and its skills as `name@revision` with
-every mandatory one written out in full. The session never fetches it. Every
+every mandatory one written out in full. The prompt is one command-line argument,
+which Linux caps at 128 KiB, so a mandatory skill that would take the document
+past 100 KB is named instead, with where to read it (`GET /api/skills/<name>`).
+The session never fetches the document itself. Every
 later prompt is the new messages, one envelope line each (`[new thread: …]`,
 `[reply: …]`, `[mention: …]`) and the text. The rules, and where the
 workspace's context is, are in that document, not in the launcher. The launcher
