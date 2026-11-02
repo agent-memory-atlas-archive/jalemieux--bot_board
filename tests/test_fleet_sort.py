@@ -58,7 +58,8 @@ class FleetSort(unittest.TestCase):
                                         "pool": True, "last_run": self.RAN[h]} for h in handles]}).raise_for_status()
 
     def column(self, table, i):
-        return self.page.eval_on_selector_all(f"{table} tbody tr", f"rs => rs.map(r => r.cells[{i}].innerText.trim())")
+        # a bot's drawer row (hidden until its row is clicked) is not a row of the table's order
+        return self.page.eval_on_selector_all(f"{table} tbody tr:not(.bot-drawer)", f"rs => rs.map(r => r.cells[{i}].innerText.trim())")
 
     def sort_by(self, table, label):
         self.page.click(f"{table} thead button.sort:text-is('{label}')")

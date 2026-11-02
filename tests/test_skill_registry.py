@@ -81,6 +81,89 @@ class Registry(unittest.TestCase):
         names = [t["name"] for t in self.client.get("/api/profiles/templates", headers=self.human).json()["templates"]]
         self.assertEqual(names, ["architect", "artist", "developer", "lore-writer", "product-manager"])
 
+    # ---- base skills (#347)
+
+    def make_base(self):
+        r = self.client.put("/api/skills/house-style", headers=self.human, json={"body": "Short sentences.", "base_revision": 0,
+                            "fields": {"description": "How to write.", "base": True}, "reason": "every bot"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["skill"]["base"])
+
+    def me(self, headers=None):
+        return self.client.get("/api/me/profile?json", headers=headers or self.bot).json()
+
+    def add_bot(self, handle, profile):
+        self.client.put(f"/api/fleet/bots/{handle}", headers=self.human, json={"host": "box", "run": True, "harness": "claude",
+                        "workspace": "proj", "profile": profile}).raise_for_status()
+        return self.register(handle, "claude-code", "proj")
+
+    def test_a_base_skill_reaches_a_bot_with_no_profile_and_its_revision_moves(self):
+        self.assertEqual(self.me()["skills"], [])
+        self.assertEqual(self.me()["skills_revision"], "")
+        self.make_base()
+        me = self.me()
+        self.assertEqual([(s["name"], s["mandatory"], s["base"]) for s in me["skills"]], [("house-style", True, True)])
+        before = me["skills_revision"]
+        self.assertTrue(before)
+        self.client.put("/api/skills/house-style", headers=self.human, json={"body": "Shorter.", "base_revision": 1,
+                        "fields": {"description": "How to write."}}).raise_for_status()
+        self.assertNotEqual(self.me()["skills_revision"], before)
+        text = self.client.get("/api/me/profile", headers=self.bot).text
+        self.assertIn("You have no profile", text)
+        self.assertIn("- **house-style** (mandatory, every bot): How to write.", text)
+
+    def test_base_comes_after_the_profiles_own_and_a_listing_changes_nothing(self):
+        self.make_base()
+        jane = self.add_bot("jane", "developer")
+        self.assertEqual([s["name"] for s in self.me(jane)["skills"]], ["github-lifecycle", "house-style"])
+        # a profile that lists it, not even as mandatory: once, and still mandatory
+        self.client.post("/api/profiles", headers=self.human, json={"name": "lister", "role": "Lists it.", "skills": [
+            {"name": "house-style"}, {"name": "github-lifecycle"}]}).raise_for_status()
+        lee = self.add_bot("lee", "lister")
+        self.assertEqual([(s["name"], s["mandatory"]) for s in self.me(lee)["skills"]],
+                         [("house-style", True), ("github-lifecycle", False)])
+        profile = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
+        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertEqual([s["name"] for s in profile["base_skills"]], ["house-style"])
+        self.assertEqual(self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]["base_skills"], [])
+        self.assertIn("Every bot also has", self.client.get("/fleet/profiles/developer").text)
+        self.assertNotIn("Every bot also has", self.client.get("/fleet/profiles/lister").text)
+
+    def test_an_edit_keeps_base_unless_it_says_false_and_history_shows_when(self):
+        self.make_base()
+        put = lambda rev, **f: self.client.put("/api/skills/house-style", headers=self.human, json={
+            "body": "Text.", "base_revision": rev, "fields": {"description": "How to write.", **f}}).raise_for_status().json()["skill"]
+        self.assertTrue(put(1)["base"], "an edit from a form that knows nothing of base keeps it")
+        r = self.client.put("/api/skills/house-style", headers=self.human, json={"body": SKILL.replace("release-notes", "house-style"),
+                            "base_revision": 2})
+        self.assertTrue(r.json()["skill"]["base"], "and so does a whole SKILL.md without the field")
+        self.assertFalse(put(3, base=False)["base"])
+        self.assertEqual(self.me()["skills"], [])
+        history = self.client.get("/api/skills/house-style/history", headers=self.bot).json()["revisions"]
+        self.assertEqual([h["base"] for h in history], [False, True, True, True])
+        r = self.client.put("/api/skills/house-style", headers=self.human, json={"body": "---\nname: house-style\ndescription: D.\nbase: true\n---\n\nX.\n",
+                            "base_revision": 4})
+        self.assertTrue(r.json()["skill"]["base"], "the frontmatter sets it too")
+        self.assertTrue(self.skills()["house-style"]["base"])
+        self.assertFalse(self.skills()["github-lifecycle"]["base"])
+        r = self.client.put("/api/skills/house-style", headers=self.human, json={"body": "X.", "base_revision": 5,
+                            "fields": {"description": "D.", "base": "maybe"}})
+        self.assertEqual(r.status_code, 422)
+        self.assertNotIn("base", self.client.get("/api/skills/house-style", headers=self.bot).text.split("---")[1])
+
+    def test_a_base_skill_cannot_be_deleted_and_its_reset_reaches_every_bot(self):
+        self.make_base()
+        self.add_bot("jane", "developer")
+        self.assertEqual(registry.bots_of_skill("house-style"), ["jane"])
+        r = self.client.request("DELETE", "/api/skills/house-style", headers=self.human, json={"base_revision": 1, "reason": "no"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("base skill", r.text)
+        self.client.put("/api/skills/house-style", headers=self.human, json={"body": "X.", "base_revision": 1,
+                        "fields": {"description": "D.", "base": False}}).raise_for_status()
+        r = self.client.request("DELETE", "/api/skills/house-style", headers=self.human, json={"base_revision": 2, "reason": "gone"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.me()["skills"], [])
+
     # ---- skills
 
     def test_humans_and_admin_bots_write_skills_everyone_reads_them(self):
@@ -362,11 +445,14 @@ class Registry(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me/profile?json", headers=self.bot).json(),
                          {"profile": None, "skills": [], "skills_revision": ""})
 
-    def test_the_guide_sends_a_new_session_to_its_profile(self):
+    def test_the_guide_says_the_copy_ends_with_who_the_bot_is(self):
+        # #344: the launcher fetches the guide with the bot's token and the copy carries its
+        # profile and skills; the bot fetches nothing itself
         text = self.client.get("/agents.md").text
+        self.assertIn("Your launcher fetched this guide with your", text)
+        self.assertIn("whichever of those you have", text)
+        self.assertIn("you never fetch it yourself", text)
         self.assertIn("`GET /api/me/profile`", text)
-        self.assertIn("Read it at the start of every session", text)
-        self.assertIn("when one of yours changes, your launcher says so in a prompt", text)
 
 
 class Frontmatter(unittest.TestCase):

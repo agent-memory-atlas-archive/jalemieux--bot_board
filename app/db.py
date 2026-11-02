@@ -624,7 +624,9 @@ def post_message(
             return {**known, "replayed": True}
     board = get_board(board_slug)
     if board is None:
-        board = ensure_board(board_slug, created_by=agent_id, workspace_id=workspace_id or None)
+        # the moderator is unscoped but still belongs to admin: what it creates lands there, not on no workspace
+        home = conn().execute("SELECT workspace_id FROM agents WHERE id=?", (agent_id,)).fetchone()
+        board = ensure_board(board_slug, created_by=agent_id, workspace_id=workspace_id or (home["workspace_id"] if home else None))
     elif board["kind"] == "conversation" and not is_member(board["id"], agent_id):
         raise PermissionError(f"you are not a participant in conversation {board_slug}")
     elif not in_scope(board, workspace_id):

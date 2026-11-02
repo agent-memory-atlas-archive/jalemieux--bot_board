@@ -488,8 +488,8 @@ IMAGE_JS = """
 
 # Deleting a bot (#280), from /fleet or its page: one confirm, then DELETE /api/agents/<handle>.
 DELETE_BOT_JS = """
-function deleteBot(handle, token, done) {
-  if (!confirm('Delete @' + handle + '? Its threads are released for pickup, its token stops working and it leaves '
+function deleteBot(handle, token, done, also) {
+  if (!confirm('Delete @' + handle + '? ' + (also ? also + ' ' : '') + 'Its threads are released for pickup, its token stops working and it leaves '
                + 'the board; its keeper stops it (a busy bot finishes its run first) and removes its config, token, '
                + 'working directory and sessions from its box. Its old messages keep its name. This cannot be undone.')) return;
   fetch('/api/agents/' + encodeURIComponent(handle), {method: 'DELETE', headers: {'Authorization': 'Bearer ' + token}})
@@ -1884,8 +1884,18 @@ def _sortable(*labels: str) -> str:
                    '<th><span class="sr-only">Actions</span></th>' for l in labels)
 
 
-def _bot_row(b: dict, host: str, others: list) -> str:
-    """One bot as one table row: who, what it is doing, its group, harness, box, when last active, and its buttons."""
+HARNESS_NAMES = ("claude", "codex", "opencode", "copilot")     # what bin/bot can run
+
+
+def _harness(h: str) -> str:
+    """The harness as a word with a colour mark, so rows group by eye; "?" when nobody knows it."""
+    return f'<span class="hz hz-{e(h)}">{e(h)}</span>' if h in HARNESS_NAMES else e(h or "?")
+
+
+def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
+    """One bot as one table row: who, what it is doing, its workspace, role, harness, box and when last
+    active. Its buttons, facts and open threads are in a drawer row beneath, opened by clicking the row. key names the row in
+    its ids, the handle unless this bot already has a row (live on two boxes, #364)."""
     st = b.get("state") or fleet_mod.bot_state(b)    # the words /status and /projects use too (#100)
     up = b["status"].startswith(fleet_mod.UP)
     tone = ("run" if st["state"] == "working" else "ok" if st["can_work"] and not st["reason"]
@@ -1911,12 +1921,13 @@ def _bot_row(b: dict, host: str, others: list) -> str:
     profile = (f'<a class="chip" href="/fleet/profiles/{e(b["profile"])}">{e(b["profile"])}</a>' if b.get("profile")
                else '<span class="dim">none</span>')
     # the channels it claims new threads in, when bound (fleet bots only; a hand-run bot has no row)
+    chans = ""
     if b.get("pool") or b.get("want"):
         bound = b.get("channels") or []
         profile += (f'<div class="by">in {", ".join("#" + e(c) for c in bound)}</div>' if bound
                     else '<div class="by dim">any channel</div>')
-        profile += (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
-                    f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels</button>')
+        chans = (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
+                 f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels…</button>')
     # last active: the keeper knows its last harness run, the board its last post
     last = max((b.get(k) or "" for k in ("last_run", "last_post")), default="")
     # a bot whose harness nobody knows was last started by hand before bin/bot recorded it
@@ -1933,56 +1944,97 @@ def _bot_row(b: dict, host: str, others: list) -> str:
     if can and again and not up:
         btn = act("cancel", 0, ' title="withdraw the start"')
     # stop waits for the harness run to end; kill ends it, for a bot that is stuck or running away
-    if up and can:
-        btn += act("kill", 0, ' data-kill="1" title="stop now, ending the run it is in"')
+    danger = act("kill", 0, ' data-kill="1" title="stop now, ending the run it is in"') if up and can else ""
     # a session keeps the role it was started with: a human can have the bot start a new one (#221)
     if can and not b.get("deleted"):
         btn += (f'<button type="button" class="reset" data-handle="{e(b["handle"])}" '
                 'title="set its harness session aside; it reads the rules again and starts fresh">new session</button>')
+    btn += chans
     # delete (#280): gone from the board at once, and from its box once its keeper has removed it
     if b["status"] != "moved" and not b.get("deleted"):
-        btn += (f'<button type="button" class="act delete-bot" data-handle="{e(b["handle"])}" '
-                'title="release its threads, revoke its token, remove it from its box and from the board">delete</button>')
+        danger += (f'<button type="button" class="act delete-bot" data-handle="{e(b["handle"])}" data-also="{e(b.get("also_on") or "")}" '
+                   'title="release its threads, revoke its token, remove it from its box and from the board">delete</button>')
     # a running pool bot can go to any other box that is reporting; its keeper packs it, the other unpacks it
     if up and can and b.get("pool") and others and not b.get("move_to") and not b.get("fetch"):
         btn += (f'<select class="move" data-handle="{e(b["handle"])}" aria-label="move @{e(b["handle"])} to another box">'
-                '<option value="">move…</option>' + "".join(f"<option>{e(o)}</option>" for o in others) + "</select>")
+                '<option value="">move to…</option>' + "".join(f"<option>{e(o)}</option>" for o in others) + "</select>")
     srt = _sort_value
-    return (f'<tr id="bot-{e(b["handle"])}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}"><td class="who"{srt(b["handle"])}><a href="/a/{e(b["handle"])}">@{e(b["handle"])}</a>'
-            f'<button type="button" class="open-bot" aria-label="Actions for @{e(b["handle"])}" title="its actions"></button></td>'
-            f'<td class="doing"{srt(DOING_ORDER.get(st["state"], len(DOING_ORDER)))}><span class="pip {tone}"></span>{e(st["words"])}{why}</td>'
-            f'<td data-label="group"{srt(b.get("workspace") or b.get("serves") or "")}>{group}</td>'
-            f'<td data-label="profile"{srt(b.get("profile") or "")}>{profile}</td>'
-            f'<td data-label="harness"{srt(b.get("harness") or "")}>{e(b.get("harness") or "?")}</td>'
-            f'<td data-label="machine"{srt(host)}><a href="#box-{e(host)}">{e(host)}</a></td>'
-            f'<td data-label="active" class="dim nw"{srt(last)}>{e(ago(last)) if last else "never"}</td>'
-            f'<td class="acts">{btn}</td></tr>' + (_stop_panel(b, host) if asks and can else ""))
+    h = e(b["handle"])
+    k = e(key or b["handle"])
+    row = (f'<tr id="bot-{k}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}">'
+           f'<td class="who"{srt(b["handle"])}><a href="/a/{h}">@{h}</a></td>'
+           f'<td class="doing"{srt(DOING_ORDER.get(st["state"], len(DOING_ORDER)))}><span class="pip {tone}"></span>{e(st["words"])}{why}</td>'
+           f'<td data-label="workspace"{srt(b.get("workspace") or b.get("serves") or "")}>{group}</td>'
+           f'<td data-label="profile"{srt(b.get("profile") or "")}>{profile}</td>'
+           f'<td data-label="harness"{srt(b.get("harness") or "")}>{_harness(b.get("harness") or "")}</td>'
+           f'<td data-label="machine"{srt(host)}><a href="#box-{e(host)}">{e(host)}</a></td>'
+           f'<td data-label="active" class="dim nw"{srt(last)}>{e(ago(last)) if last else "never"}</td>'
+           f'<td class="tog"><button type="button" class="open-bot" aria-label="Actions for @{h}" aria-expanded="false" '
+           f'aria-controls="drawer-{k}" title="its actions and details"></button></td></tr>')
+    return row + _drawer(b, host, btn, danger, _stop_panel(b, host, k) if asks and can else "", k)
 
 
-def _stop_panel(b: dict, host: str) -> str:
-    """Opened by stop or kill on a bot that holds open threads: hand them off once it has
-    stopped (the default, #217), keep them, or retire it (#167)."""
-    h, n = e(b["handle"]), b["open_threads"]
+def _drawer(b: dict, host: str, acts: str, danger: str, question: str, k: str) -> str:
+    """The row beneath a bot's: its everyday buttons on the left, kill and delete set apart on the right,
+    then what its keeper and the board know about it, and the threads it holds."""
+    buttons = (f'<div class="acts d-acts">{acts}'
+               + (f'<span class="gap"></span><div class="d-danger">{danger}</div>' if danger else "") + '</div>') if acts or danger else ""
+    facts = [(k, v) for k, v in (
+        ("session", f'started {ago(b["session_started"])}' if b.get("session_started") else ""),
+        ("launcher", b.get("launcher") or ""),
+        ("last run", ago(b["last_run"]) if b.get("last_run") else ""),
+        ("last post", ago(b["last_post"]) if b.get("last_post") else ""),
+    ) if v]
+    facts_html = ('<div class="d-facts">' + "".join(f'<span>{e(k)} <b>{e(v)}</b></span>' for k, v in facts) + '</div>') if facts else ""
+    facts_html += _voice_block(b)
+    held, listed = b.get("open_threads") or 0, b.get("open_thread_list") or []
     items = "".join(f'<li><a href="/t/{t["thread_id"]}">#{e(t["channel"])} · {e(t["title"] or "(untitled)")}</a>'
-                    f' <span class="dim">{e(ago(t["last_at"]))}</span></li>' for t in b.get("open_thread_list") or [])
-    more = n - len(b.get("open_thread_list") or [])
+                    f' <span class="dim">{e(ago(t["last_at"]))}</span></li>' for t in listed[:3])
+    more = held - min(len(listed), 3)
     items += f'<li class="dim">and {more} more</li>' if more > 0 else ""
-    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{h}" value="{v}"{on}> <b>{label}</b>'
+    threads = f'<ul class="d-threads">{items}</ul>' if items else ""
+    return (f'<tr class="bot-drawer" id="drawer-{k}" hidden><td colspan="8">{buttons}{facts_html}{threads}{question}</td></tr>')
+
+
+def _voice_block(b: dict) -> str:
+    """A fleet bot's voice and personality in its drawer, with an Edit that turns them into fields
+    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing."""
+    if not b.get("want") or b["status"] == "moved" or b.get("deleted"):
+        return ""
+    h, voice, personality = e(b["handle"]), b.get("voice") or "", b.get("personality") or ""
+    shown = lambda text: e(text) if text else '<span class="dim">none set</span>'
+    return (f'<div class="d-voice" data-handle="{h}" data-voice="{e(voice)}" data-personality="{e(personality)}">'
+            '<h4>Voice and personality <button type="button" class="act voice-edit">Edit</button></h4><div class="d-voice-two">'
+            f'<div class="quote"><b>Voice</b><span>{shown(voice)}</span></div>'
+            f'<div class="quote"><b>Personality</b><span>{shown(personality)}</span></div></div>'
+            f'<p class="dim">Reaches @{h} at its next wake. A long session may keep some of its old tone; '
+            'a <b>new session</b> starts clean.</p></div>')
+
+
+def _stop_panel(b: dict, host: str, k: str) -> str:
+    """Opened by stop or kill on a bot that holds open threads: hand them off once it has
+    stopped (the default, #217), keep them, or retire it (#167). Lives in the bot's drawer."""
+    h, n = e(b["handle"]), b["open_threads"]
+    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{k}" value="{v}"{on}> <b>{label}</b>'
                                          f' <span class="dim">{note}</span></label>')
-    return (f'<tr class="stop-panel" id="stop-{h}" hidden><td colspan="8">'
-            f'<p>@{h} holds {n} open thread{"s" * (n != 1)}. What should happen to {"them" if n != 1 else "it"}?</p>'
-            f'<ul>{items}</ul><div class="opts">'
+    return (f'<div class="stop-panel" id="stop-{k}" hidden>'
+            f'<p>@{h} holds {n} open thread{"s" * (n != 1)}. What should happen to {"them" if n != 1 else "it"} when it stops?</p>'
+            '<div class="opts">'
             # hand off by default: a stopped bot that keeps its threads holds them from everyone (#217)
             + opt("handoff", "Hand them off", "released once it has stopped; the next watching bot claims each", " checked")
             + opt("keep", "Keep them", "for a planned restart or a move; nobody else can pick them up meanwhile")
             + opt("retire", "Retire", "hand them off, and drop it from the stopped list")
             + f'</div><button type="button" class="act stop-go" data-handle="{h}" data-host="{e(host)}" data-run="0">'
-              'Stop</button> <button type="button" class="stop-cancel">cancel</button></td></tr>')
+              'Stop</button> <button type="button" class="stop-cancel">cancel</button></div>')
 
 
 def _bot_table(entries: list, others_of) -> str:
-    head = f'<thead><tr>{_sortable("Bot", "Doing", "Group", "Role", "Harness", "Machine", "Active", None)}</tr></thead>'
-    rows = "".join(_bot_row(b, h["name"], others_of(h)) for h, b in entries)
+    head = f'<thead><tr>{_sortable("Bot", "Doing", "Workspace", "Role", "Harness", "Machine", "Active", None)}</tr></thead>'
+    seen, rows = set(), ""
+    for h, b in entries:
+        name = b["handle"].lower()
+        rows += _bot_row(b, h["name"], others_of(h), f'{b["handle"]}~{h["name"]}' if name in seen else b["handle"])
+        seen.add(name)
     return f'<table class="bots">{head}<tbody>{rows}</tbody></table>'
 
 
@@ -2102,34 +2154,35 @@ machineCopy.addEventListener('click', async function () {
     machineStatus.textContent = 'Clipboard unavailable. Select and copy the command manually.';
   }
 });
-function ask(handle, host, run, harness, kill, workspace, threads, profile, channels) {   // no handle: a new bot, named by the board
+function ask(handle, host, run, harness, kill, workspace, threads, profile, channels, voice, personality) {   // no handle: a new bot, named by the board
   if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
   fetch('/api/fleet/bots' + (handle ? '/' + encodeURIComponent(handle) : ''), {method: handle ? 'PUT' : 'POST',
     headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
     body: JSON.stringify(handle ? {host: host, run: run, harness: harness || null, kill: !!kill, workspace: workspace || null,
-                                   threads: threads || null, profile: profile || null, channels: channels || null}
+                                   threads: threads || null, profile: profile || null, channels: channels || null,
+                                   voice: voice || null, personality: personality || null}
                                 : {host: host, harness: harness, workspace: workspace || null, profile: profile || null,
-                                   channels: channels || null})})
+                                   channels: channels || null, voice: voice || null, personality: personality || null})})
   .then(function (r) { return r.json().then(function (d) {
     if (r.ok) location.reload(); else alert(d.error || ('refused: ' + r.status)); }); })
   .catch(function () { alert('could not reach the board'); });
 }
-// A stop of a bot holding open threads opens its panel first; its button then sends the choice.
+// A stop of a bot holding open threads opens its question first; its button then sends the choice.
 function stopLabel(panel) {
   var v = panel.querySelector('input:checked').value, verb = panel.dataset.kill ? 'Kill' : 'Stop';
   panel.querySelector('.stop-go').textContent = verb + (v === 'handoff' ? ' and hand off' : v === 'retire' ? ' and retire' : '');
 }
 document.addEventListener('change', function (ev) {
-  var panel = ev.target.closest('tr.stop-panel'); if (panel) stopLabel(panel);
+  var panel = ev.target.closest('.stop-panel'); if (panel) stopLabel(panel);
 });
 document.addEventListener('click', function (ev) {
-  if (ev.target.closest('button.stop-cancel')) ev.target.closest('tr.stop-panel').hidden = true;
+  if (ev.target.closest('button.stop-cancel')) ev.target.closest('.stop-panel').hidden = true;
 });
 document.addEventListener('click', function (ev) {
   // only the bot rows' start, stop and kill, the buttons that carry data-run: others are styled .act too (Check
   // on, + Add a skill, delete, channels) and have handlers of their own (#314)
   var b = ev.target.closest('button.act[data-handle][data-run]'); if (!b) return;
-  var panel = document.getElementById('stop-' + b.dataset.handle);
+  var drawer = b.closest('.bot-drawer'), panel = drawer && drawer.querySelector('.stop-panel');   // a bot live on two boxes has two (#364)
   if (b.dataset.open && panel) {
     panel.hidden = false;
     if (b.dataset.kill) panel.dataset.kill = '1'; else delete panel.dataset.kill;
@@ -2176,7 +2229,7 @@ document.addEventListener('click', function (ev) {
 document.addEventListener('click', function (ev) {
   var b = ev.target.closest('button.delete-bot'); if (!b) return;
   if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
-  deleteBot(b.dataset.handle, ME.token, function () { location.reload(); });
+  deleteBot(b.dataset.handle, ME.token, function () { location.reload(); }, b.dataset.also);
 });
 document.addEventListener('click', function (ev) {
   var b = ev.target.closest('button.reset'); if (!b) return;
@@ -2236,18 +2289,61 @@ document.addEventListener('click', function (ev) {
 document.addEventListener('submit', function (ev) {
   var f = ev.target.closest('form.newbot-top'); if (!f) return;
   ev.preventDefault();
-  var picked = Array.prototype.map.call(f.elements.channels.selectedOptions || [], function (o) { return o.value; });
+  var picked = Array.prototype.map.call(f.querySelectorAll('input[name="channels"]:checked'), function (o) { return o.value; });
   var prof = f.elements.profile.selectedOptions[0];
   if (prof && prof.dataset.specialized && !picked.length) { alert(prof.value + ' is a specialized profile: pick at least one channel for the bot.'); return; }
   ask(f.elements.handle.value.trim().replace(/^@/, ''), f.elements.host.value, true,
-      f.elements.harness.value, false, f.elements.workspace.value, null, f.elements.profile.value, picked.length ? picked : null);
+      f.elements.harness.value, false, f.elements.workspace.value, null, f.elements.profile.value, picked.length ? picked : null,
+      f.elements.voice.value.trim(), f.elements.personality.value.trim());
 });
-// The channel picker lists the channels of the workspace chosen above it.
+// A bot's voice and personality: Edit turns the two texts into fields, built only then, so a
+// closed editor leaves nothing for the page's reload to wait on.
+document.addEventListener('click', function (ev) {
+  var box = ev.target.closest('.d-voice'); if (!box) return;
+  var two = box.querySelector('.d-voice-two');
+  if (ev.target.closest('button.voice-edit')) {
+    if (box.querySelector('form')) return;
+    var f = document.createElement('form');
+    [['voice', 'Voice', 'how it writes to people'], ['personality', 'Personality', 'who it is; expression only, the rules still win']].forEach(function (x) {
+      var l = document.createElement('label'), t = document.createElement('textarea');
+      l.innerHTML = '<b>' + x[1] + '</b> <small>' + x[2] + '</small>';
+      t.name = x[0]; t.maxLength = 2000; t.rows = 3; t.value = box.dataset[x[0]];
+      l.appendChild(t); f.appendChild(l);
+    });
+    f.insertAdjacentHTML('beforeend', '<div class="d-voice-go"><button type="submit" class="act">Save</button> <button type="button" class="act voice-cancel">cancel</button></div>');
+    two.hidden = true; box.insertBefore(f, two); f.elements.voice.focus();
+  } else if (ev.target.closest('button.voice-cancel')) {
+    box.querySelector('form').remove(); two.hidden = false;
+  }
+});
+document.addEventListener('submit', function (ev) {
+  var box = ev.target.closest('.d-voice'); if (!box) return;
+  ev.preventDefault();
+  if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
+  fetch('/api/fleet/bots/' + encodeURIComponent(box.dataset.handle) + '/voice', {method: 'PUT',
+    headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
+    body: JSON.stringify({voice: ev.target.elements.voice.value, personality: ev.target.elements.personality.value})})
+  .then(function (r) { return r.json().then(function (d) {
+    if (r.ok) { ev.target.remove(); location.reload(); } else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
+  .catch(function () { alert('could not reach the board'); });
+});
+function showAddBot(open) {
+  var card = document.getElementById('addbot'), btn = document.querySelector('.addbot-btn'); if (!card || !btn) return;
+  card.hidden = !open; btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) card.querySelector('select').focus(); else btn.focus();
+}
+document.addEventListener('click', function (ev) {
+  if (ev.target.closest('button.addbot-btn')) showAddBot(document.getElementById('addbot').hidden);
+  else if (ev.target.closest('button.addbot-cancel')) showAddBot(false);
+});
+// The channel chips list the channels of the workspace chosen above them.
 var CHANNELS = JSON.parse((document.getElementById('channels-data') || {}).textContent || '{}');
 function fillChannels() {
-  var f = document.querySelector('form.newbot-top'); if (!f || !f.elements.channels) return;
-  var sel = f.elements.channels, list = CHANNELS[f.elements.workspace.value] || [];
-  sel.innerHTML = list.map(function (c) { return '<option value="' + c.slug + '">' + (c.name || c.slug) + '</option>'; }).join('');
+  var f = document.querySelector('form.newbot-top'), box = document.getElementById('newbot-channels'); if (!f || !box) return;
+  var list = CHANNELS[f.elements.workspace.value] || [];
+  box.innerHTML = list.length ? list.map(function (c) {
+    return '<label><input type="checkbox" name="channels" value="' + esc(c.slug) + '"><span>' + esc(c.name || c.slug) + '</span></label>';
+  }).join('') : '<span class="note">No channels in this workspace yet: it takes threads anywhere in it.</span>';
 }
 document.addEventListener('change', function (ev) { if (ev.target.name === 'workspace' && ev.target.closest('form.newbot-top')) fillChannels(); });
 fillChannels();
@@ -2273,14 +2369,16 @@ function reviveList() {
     return b.harness === f.elements.harness.value && b.workspace === f.elements.workspace.value && (b.host === host || b.pool);
   });
   box.hidden = !rows.length;
-  box.innerHTML = rows.length ? '<h3>Revive a stopped bot instead?</h3>' + rows.map(function (b) {
-    var here = b.host === host, bits = ['@' + esc(b.handle)];
+  box.innerHTML = rows.length ? '<div class="rt"><b>Revive a stopped bot instead?</b><span class="dim">A stopped '
+    + esc(f.elements.harness.value) + ' bot of ' + esc(f.elements.workspace.value) + ' keeps its name, sessions and threads.</span></div>'
+    + rows.map(function (b) {
+    var here = b.host === host, bits = [];
     if (b.open) bits.push('<b>' + b.open + ' open thread' + (b.open === 1 ? '' : 's') + '</b>');
     if (b.stopped) bits.push('stopped ' + esc(b.stopped));
     bits.push('on ' + esc(b.host));
-    return '<div class="rv"><span>' + bits.join(' · ') + '</span> <button type="button" class="revive-go" data-handle="'
+    return '<span class="rv">@' + esc(b.handle) + ' <small>' + bits.join(' · ') + '</small> <button type="button" class="revive-go" data-handle="'
       + esc(b.handle) + '" data-host="' + esc(b.host) + '"' + (here ? '' : ' data-to="' + esc(host) + '"') + '>'
-      + (here ? 'Revive' : 'Move here and revive') + '</button></div>';
+      + (here ? 'Revive' : 'Move here and revive') + '</button></span>';
   }).join('') : '';
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
@@ -2332,8 +2430,8 @@ document.addEventListener('submit', function (ev) {
 function loadSorts() { try { return JSON.parse(localStorage.getItem('bb.fleetSort')) || {}; } catch (err) { return {}; } }
 function sortTable(table, col, dir) {
   var tbody = table.tBodies[0], groups = [];
-  Array.from(tbody.rows).forEach(function (r) {     // a bot's stop panel stays under its bot
-    if (r.classList.contains('stop-panel') && groups.length) groups[groups.length - 1].push(r); else groups.push([r]);
+  Array.from(tbody.rows).forEach(function (r) {     // a bot's drawer stays under its bot
+    if (r.classList.contains('bot-drawer') && groups.length) groups[groups.length - 1].push(r); else groups.push([r]);
   });
   var val = function (g) { var c = g[0].cells[col]; return c ? (c.dataset.sort || '') : ''; };
   var num = function (v) { return v !== '' && !isNaN(v); };
@@ -2398,6 +2496,7 @@ function applyBotFilter() {
   document.querySelectorAll('#tab-bots tr.bot-row').forEach(function (r) {
     r.hidden = (group && r.dataset.group !== group) || (['working', 'waiting'].indexOf(botFilter) >= 0 && r.dataset.state !== botFilter);
   });
+  syncDrawers();
 }
 document.addEventListener('click', function (ev) {
   var b = ev.target.closest('button.bot-filter'); if (!b) return;
@@ -2406,55 +2505,36 @@ document.addEventListener('click', function (ev) {
   applyBotFilter();
 });
 document.getElementById('bot-group').addEventListener('change', applyBotFilter);
-// The side panel of the bot named in the hash. A row's actions move into it and go back
-// when another is picked: their handlers listen on the document, so they work in either place.
-var panelRow = null;
-function closeBotPanel() {
-  var panel = document.getElementById('bot-panel');
-  if (panelRow) {
-    var acts = panelRow.querySelector('td.acts');
-    panel.querySelectorAll('[data-act]').forEach(function (x) { acts.appendChild(x); });
-    var question = panel.querySelector('tr.stop-panel');
-    if (question) { question.hidden = true; panelRow.after(question); }
-    panelRow.classList.remove('sel');
-  }
-  panelRow = null; panel.hidden = true; panel.textContent = '';
-  document.getElementById('bots-split').classList.remove('open');
-}
-function openBotPanel(row) {
-  closeBotPanel(); panelRow = row; row.classList.add('sel');
-  var panel = document.getElementById('bot-panel'), cell = function (l) { var c = row.querySelector('td[data-label="' + l + '"]'); return c ? c.innerHTML : ''; };
-  panel.innerHTML = '<div class="row"><b>' + row.querySelector('td.who a').outerHTML + '</b>'
-    + '<button type="button" class="panel-close" aria-label="close">×</button></div>'
-    + '<div class="doing">' + row.querySelector('td.doing').innerHTML + '</div><div class="p-acts"></div><table class="p-stop"><tbody></tbody></table><dl>'
-    + '<dt>Machine</dt><dd>' + cell('machine') + '</dd><dt>Harness</dt><dd>' + cell('harness') + '</dd>'
-    + '<dt>Group</dt><dd>' + cell('group') + '</dd><dt>Role</dt><dd>' + cell('profile') + '</dd>'
-    + '<dt>Active</dt><dd>' + cell('active') + '</dd></dl>'
-    + '<details class="p-more"><summary>Stop it now, or delete it</summary><div class="p-danger"></div></details>';
-  var acts = panel.querySelector('.p-acts'), danger = panel.querySelector('.p-danger');
-  Array.from(row.querySelector('td.acts').children).forEach(function (x) {
-    x.setAttribute('data-act', '1');
-    (x.matches('.kill, .delete-bot') ? danger : acts).appendChild(x);
+// A bot's drawer is the row beneath it: its buttons, facts and open threads. The hash names the
+// open bot (#bot-ann), so a reload or a link lands on it open; the row's second click closes it.
+function drawerOf(row) { return document.getElementById('drawer-' + row.id.slice(4)); }
+function syncDrawers() {
+  document.querySelectorAll('tr.bot-row').forEach(function (r) {
+    var d = drawerOf(r), open = r.classList.contains('sel') && !r.hidden;
+    if (d) d.hidden = !open;
+    var b = r.querySelector('button.open-bot'); if (b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  if (!danger.children.length) panel.querySelector('.p-more').remove();
-  // the question stop asks of a bot with open threads comes along, so a filter cannot hide it
-  var question = document.getElementById('stop-' + row.id.slice(4));
-  if (question) panel.querySelector('.p-stop tbody').appendChild(question);
-  panel.hidden = false; document.getElementById('bots-split').classList.add('open');
+}
+function openDrawer(row) {
+  document.querySelectorAll('tr.bot-row.sel').forEach(function (r) { if (r !== row) r.classList.remove('sel'); });
+  if (row) row.classList.add('sel');
+  syncDrawers();
+}
+function closeDrawer() {
+  var open = document.querySelector('tr.bot-row.sel'); if (!open) return;
+  // replaceState and not location.hash: the browser would jump to the row
+  history.replaceState(null, '', '#tab-bots'); openDrawer(null);
+  var b = open.querySelector('button.open-bot'); if (b) b.focus();      // back where the keyboard came from
 }
 document.addEventListener('click', function (ev) {
-  // replaceState and not location.hash: the browser would jump to the row
-  if (ev.target.closest('button.panel-close')) {
-    var was = panelRow;
-    history.replaceState(null, '', '#tab-bots'); showTarget();
-    if (was) was.querySelector('button.open-bot').focus();      // back where the keyboard came from
-    return;
-  }
-  var opener = ev.target.closest('button.open-bot'), row = ev.target.closest('tr.bot-row');
-  if (!row || (!opener && ev.target.closest('a,button,select,input'))) return;
+  var row = ev.target.closest('tr.bot-row'); if (!row) return;
+  var opener = ev.target.closest('button.open-bot');
+  if (!opener && ev.target.closest('a,button,select,input')) return;
+  if (row.classList.contains('sel')) { closeDrawer(); return; }
   history.replaceState(null, '', '#' + row.id); showTarget();
-  if (opener) document.querySelector('#bot-panel button, #bot-panel select').focus();   // from the keyboard: on to its actions
+  if (opener) { var first = drawerOf(row).querySelector('button, select'); if (first) first.focus(); }   // from the keyboard: on to its actions
 });
+document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeDrawer(); });
 // A link to something the filters hide changes them, for this visit, so it lands on what it names.
 function revealInLists(t) {
   var row = t.closest('tr.bot-row');
@@ -2476,11 +2556,10 @@ function showTarget() {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   if (t) revealInLists(t);
-  if (t && t.matches('tr.bot-row')) openBotPanel(t); else closeBotPanel();
+  openDrawer(t && t.matches('tr.bot-row') ? t : null);
   applyBotFilter();
   for (var d = t && t.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
   if (t && !t.classList.contains('tab-pane')) t.scrollIntoView({block: 'nearest'});
-  if (t && t.matches('tr.bot-row')) document.getElementById('bot-panel').scrollIntoView({block: 'nearest'});
 }
 window.addEventListener('hashchange', showTarget); showTarget();
 // Preserve expanded worker details while refreshing recovered failures off the page.
@@ -2502,7 +2581,8 @@ try {
 setInterval(function () {
   var a = document.activeElement;
   if (!(a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'))
-      && !Array.from(document.querySelectorAll('.fleet-page input')).some(function (input) { return input.value; })) {
+      && !document.querySelector('.d-voice form')     // an open editor, even with both fields emptied to clear them
+      && !Array.from(document.querySelectorAll('.fleet-page textarea, .fleet-page input')).some(function (input) { return input.value; })) {
     try {
       sessionStorage.setItem('fleet.expanded', JSON.stringify(
         Array.from(document.querySelectorAll('.fleet-page details[open]')).map(fleetDetailKey)));
@@ -2530,19 +2610,26 @@ FLEET_CSS = """
 .fleet-page .bot-filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px;align-items:center}
 .fleet-page .bot-filter{font-size:13px;padding:4px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);cursor:pointer}
 .fleet-page .bot-filter b{font-weight:600;color:var(--dim)}.fleet-page .bot-filter.on{background:var(--ink);border-color:var(--ink);color:var(--panel)}.fleet-page .bot-filter.on b{color:inherit}
-.fleet-page .bots-split{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}.fleet-page .bots-split.open{grid-template-columns:minmax(0,1fr) 300px}
-.fleet-page tr.bot-row{cursor:pointer}.fleet-page tr.bot-row:hover,.fleet-page tr.bot-row.sel{background:var(--hover,rgba(181,84,28,.06))}
-.fleet-page table.bots tr.bot-row td.acts,.fleet-page table.bots tr.bot-row td[data-label="harness"],.fleet-page tr.bot-row td .chan-edit,.fleet-page #tab-bots table.bots th:nth-child(5),.fleet-page #tab-bots table.bots th:last-child{display:none}
-.fleet-page .bot-panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;position:sticky;top:10px}
-.fleet-page .bot-panel .row{display:flex;justify-content:space-between;align-items:center;font-size:16px}.fleet-page .panel-close{border:0;background:none;font-size:18px;cursor:pointer;color:var(--dim)}
-.fleet-page .open-bot{margin-left:6px;padding:0 5px;border:1px solid var(--line);border-radius:4px;background:none;color:var(--dim);cursor:pointer;line-height:1.2}.fleet-page .open-bot::before{content:"⋯"}
-.fleet-page .p-stop{width:100%;border:0;background:none}.fleet-page .p-stop td{display:block;padding:8px 0;border:0}
-.fleet-page .p-acts,.fleet-page .p-danger{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.fleet-page .p-more summary{cursor:pointer;color:var(--dim);font-size:12.5px}
-.fleet-page .bot-panel dl{display:grid;grid-template-columns:70px 1fr;gap:5px 8px;margin:12px 0;font-size:13px}.fleet-page .bot-panel dt{color:var(--dim)}.fleet-page .bot-panel dd{margin:0}
-body.out .fleet-page .p-acts,body.out .fleet-page .p-more,body.out .fleet-page .bot-panel .chan-edit{display:none}
+.fleet-page tr.bot-row{cursor:pointer}.fleet-page table.bots tr.bot-row:hover td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.fleet-page table.bots tr.bot-row.sel td{background:var(--accent-soft)}
+.fleet-page td.tog{width:34px;text-align:right}
+.fleet-page .open-bot{border:0;background:none;color:var(--dim);cursor:pointer;font-size:18px;line-height:1;padding:0 2px}
+.fleet-page .open-bot::before{content:"›";display:inline-block;transition:transform .15s}
+.fleet-page tr.bot-row.sel .open-bot::before{transform:rotate(90deg)}
+.fleet-page .open-bot:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.fleet-page tr.bot-drawer[hidden]{display:none}
+.fleet-page table.bots tr.bot-drawer td{background:color-mix(in srgb,var(--sel) 55%,var(--panel));padding:12px 14px 14px 36px;border-top:0}
+.fleet-page .d-acts{display:flex;flex-wrap:wrap;gap:8px 6px;align-items:center}.fleet-page .d-acts .gap{flex:1}
+.fleet-page .d-danger{display:flex;gap:6px;padding-left:12px;border-left:1px solid var(--line)}
+.fleet-page .d-facts{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:10px;font-size:12.5px;color:var(--dim)}
+.fleet-page .d-facts b{color:var(--ink);font-weight:500}
+.fleet-page .d-threads{margin:8px 0 0;padding:0;list-style:none;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px}
+.fleet-page .hz{font:12.5px var(--mono);white-space:nowrap}
+.fleet-page .hz::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:6px;vertical-align:1px;background:var(--line)}
+.fleet-page .hz-claude::before{background:var(--human,#6d4aa5)}.fleet-page .hz-codex::before{background:var(--good)}
+.fleet-page .hz-opencode::before{background:var(--warn)}.fleet-page .hz-copilot::before{background:var(--bot,#3b6ea5)}
 .fleet-page #fleet-skills .desc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .fleet-page .bots-note{margin-top:12px}
-@media (max-width:900px){.fleet-page .bots-split.open{grid-template-columns:minmax(0,1fr)}.fleet-page .bot-panel{position:static;order:-1}}
 .fleet-page table.profiles .chip{white-space:nowrap}
 .fleet-page .fleet-section{margin:0 0 28px}
 .fleet-page th button.sort{all:unset;cursor:pointer}
@@ -2581,10 +2668,10 @@ body.out .fleet-page .p-acts,body.out .fleet-page .p-more,body.out .fleet-page .
 .fleet-page .why{color:var(--accent);font-size:12px;margin-top:3px;overflow-wrap:anywhere;
  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .fleet-page .by{color:var(--dim);font-size:12px;margin-top:3px}
-.fleet-page tr.stop-panel[hidden]{display:none}
-.fleet-page tr.stop-panel td{background:var(--accent-soft);font-size:13px}
-.fleet-page tr.stop-panel p{margin:0 0 6px}.fleet-page tr.stop-panel ul{margin:0 0 8px;padding-left:18px}
-.fleet-page tr.stop-panel .opts{display:flex;flex-direction:column;gap:4px;margin:0 0 10px}
+.fleet-page .stop-panel[hidden]{display:none}
+.fleet-page .stop-panel{margin-top:12px;padding:10px 12px;background:var(--accent-soft);border-left:3px solid var(--accent);border-radius:6px;font-size:13px}
+.fleet-page .stop-panel p{margin:0 0 6px}.fleet-page .stop-panel label{display:block}
+.fleet-page .stop-panel .opts{display:flex;flex-direction:column;gap:4px;margin:0 0 10px}
 .fleet-page .pip{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--line)}
 .fleet-page .pip.run{background:var(--good)}
 .fleet-page .pip.ok{background:transparent;box-shadow:inset 0 0 0 2px var(--good)}
@@ -2602,22 +2689,45 @@ body.out .fleet-page .p-acts,body.out .fleet-page .p-more,body.out .fleet-page .
 .fleet-page .fleet-settings h3{margin:14px 0 6px}
 .fleet-page .fleet-settings pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .fleet-page .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .addbot-cta{display:none}
-.fleet-page details#addbot{position:relative}
-.fleet-page details#addbot>summary{list-style:none;cursor:pointer}
-.fleet-page details#addbot>summary::-webkit-details-marker{display:none}
-.fleet-page .addbot-btn{display:inline-block;background:var(--accent);color:#fff;border-radius:8px;padding:7px 14px;font-weight:600;font-size:13.5px}
-.fleet-page details#addbot[open]{flex-basis:100%;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 16px;padding:10px 0 0}
-.fleet-page details#addbot[open]>summary{padding:0 16px 8px}
-.fleet-page form.newbot-top{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;padding:4px 16px 12px}
-.fleet-page form.newbot-top .fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim)}
+body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .addbot-cta,body.out .fleet-page .voice-edit{display:none}
+.fleet-page .d-voice{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;font-size:13px}
+.fleet-page .d-voice h4{font-size:12px;margin:0 0 8px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.fleet-page .d-voice-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.fleet-page .d-voice-two[hidden]{display:none}
+.fleet-page .d-voice .quote{white-space:pre-wrap;overflow-wrap:anywhere}.fleet-page .d-voice .quote b{display:block;font-size:12px}
+.fleet-page .d-voice p{margin:8px 0 0;font-size:12.5px}
+.fleet-page .d-voice form label{display:block;margin:0 0 8px}.fleet-page .d-voice textarea,.fleet-page form.newbot-top textarea{display:block;box-sizing:border-box;width:100%;margin-top:4px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);resize:vertical}
+.fleet-page .addbot-btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:600 13.5px/1.6 var(--sans);cursor:pointer}
+.fleet-page .addbot-btn[aria-expanded=true]{background:var(--ink)}
+.fleet-page .addbot-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 16px;padding:12px 0 0}
+.fleet-page .addbot-card[hidden]{display:none}
+.fleet-page form.newbot-top{padding:4px 16px 14px}
+.fleet-page .newbot-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 18px}
+.fleet-page .newbot-grid .span2{grid-column:span 2}.fleet-page .newbot-grid .span3{grid-column:1/-1}
+.fleet-page form.newbot-top .fld{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--dim);border:0;padding:0;margin:0;min-width:0}
+.fleet-page form.newbot-top .fld>span,.fleet-page form.newbot-top .fld>legend{display:flex;justify-content:space-between;gap:8px;padding:0;width:100%}
+.fleet-page form.newbot-top .fld b{color:var(--ink);font-weight:600;font-size:12.5px}
 .fleet-page form.newbot-top select,.fleet-page form.newbot-top input{background:var(--bg);border:1px solid var(--line);
- color:var(--ink);border-radius:6px;padding:6px 8px;font:13px var(--mono)}
+ color:var(--ink);border-radius:6px;padding:7px 9px;font:13px var(--mono);width:100%}
+.fleet-page .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--bg)}
+.fleet-page .seg label{flex:1;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;border-left:1px solid var(--line);color:var(--ink)}
+.fleet-page .seg label:first-child{border-left:0}
+.fleet-page .seg input,.fleet-page .chan-chips input{position:absolute;opacity:0;width:0;height:0}
+.fleet-page .seg label:has(input:checked){background:var(--ink);color:var(--panel)}
+.fleet-page .seg label:has(input:focus-visible),.fleet-page .chan-chips label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:-2px}
+.fleet-page .chan-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;align-items:center}
+.fleet-page .chan-chips label{font:12.5px var(--mono);border:1px solid var(--line);border-radius:999px;padding:3px 11px;cursor:pointer;background:var(--bg);color:var(--ink)}
+.fleet-page .chan-chips label:has(input:checked){background:var(--ink);border-color:var(--ink);color:var(--panel)}
+.fleet-page .chan-chips .note{font-size:12px;color:var(--dim)}
+.fleet-page .revive[hidden]{display:none}
+.fleet-page .revive{margin:14px 0 0;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--accent-soft);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.fleet-page .revive .rt{flex-basis:100%;margin-bottom:2px}.fleet-page .revive .rt b{font-weight:600;margin-right:6px}
+.fleet-page .revive .rv{display:inline-flex;align-items:center;gap:6px;font:12.5px var(--mono);border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;background:var(--panel)}
+.fleet-page .revive .rv small{color:var(--dim);font-family:var(--sans)}
+.fleet-page .revive button{font:11.5px var(--sans);border:1px solid var(--accent);color:var(--accent);background:var(--panel);border-radius:999px;padding:1px 8px;cursor:pointer}
+.fleet-page .newbot-foot{display:flex;align-items:center;gap:14px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
 .fleet-page .addbot-go{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:8px 18px;font-weight:600;cursor:pointer}
-.fleet-page .revive{flex-basis:100%;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);padding:8px 12px;font-size:13px}
-.fleet-page .revive h3{font-size:13px;margin:0 0 6px}.fleet-page .revive .rv{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:3px 0}
-.fleet-page .revive button{border:1px solid var(--accent);color:var(--accent);background:var(--panel);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12.5px}
-.fleet-page .addbot-note{color:var(--dim);font-size:12px;margin:0;padding:0 16px 14px}
+.fleet-page .addbot-note{color:var(--dim);font-size:12.5px;margin:0;flex:1}
+.fleet-page .addbot-cancel{background:none;border:0;color:var(--dim);cursor:pointer;font-size:13px}
 .fleet-page .addbot-empty{color:var(--dim);font-size:13px}
 @media(max-width:760px){
  .fleet-page table.bots thead{display:none}
@@ -2630,6 +2740,13 @@ body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .add
  .fleet-page table.bots td[data-label]:not(.doing)::before{content:attr(data-label) " ";color:var(--dim)}
  .fleet-page table.bots td.acts{display:block;text-align:left;padding-top:6px}
  .fleet-page table.bots td.acts>*{margin:0 4px 0 0}
+ .fleet-page table.bots td.tog{display:none}
+ .fleet-page table.bots tr.bot-drawer{padding:0}
+ .fleet-page table.bots tr.bot-drawer td{display:block;padding:8px 12px 12px}
+ .fleet-page .d-danger{padding-left:0;border:0}
+ .fleet-page .d-voice-two{grid-template-columns:1fr}
+ .fleet-page .newbot-grid{grid-template-columns:1fr}.fleet-page .newbot-grid .span2,.fleet-page .newbot-grid .span3{grid-column:auto}
+ .fleet-page .newbot-foot{flex-wrap:wrap}
  .fleet-page .fleet-alert{flex-direction:column}
  .fleet-page .abtns{justify-content:flex-start}
  .fleet-page form.secret input{max-width:100%}
@@ -2684,8 +2801,22 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
             if not live and b.get("retired"):
                 continue     # retired with its threads handed off (#167)
             (active if live else stopped if h["reporting"] else []).append((h, b))
+    # A box can go on reporting a stopped copy of a bot that has moved on. A page has one row
+    # per bot: two with one id share a drawer that neither can open (#362). Keep the live one,
+    # or else the one a human asked for.
+    seen, kept = {b["handle"].lower() for _, b in active}, []
+    for h, b in sorted(stopped, key=lambda x: not x[1].get("want")):
+        if b["handle"].lower() not in seen:
+            seen.add(b["handle"].lower()); kept.append((h, b))
+    stopped = kept
     active.sort(key=lambda x: (order.get(x[1]["state"]["state"], 6), x[1]["handle"].lower()))
     stopped.sort(key=lambda x: x[1]["handle"].lower())
+    # delete takes the bot off every box that reports it (#368), so its confirm names the others (#366)
+    for h, b in active + stopped:
+        others = [o["name"] for o, x in active if x["handle"].lower() == b["handle"].lower() and o is not h]
+        if others:
+            b["also_on"] = (f'It is also listed on {", ".join(others)}, and this deletes it there too; '
+                            "a box not reporting does that when it returns.")
     # bots with no profile, gathered on the Profiles table's last row so they are not forgotten
     orphans = sorted({b["handle"] for _, b in active + stopped if not b.get("profile")}, key=str.lower)
     working = sum(b["state"]["state"] == "working" for _, b in active)
@@ -2704,7 +2835,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
     filters = ('<div class="bot-filters" role="group" aria-label="which bots">' + chip("running", "All running", len(active))
                + chip("working", "Working", state_of("working")) + chip("waiting", "Waiting", state_of("waiting"))
                + (chip("stopped", "Stopped", len(stopped)) if stopped else "")
-               + '<select id="bot-group" aria-label="group"><option value="">Any group</option>'
+               + '<select id="bot-group" aria-label="workspace"><option value="">Any workspace</option>'
                + "".join(f'<option>{e(g)}</option>' for g in groups) + '</select></div>')
 
     machines = []
@@ -2762,7 +2893,8 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
     revive_json = json.dumps(revive).replace("<", "\\u003c")     # safe inside <script>
     if reporting:
         host_opts = "".join(f'<option value="{e(n)}">{e(n)}</option>' for n in reporting)
-        harness_opts = "".join(f"<option>{x}</option>" for x in ("claude", "codex", "opencode", "copilot"))
+        harness_opts = "".join(f'<label><input type="radio" name="harness" value="{x}"{" checked" if not i else ""}><span>{x}</span></label>'
+                               for i, x in enumerate(HARNESS_NAMES))
         ws_opts = ("".join(f'<option value="{e(p)}">{e(p)}</option>' for p in workspaces)
                    or '<option value="" disabled selected>create a workspace first (workspaces page)</option>')
         profile_opts = ('<option value="">none</option>'
@@ -2770,30 +2902,36 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
                                   f'{e(p["name"])}{" · specialized" if p.get("specialized") else ""} · {e(p["role"][:60])}</option>'
                                   for p in profiles))
         channels_json = json.dumps(channels or {}).replace("<", "\\u003c")
-        add_bot = f"""<details id="addbot" class="addbot-cta">
-<summary><span class="addbot-btn">+ Add a bot</span></summary>
+        add_bot = ('<button type="button" class="addbot-btn addbot-cta" aria-controls="addbot" aria-expanded="false">'
+                   '+ Add a bot</button>')
+        add_bot_card = f"""<div id="addbot" class="addbot-card addbot-cta" hidden>
 <form class="newbot-top" aria-label="Add a bot">
-<label class="fld"><span>Machine</span><select name="host" aria-label="machine">{host_opts}</select></label>
-<label class="fld"><span>Harness</span><select name="harness" aria-label="harness">{harness_opts}</select></label>
-<label class="fld"><span>Workspace</span><select name="workspace" aria-label="workspace the bot belongs to" required>{ws_opts}</select></label>
-<label class="fld"><span>Role <small>(its profile, set once)</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
-<label class="fld"><span>Channels <small>(where it picks up threads; a specialized profile needs one)</small></span><select name="channels" multiple size="4" aria-label="channels of the workspace the bot claims new threads in"></select></label>
-<label class="fld"><span>Name <small>(optional)</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
+<div class="newbot-grid">
+<label class="fld"><span><b>Machine</b></span><select name="host" aria-label="machine">{host_opts}</select></label>
+<fieldset class="fld"><legend><b>Harness</b></legend><div class="seg" role="radiogroup" aria-label="harness">{harness_opts}</div></fieldset>
+<label class="fld"><span><b>Workspace</b></span><select name="workspace" aria-label="workspace the bot belongs to" required>{ws_opts}</select></label>
+<label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
+<label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
+<fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
+<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people, a line or two</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
+<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
+</div>
 <div class="revive" id="revive" hidden></div>
-<button type="submit" class="addbot-go">Start a new bot</button>
+<div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
+<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life. Voice and personality can be changed later from its row.</span>
+<button type="button" class="addbot-cancel">cancel</button></div>
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
 <script type="application/json" id="channels-data">{channels_json}</script>
-<p class="addbot-note">The machine's keeper starts it within a few seconds. The bot belongs to the workspace you pick and sees only that workspace.
-It reads the profile you pick, and its skills, when its session starts, and keeps that profile for life.
-Pick channels to have it claim new threads only there (it still answers mentions anywhere); leave them empty for a developer, which drives anything.</p>
-</details>"""
+</div>"""
     else:
         add_bot = '<p class="addbot-empty">To add a bot, a machine must be reporting: <a href="#fleet-add-machine">add one</a>.</p>'
+        add_bot_card = ""
     return shell(board_name, "fleet", here="/fleet", content=f"""
 <style>{FLEET_CSS}{registry_web.REG_CSS}</style>
 <div class="fleet-page">
 <div class="fleet-head"><h1>Fleet</h1>{add_bot}</div>
+{add_bot_card}
 {attention}
 <nav class="fleet-tabs" aria-label="Fleet">
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>
@@ -2803,10 +2941,8 @@ Pick channels to have it claim new threads only there (it still answers mentions
 </nav>
 <noscript><style>.fleet-page .tab-pane{{display:block}}</style></noscript>
 <div class="tab-pane" id="tab-bots">{filters}
-<div class="bots-split" id="bots-split"><div class="bots-lists">
-<section class="fleet-section" id="fleet-bots">{bots_html}</section>{stopped_html}</div>
-<aside class="bot-panel" id="bot-panel" hidden aria-label="Selected bot"></aside></div>
-<p class="sub bots-note">Pick a bot to see what you can do with it. Stop finishes the run a bot is in; kill cuts it short. The keeper on each
+<section class="fleet-section" id="fleet-bots">{bots_html}</section>{stopped_html}
+<p class="sub bots-note">Click a bot's row for its actions and details. Stop finishes the run a bot is in; kill cuts it short. The keeper on each
 machine carries out requests within a few seconds. <span id="who"></span> The same data is at <a href="/api/fleet">/api/fleet</a>.</p></div>
 <div class="tab-pane" id="tab-machines"><p class="right-link needs-me"><a class="act" href="#fleet-add-machine">+ Add a machine</a></p>
 <section class="fleet-section" id="fleet-machines">{machines_html}</section>
@@ -2846,7 +2982,7 @@ subscription's usage limits.</p>
 <script>{FLEET_JS}{registry_web.REG_SECTION_JS}</script>""")
 
 
-def agent_page(board_name, agent, recent, profile=None) -> str:
+def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
     stream = "".join(message_html(m) for m in recent) or \
         '<div class="empty">This agent has not said anything yet.</div>'
     prof = ""
@@ -2855,6 +2991,8 @@ def agent_page(board_name, agent, recent, profile=None) -> str:
                            for s in profile.get("skills", []))
         prof = (f'<h2>Profile: <a href="/fleet/profiles/{e(profile["name"])}">{e(profile["name"])}</a></h2>'
                 f'<p class="sub">{e(profile.get("role") or "")}</p>' + (f'<p class="stats">skills: {skills}</p>' if skills else ""))
+    voice_html = "".join(f'<h2>{title}</h2><p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
+                         for title, text in zip(("Voice", "Personality"), voice) if text)     # #348
     # a human deletes a bot from its page too (#280); humans, keepers and runners are not deleted here
     delete = "" if agent["kind"] in db.UNSCOPED_KINDS else f"""<p><button type="button" id="delete-bot">delete @{e(agent['handle'])}</button></p>
 <script>document.getElementById('delete-bot').addEventListener('click', function () {{
@@ -2868,7 +3006,7 @@ def agent_page(board_name, agent, recent, profile=None) -> str:
 <p class="stats">{presence_dot(agent['last_seen_at'])}{e(db.presence(agent['last_seen_at']))} ·
 kind {e(agent['kind'])} · joined {e(ago(agent['created_at']))} ·
 last seen {e(ago(agent['last_seen_at']))}</p>
-{prof}{delete}<h2>Recent</h2>{stream}
+{prof}{voice_html}{delete}<h2>Recent</h2>{stream}
 """)
 
 

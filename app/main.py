@@ -363,15 +363,18 @@ API_MAP = {
         "PUT /api/fleet/hosts/{name}": "a keeper's report of its box {cores, load, mem_total_mb,"
                                        " mem_free_mb, os, bots: [{handle, harness, status, serves, last_run}],"
                                        " credentials: [{name, kind, state, detail, held}]}",
-        "POST /api/fleet/bots": "a human starts a new bot on a box {host, harness, workspace, profile?}; the board picks"
+        "POST /api/fleet/bots": "a human starts a new bot on a box {host, harness, workspace, profile?, voice?,"
+                                " personality?}; the board picks"
                                 " its name -> {handle}",
         "PUT /api/fleet/bots/{handle}": "a human asks for a bot to run on a box, or to stop {host, run, harness,"
-                                        " workspace, profile, kill, threads}; profile is set once, for a new bot;"
+                                        " workspace, profile, voice, personality, kill, threads}; profile is set once, for a new bot;"
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
+        "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
+                                              " clears; in its composed AGENTS.md at its next wake",
         "POST /api/fleet/bots/{handle}/move": "a human moves a pool bot to another box {to, start?}; the keepers of"
                                              " both boxes carry it out over ssh",
         "POST /api/fleet/bots/{handle}/reset": "a human gives a bot a new harness session; the old one is set aside"
@@ -386,16 +389,18 @@ API_MAP = {
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
         "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
         "GET /api/skills": "the fleet's skill registry: every skill with its revision and the profiles that list it",
-        "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields and body; ?revision=N for an older one",
+        "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields (base among them) and body; ?revision=N for an older one",
         "PUT /api/skills/{name}": "humans and admin bots create or replace a skill {body, fields?, base_revision, reason};"
-                                  " body may be a whole SKILL.md; bots on it are told at their next prompt",
-        "DELETE /api/skills/{name}": "remove a skill {base_revision, reason}; refused while a profile lists it",
+                                  " body may be a whole SKILL.md; bots on it are told at their next prompt;"
+                                  " base: true in the fields or frontmatter gives it to every bot, false takes it back,"
+                                  " left out keeps it",
+        "DELETE /api/skills/{name}": "remove a skill {base_revision, reason}; refused while a profile lists it or it is base",
         "POST /api/skills/{name}/reset": "a human gives every bot whose profile lists the skill a new session",
         "POST /api/profiles/{name}/reset": "a human gives every bot that carries the profile a new session",
         "GET /api/skills/{name}/history": "every revision of a skill, newest first",
         "GET /api/profiles": "every profile: role, skills, the bots that carry it and the profiles cloned from it",
         "GET /api/profiles/templates": "the shipped starters a new profile can begin from",
-        "GET /api/profiles/{name}": "one profile, with the text a bot of it reads",
+        "GET /api/profiles/{name}": "one profile, with the text a bot of it reads; base_skills: what its bots also have",
         "POST /api/profiles": "humans and admin bots create a profile {name, role, responsibilities, focus, avoid,"
                               " skills: [{name, mandatory}], from?}; profiles are never edited: clone instead",
         "DELETE /api/profiles/{name}": "remove a profile; refused while a bot carries it; the name stays taken",
@@ -461,8 +466,10 @@ API_MAP = {
                           " params: since, limit, wait, view, max_bytes",
         "GET /api/search": "params: q, channel, limit, before, view, max_bytes",
         "GET /api/stats": "counts and the current global cursor",
-        "GET /agents.md": "the agent guide — collaboration, protocol and API discovery; its X-Agents-Revision"
-                          " header is a hash of the text served, which changes when the guide does",
+        "GET /agents.md": "the agent guide — collaboration, protocol and API discovery; with a bot's token it"
+                          " ends with a section on that bot (workspace, profile, skills with the mandatory ones"
+                          " written out), which its launcher puts in its prompt; X-Agents-Revision is a hash of"
+                          " the text served, which changes when any of it does",
         "GET /api/boards": "deprecated alias of /api/channels; `board` is accepted wherever"
                            " `channel` is, for one release",
     },
@@ -585,9 +592,15 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
 
     Served from the board so the fleet has one source of truth — edit the file,
     redeploy, and every agent picks up the new etiquette on its next read. A bot
-    of the admin workspace gets the administration reference instead. The
+    of the admin workspace gets the administration reference instead. Fetched with
+    a bot's token, the guide is composed for that bot (#344): the file, then a
+    section on who it is — its workspace and channels, its profile, its skills as
+    name@revision with every mandatory one written out, or named if the text
+    would grow too long for a prompt (#355). The launcher fetches it
+    that way and puts the whole text in the session's prompt; the model fetches
+    nothing. Without a token, or with a human's, it is the file alone. The
     X-Agents-Revision header is a hash of the text served: a launcher compares it
-    with what its session last read and tells the bot to read it again (#241).
+    with what its session last read and gives the bot the new text (#241).
     """
     name = "ADMIN.md" if agent and workspaces.is_admin_bot(agent) else "AGENTS.md"
     try:
@@ -597,7 +610,10 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
         raise HTTPException(404, f"no {name} shipped with this board") from None
     # AGENTS.md is written against the local address; serve it with the address
     # the agent actually connected on.
-    text = text.replace("http://127.0.0.1:8080", str(request.base_url).rstrip("/"))
+    base = str(request.base_url).rstrip("/")
+    text = text.replace("http://127.0.0.1:8080", base)
+    if agent and agent["kind"] not in db.UNSCOPED_KINDS:
+        text += registry.identity_text(agent, base, len(text.encode()))
     return PlainTextResponse(text, headers={"X-Agents-Revision": hashlib.sha256(text.encode()).hexdigest()[:16]})
 
 
@@ -741,6 +757,13 @@ def agent_profile(handle: str, agent: dict | None = Depends(optional_agent)) -> 
 
 # ----------------------------------------------------------------- fleet
 
+MAX_VOICE = 2000     # characters of a bot's voice, and of its personality (#348)
+
+
+def _text_or_none(text: str | None) -> str | None:
+    return text.strip() if text is not None else None
+
+
 class FleetBot(BaseModel):
     handle: str = Field(max_length=64)
     harness: str = Field(default="", max_length=32)
@@ -832,6 +855,10 @@ class FleetWantIn(BaseModel):
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of its workspace the"
                                        " bot claims new threads in. Required with a specialized profile; empty"
                                        " means any channel. Changed later with PUT /api/fleet/bots/{handle}/channels.")
+    voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people. Changed"
+                              " later with PUT /api/fleet/bots/{handle}/voice.")
+    personality: str | None = Field(default=None, max_length=MAX_VOICE, description="Who the bot is: expression only,"
+                                    " task rules still win. Changed later with PUT /api/fleet/bots/{handle}/voice.")
 
 
 class FleetChannelsIn(BaseModel):
@@ -878,7 +905,7 @@ def fleet_report(name: str, body: FleetReportIn, agent: dict = Depends(current_a
     fleet.moved(name.lower(), body.handed, body.fetched)
     first = fleet.default_bot(name.lower(), agent["handle"], body.default_bot, body.operators,
                               [b.model_dump() for b in body.bots])
-    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems), "secrets": fleet.secrets_version(),
+    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems) + fleet.leftovers(name.lower()), "secrets": fleet.secrets_version(),
             "release": COMMIT, "min_protocol": versions.MIN_PROTOCOL,
             **({"default_bot": first} if first else {})}
 
@@ -895,7 +922,8 @@ def fleet_want(handle: str, body: FleetWantIn, agent: dict = Depends(current_age
     why = fleet.want(handle, body.host, body.run, body.harness, agent["handle"], body.kill,
                      workspace=(body.workspace or "").lower() or None, threads=body.threads,
                      profile=(body.profile or "").strip().lower() or None,
-                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None)
+                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None,
+                     voice=_text_or_none(body.voice), personality=_text_or_none(body.personality))
     if why:
         raise HTTPException(409, why)
     return {"ok": True}
@@ -914,6 +942,24 @@ def fleet_channels(handle: str, body: FleetChannelsIn, agent: dict = Depends(cur
     return {"ok": True, "channels": db.bot_channels(handle)}
 
 
+class FleetVoiceIn(BaseModel):
+    voice: str = Field(max_length=MAX_VOICE, description="How the bot writes to people; empty clears.")
+    personality: str = Field(max_length=MAX_VOICE, description="Who the bot is, expression only; empty clears.")
+
+
+@app.put("/api/fleet/bots/{handle}/voice", tags=["fleet"])
+def fleet_voice(handle: str, body: FleetVoiceIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human sets how a fleet bot writes to people and who it is. Both go in its composed
+    AGENTS.md, so an edit reaches it at its next wake; a long session may keep some of its old
+    tone until it gets a new one."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human sets a bot's voice")
+    why = fleet.set_voice(handle, body.voice.strip(), body.personality.strip())
+    if why:
+        raise HTTPException(409, why)
+    return {"ok": True, "voice": body.voice.strip(), "personality": body.personality.strip()}
+
+
 class FleetNewIn(BaseModel):
     host: str = Field(description="The box to start it on.", max_length=64)
     harness: str = Field(description="claude, codex, opencode or copilot.", max_length=32)
@@ -921,6 +967,8 @@ class FleetNewIn(BaseModel):
     profile: str | None = Field(default=None, max_length=64, description="The profile it is added with, for life.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of the workspace it"
                                        " claims new threads in; required with a specialized profile.")
+    voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people.")
+    personality: str | None = Field(default=None, max_length=MAX_VOICE, description="Who the bot is, expression only.")
 
 
 @app.post("/api/fleet/bots", tags=["fleet"])
@@ -932,7 +980,8 @@ def fleet_new(body: FleetNewIn, agent: dict = Depends(current_agent)) -> dict:
     handle = fleet.free_name()
     why = fleet.want(handle, body.host, True, body.harness, agent["handle"], workspace=body.workspace.lower(),
                      profile=(body.profile or "").strip().lower() or None,
-                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None)
+                     channels=[c.strip().lower() for c in body.channels] if body.channels is not None else None,
+                     voice=_text_or_none(body.voice), personality=_text_or_none(body.personality))
     if why:
         raise HTTPException(409, why)
     return {"ok": True, "handle": handle}
@@ -1179,7 +1228,7 @@ def _reset_all(handles: list[str], agent: dict) -> dict:
 
 @app.post("/api/skills/{name}/reset", tags=["skills"])
 def skill_reset(name: str, agent: dict = Depends(current_agent)) -> dict:
-    """A human gives every bot whose profile lists the skill a new session, each as POST
+    """A human gives every bot on the skill (all of them, for a base skill) a new session, each as POST
     /api/fleet/bots/{handle}/reset does: when idle, a stopped bot at its next start."""
     _registry_call(registry.get_skill, name)
     return _reset_all(registry.bots_of_skill(name), agent)
@@ -1213,7 +1262,8 @@ def profile_templates(_: dict | None = Depends(optional_agent)) -> dict:
 @app.get("/api/profiles/{name}", tags=["profiles"])
 def profile_get(name: str, request: Request, _: dict | None = Depends(optional_agent)) -> dict:
     profile = _registry_call(registry.get_profile, name)
-    return {"profile": {**profile, "text": registry.profile_text(profile, str(request.base_url))}}
+    return {"profile": {**profile, "base_skills": registry.also_has(profile),
+                        "text": registry.profile_text(profile, str(request.base_url))}}
 
 
 @app.post("/api/profiles", tags=["profiles"], status_code=201)
@@ -1242,7 +1292,7 @@ def my_profile(request: Request, agent: dict = Depends(current_agent)):
     profile = registry.profile_of(agent["handle"])
     rev = registry.skills_revision(profile)
     if "json" in request.query_params:
-        return {"profile": profile, "skills": registry.resolve(profile) if profile else [], "skills_revision": rev}
+        return {"profile": profile, "skills": registry.resolve(profile), "skills_revision": rev}
     return PlainTextResponse(registry.profile_text(profile, str(request.base_url)), headers={"X-Skills-Revision": rev})
 
 
@@ -1553,7 +1603,7 @@ def create_channel(body: ChannelIn, agent: dict = Depends(current_agent)) -> dic
     if existing and not db.in_scope(existing, sc):
         raise HTTPException(403, f"#{body.slug} is in another workspace")
     try:
-        return {"channel": db.ensure_board(body.slug, body.topic, agent["id"], force_topic=True, workspace_id=sc or None)}
+        return {"channel": db.ensure_board(body.slug, body.topic, agent["id"], force_topic=True, workspace_id=sc or agent.get("workspace_id") or None)}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
 
@@ -2231,7 +2281,7 @@ def page_agent(handle: str, _: dict | None = Depends(page_gate)) -> HTMLResponse
     if a is None or a.get("retired_at"):
         return HTMLResponse(web.not_found(BOARD_NAME, f"No agent called '{handle}'."), 404)
     recent = db.list_messages(author=a["handle"], limit=50, order="desc", hide_events=True)
-    return HTMLResponse(web.agent_page(BOARD_NAME, a, recent, registry.profile_of(a["handle"])))
+    return HTMLResponse(web.agent_page(BOARD_NAME, a, recent, registry.profile_of(a["handle"]), registry.voice_of(a["handle"])))
 
 
 @app.get("/search", response_class=HTMLResponse, include_in_schema=False)

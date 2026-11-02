@@ -70,6 +70,69 @@ class LauncherWritesProfileSkills(unittest.TestCase):
             finally:
                 L.close()
 
+    def test_skills_are_reconciled_not_rewritten(self):
+        # #346: a skill already here at the listed revision is not fetched again; one whose
+        # revision moved is; one the list no longer names goes, with the links the launcher
+        # made, while a copy another bot on the box lists stays
+        with FakeBoard() as board:
+            board.profile = {"profile": {"name": "dev"}, "skills": [
+                {"name": "hello", "mandatory": True, "description": "Says hello.", "revision": 1},
+                {"name": "bye", "mandatory": False, "description": "Says bye.", "revision": 4}]}
+            board.skills = {"hello": HELLO, "bye": HELLO.replace("hello", "bye").replace("Says hello.", "Says bye.")}
+            board.agents_rev = "a1"
+            L = Launcher(board, "claude")
+            try:
+                home = Path(L.tmp.name)
+                # another bot on this box lists `bye` too: its copy must survive our dropping it
+                other = home / ".config/bot_board/bots/other"
+                other.mkdir(parents=True)
+                (other / "skills").write_text("bye\n")
+                L.plan(*[fh.step("claude", "ok", "done")] * 4)
+                L.start()
+                L.wait_for(lambda: len(L.prompts()) >= 1 and L.read("agents-rev") == "a1", "the first turn")
+                skills = home / ".config/bot_board/skills"
+                self.assertEqual((skills / "hello/revision").read_text().strip(), "1")
+                self.assertEqual((skills / "bye/revision").read_text().strip(), "4")
+                self.assertEqual(sorted(L.read("skills").split()), ["bye", "hello"])
+                fetched = lambda: [p for m, p, _ in board.requests if m == "GET" and p.startswith("/api/skills/")]
+                self.assertEqual(sorted(fetched()), ["/api/skills/bye", "/api/skills/hello"])
+                # a wake with hello at a new revision: only hello is fetched again
+                board.skills["hello"] = HELLO.replace("One.", "Two.")
+                board.profile["skills"][0]["revision"] = 2
+                board.agents_rev = "a2"
+                board.post_root("ws-general", "first")
+                L.wait_for(lambda: L.read("agents-rev") == "a2", "the wake after the change")
+                self.assertEqual(sorted(fetched()), ["/api/skills/bye", "/api/skills/hello", "/api/skills/hello"])
+                self.assertIn("Two.", (skills / "hello/SKILL.md").read_text())
+                self.assertEqual((skills / "hello/revision").read_text().strip(), "2")
+                self.assertIn("skill hello: written at revision 2", L.log())
+                # the list drops bye: this bot no longer lists it, but the other bot does, so it stays
+                board.profile["skills"] = board.profile["skills"][:1]
+                board.agents_rev = "a3"
+                board.post_root("ws-general", "second")
+                L.wait_for(lambda: L.read("agents-rev") == "a3", "the wake after the drop")
+                self.assertEqual(L.read("skills").split(), ["hello"])
+                self.assertTrue((skills / "bye/SKILL.md").exists())
+                self.assertTrue((home / ".claude/skills/bye").is_symlink())
+                # nobody on the box lists it any more: gone, links too; a hand-made skill is not touched
+                (other / "skills").write_text("")
+                mine = home / ".claude/skills/mine"
+                mine.mkdir(parents=True)
+                (mine / "SKILL.md").write_text("mine\n")
+                board.agents_rev = "a4"
+                board.post_root("ws-general", "third")
+                L.wait_for(lambda: L.read("agents-rev") == "a4", "the wake after nobody lists bye")
+                self.assertFalse((skills / "bye").exists())
+                self.assertFalse((home / ".claude/skills/bye").is_symlink())
+                self.assertFalse((home / ".agents/skills/bye").is_symlink())
+                self.assertTrue((skills / "hello/SKILL.md").exists())
+                self.assertTrue((mine / "SKILL.md").exists())
+                self.assertIn("skills: removed", L.log())
+                self.assertIn("a skill no bot on this box lists", L.log())
+                L.stop()
+            finally:
+                L.close()
+
     def test_a_bot_without_a_profile_writes_nothing(self):
         with FakeBoard() as board:
             L = Launcher(board, "claude")
@@ -84,33 +147,42 @@ class LauncherWritesProfileSkills(unittest.TestCase):
                 L.close()
 
     def test_a_skill_written_on_the_board_reaches_the_session_at_its_next_prompt(self):
-        # #328: like agents.md (#241): the files are written again and one line in the prompt
-        # says so, once per change; the session goes on. An old board says nothing.
+        # #328, #344: a skill of the bot is part of the AGENTS.md the board composes for it, so
+        # writing one moves X-Agents-Revision; the launcher writes the files again and the
+        # next wake prompt carries the new text, once per change; the session goes on. An old
+        # board sends no revision and nothing happens.
         with FakeBoard() as board:
             board.profile = {"profile": {"name": "dev"}, "skills": [
                 {"name": "hello", "mandatory": True, "description": "Says hello.", "revision": 1}]}
             board.skills = {"hello": HELLO}
             board.skills_revision = "r1"
+            board.agents_rev = "a1"
             L = Launcher(board, "claude")
             try:
                 home = Path(L.tmp.name)
                 L.plan(*[fh.step("claude", "ok", "done")] * 4)
                 L.start()
-                L.wait_for(lambda: len(L.prompts()) >= 1 and L.read("skills-rev") == "r1", "the first turn to record r1")
+                L.wait_for(lambda: len(L.prompts()) >= 1 and L.read("agents-rev") == "a1", "the first turn to record a1")
+                self.assertEqual(L.read("skills-rev"), "r1")
                 board.post_root("ws-general", "first")
                 L.wait_for(lambda: len(L.prompts()) >= 2, "the first wake")
-                self.assertNotIn("skills changed", L.prompts()[1])
+                self.assertNotIn("AGENTS.md changed", L.prompts()[1])
                 board.skills["hello"] = HELLO.replace("One.", "Two.")
+                board.profile["skills"][0]["revision"] = 2       # as the board does when a skill is written
                 board.skills_revision = "r2"
+                board.agents_rev = "a2"
                 board.post_root("ws-general", "second")
                 L.wait_for(lambda: len(L.prompts()) >= 3, "the wake after the change")
-                self.assertIn("Your profile's skills changed since you read them; read your profile again", L.prompts()[2])
+                self.assertIn("Your AGENTS.md changed since you read it; this is the current one", L.prompts()[2])
+                self.assertNotIn("read your profile again", L.prompts()[2])
                 self.assertIn("Two.", (home / ".config/bot_board/skills/hello/SKILL.md").read_text())
                 self.assertEqual(L.read("skills-rev"), "r2")
+                L.wait_for(lambda: L.read("agents-rev") == "a2", "a2 recorded once the run returned")
+                board.agents_rev = ""
                 board.skills_revision = ""
                 board.post_root("ws-general", "third")
                 L.wait_for(lambda: len(L.prompts()) >= 4, "a wake from a board that says nothing")
-                self.assertNotIn("skills changed", L.prompts()[3])
+                self.assertNotIn("AGENTS.md changed", L.prompts()[3])
                 self.assertEqual(len(set(fh.runs(str(L.scenario), "claude")[-1]) & {"--resume"}), 1, "the same session")
                 L.stop()
             finally:

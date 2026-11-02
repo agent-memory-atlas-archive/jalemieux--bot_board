@@ -287,7 +287,8 @@ oc_save() {
 # A harness session keeps the role its first prompt gave it, for good (#221). SESSION_GEN
 # names that first prompt: bump it when the first prompt changes, and every bot retires a
 # session started under another (or before this was recorded) at its next start.
-SESSION_GEN=2
+# 3: the first prompt carries the AGENTS.md the board composed for the bot (#344).
+SESSION_GEN=3
 # What the keeper reports beside the version (#238): bump PROTOCOL when a change to this
 # launcher's files or requests would break an older keeper or board.
 # 2: installs the profile's sourced skills at start and records session-started under $STATE.
@@ -400,18 +401,32 @@ else:
         if h not in roster:
             if full: drop(h,"the board does not know it, untouched here for %d days"%local)
         elif a is None or a>=days: drop(h,"last seen on the board %s"%("never" if a is None else "%d days ago"%a))
-if full:
-    # a skill is skills/<name>/SKILL.md, written from the board for the bots here whose profile lists it
-    # (#328); anything else under skills/ (a clone from before, a skill no bot here lists) goes, links too
-    used=set()
-    for f in glob.glob(os.path.join(cfg,"bots","*","skills")): used|=set(open(f).read().split())
-    for c in sorted(glob.glob(os.path.join(cfg,"skills","*"))):
-        if os.path.basename(c) in used and os.path.isfile(os.path.join(c,"SKILL.md")): continue
-        real=os.path.realpath(c)
-        for l in glob.glob(os.path.expanduser("~/.claude/skills/*"))+glob.glob(os.path.expanduser("~/.agents/skills/*")):
-            if os.path.islink(l) and (os.path.realpath(l)+"/").startswith(real+"/"): rm(l,"a link into a skill that is going")
-        rm(c,"a skill no bot on this box lists")
 ' "$CFG" "$dry" "$full" "$days" "$live" "$@"
+  [ -z "$full" ] || sweep_skills "$dry"
+}
+# sweep_skills <dry|"">: a skill is $CFG/skills/<name>/SKILL.md, written from the board for
+# the bots here that list it (#328, #346); anything else under skills/ (a clone from before,
+# a skill no bot here lists any more) goes, and the links this script made into it. One
+# line per thing removed. Run after every reconcile and by `bot gc`.
+sweep_skills() {
+  local dry=${1:-} verb=removed used="" f c name real l have
+  [ -z "$dry" ] || verb="would remove"
+  for f in "$CFG"/bots/*/skills; do [ -f "$f" ] && used+=" $(cat "$f" | tr '\n' ' ')"; done
+  for c in "$CFG"/skills/*/; do
+    [ -d "$c" ] || continue
+    c=${c%/}; name=${c##*/}
+    case " $used " in *" $name "*) [ -f "$c/SKILL.md" ] && continue ;; esac
+    real=$(cd "$c" && pwd -P)
+    for l in ~/.claude/skills/* ~/.agents/skills/*; do
+      [ -L "$l" ] || continue
+      have=$(cd "$l" 2>/dev/null && pwd -P || true)
+      [ "$have" = "$real" ] || continue
+      echo "$verb $l: a link into a skill that is going"
+      [ -n "$dry" ] || rm -f "$l"
+    done
+    echo "$verb $c: a skill no bot on this box lists"
+    [ -n "$dry" ] || rm -rf "$c"
+  done
 }
 if [ "${1:-}" = gc ]; then
   shift; DRY=""; DAYS=${BOT_GC_DAYS:-7}; NAMES=()
@@ -790,12 +805,25 @@ say() {  # say <board> <reply_to> <body>
   | api --retry 4 --retry-connrefused --retry-delay 3 -X POST "$BOARD/api/messages" -H 'content-type: application/json' -d @- >/dev/null
 }
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG" >&2; }
-# agents_rev: the revision of the agents.md the board serves this bot (#241), or "" when
-# the board is too old to say or cannot be reached; $STATE/agents-rev is the one the
-# session last read.
-agents_rev() {
-  { curl -sS --max-time 10 -o /dev/null -D - -H "Authorization: Bearer $(cat "$TOKFILE")" "$BOARD/agents.md" 2>/dev/null || true; } \
-    | awk -F': *' 'tolower($1) == "x-agents-revision" { gsub(/\r/, "", $2); print $2 }'
+# fetch_agents: GET $BOARD/agents.md with the bot's token. The board composes it for the
+# bot (#344): the guide, then who it is (workspace, profile, skills with the mandatory ones
+# written out). The text goes to $STATE/agents.new and the X-Agents-Revision header is
+# printed, "" when the board is too old to say or cannot be reached (#241); agents.new is
+# empty when there was no text. $STATE/agents-rev is the revision the session last read,
+# $STATE/agents.md the text it was given. The session never fetches it: the launcher puts
+# the text in the prompt, so the model needs no token to get its own copy.
+fetch_agents() {
+  local hdr="$STATE/agents.hdr"
+  if ! curl -sS -f --max-time 10 -o "$STATE/agents.new" -D "$hdr" -H "Authorization: Bearer $(cat "$TOKFILE")" "$BOARD/agents.md" 2>/dev/null; then
+    : > "$STATE/agents.new"; rm -f "$hdr"; echo ""; return 0
+  fi
+  awk -F': *' 'tolower($1) == "x-agents-revision" { gsub(/\r/, "", $2); print $2 }' "$hdr"; rm -f "$hdr"
+}
+# agents_given: the session has now read (or been handed) the text in agents.new at $1
+agents_given() {
+  [ -z "$1" ] || echo "$1" > "$STATE/agents-rev"
+  [ -s "$STATE/agents.new" ] && mv -f "$STATE/agents.new" "$STATE/agents.md"
+  return 0
 }
 KEEPER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/keeper
 rotate_logs() {
@@ -843,16 +871,18 @@ trap 'rm -f "$STATE/pid" "$STATE/stop" "$STATE/busy" "$STATE/poll"' EXIT
 gc_sweep "" "" "${BOT_GC_DAYS:-7}" 2>>"$LOG" | while IFS= read -r line; do log "gc: $line"; done || true
 log "bot $HANDLE ($HARNESS) standing by in $DIR${WORKSPACE:+, workspace $WORKSPACE}, seen=$SEEN"
 
-# ---- the profile's skills ------------------------------------------------------------
-# A bot added with a profile (/fleet) gets its skills from the board, their only home
-# (#328): each SKILL.md is written under $CFG/skills/<name>/ and linked where the
-# harnesses load skills from, so a harness loads it natively and the bot reads the same
-# text over the API. Done at every start, and again when the board's skills revision
+# ---- the bot's skills ----------------------------------------------------------------
+# A bot's skills come from the board, their only home (#328), and the launcher keeps the
+# copies here in step with the board's list, deterministically (#346): each SKILL.md is
+# written under $CFG/skills/<name>/ with the revision it is at, and linked where the
+# harnesses load skills from, so a harness loads it natively. A skill already here at the
+# listed revision is not fetched again; one the list no longer names (and no other bot on
+# this box lists) is removed, links too. Done at every start, and again when the AGENTS.md
 # moves: the loop compares it at each prompt and tells the session in that prompt.
 # $STATE/skills lists the names, which keeps their files from `bot gc`;
 # $STATE/skills-rev is the revision written here.
 write_profile_skills() {
-  local json out rev names name dir tmp
+  local json out rev list name srev dir tmp
   json=$(api --max-time 20 "$BOARD/api/me/profile?json" 2>/dev/null) || { log "profile: the board did not answer; skills stay as they are"; return 0; }
   out=$(printf '%s' "$json" | python3 -c '
 import sys,json
@@ -860,30 +890,28 @@ d=json.load(sys.stdin)
 if not isinstance(d,dict) or "skills" not in d: sys.exit(1)   # a board from before profiles
 print(d.get("skills_revision") or "")
 for s in d.get("skills") or []:
-    if s.get("name"): print(s["name"])' 2>/dev/null) || return 0
-  rev=${out%%$'\n'*}; if [ "$rev" = "$out" ]; then names=""; else names=${out#*$'\n'}; fi
-  : > "$STATE/skills"
-  for name in $names; do
+    if s.get("name"): print("%s\t%s" % (s["name"], s.get("revision") or ""))' 2>/dev/null) || return 0
+  rev=${out%%$'\n'*}; if [ "$rev" = "$out" ]; then list=""; else list=${out#*$'\n'}; fi
+  : > "$STATE/skills.new"
+  while IFS=$'\t' read -r name srev; do
+    [ -n "$name" ] || continue
     dir=$CFG/skills/$name; mkdir -p "$dir"; tmp=$dir/.SKILL.md.$$
-    if api --max-time 20 -f -o "$tmp" "$BOARD/api/skills/$name" 2>/dev/null && [ -s "$tmp" ]; then
-      mv -f "$tmp" "$dir/SKILL.md"
+    if [ -f "$dir/SKILL.md" ] && [ -n "$srev" ] && [ "$(cat "$dir/revision" 2>/dev/null)" = "$srev" ]; then
+      skill_link "$dir" "$name" | grep -v '^linked [^,]*$' | while IFS= read -r line; do log "skill $name: $line"; done || true
+    elif api --max-time 20 -f -o "$tmp" "$BOARD/api/skills/$name" 2>/dev/null && [ -s "$tmp" ]; then
+      mv -f "$tmp" "$dir/SKILL.md"; echo "$srev" > "$dir/revision"
+      log "skill $name: written at revision ${srev:-?}"
       skill_link "$dir" "$name" | while IFS= read -r line; do log "skill $name: $line"; done || true
     else
       rm -f "$tmp"; log "skill $name: the board did not serve it; the copy here, if any, stays"
     fi
-    [ -f "$dir/SKILL.md" ] && echo "$name" >> "$STATE/skills"
-  done
+    [ -f "$dir/SKILL.md" ] && echo "$name" >> "$STATE/skills.new"
+  done <<<"$list"
+  mv -f "$STATE/skills.new" "$STATE/skills"
   echo "$rev" > "$STATE/skills-rev"
+  sweep_skills | while IFS= read -r line; do log "skills: $line"; done || true
 }
 write_profile_skills
-# skills_rev: the revision of this bot's skills as the board has them now (#328), or ""
-# when the board is too old to say or cannot be reached.
-skills_rev() {
-  { api --max-time 10 "$BOARD/api/me/profile?json" 2>/dev/null || true; } | python3 -c '
-import sys,json
-try: print(json.load(sys.stdin).get("skills_revision") or "")
-except Exception: print("")'
-}
 
 # ---- run the harness once, resuming the session kept for the bot ----------------------
 # run_harness <dir> <session-file> <prompt> -> 0 when the run completed, else 1.
@@ -904,7 +932,15 @@ BOT_RETRY_WAITS=${BOT_RETRY_WAITS:-60 300 900}   # transient failures, one wait 
 BOT_UNKNOWN_WAIT=${BOT_UNKNOWN_WAIT:-300}    # a failure the launcher cannot name: one more try, then the batch is given up
 RUN_MESSAGES=""     # the message ids a run is for, for last.json; the caller sets it
 run_harness() {
-  local dir=$1 sfile=$2 prompt=$3 rc=0 sid="" off started now
+  local dir=$1 sfile=$2 prompt=$3 rc=0 sid="" off started now input=/dev/null bytes
+  local arg=("$prompt") codex_arg=("$prompt") copilot_arg=(-p "$prompt")
+  # Linux caps one argument at 128 KiB. A prompt past BOT_ARG_MAX bytes goes on stdin (#358);
+  # the others stay arguments, the form every harness version here has been run with.
+  bytes=$(LC_ALL=C; echo "${#prompt}")
+  if [ "$bytes" -gt "${BOT_ARG_MAX:-120000}" ]; then
+    input=$STATE/prompt; printf '%s' "$prompt" >"$input"
+    arg=(); codex_arg=(-); copilot_arg=()
+  fi
   off=$(wc -c <"$LOG" 2>/dev/null || echo 0); started=$(date -u +%FT%TZ)
   [ -s "$sfile" ] && sid=$(cat "$sfile")
   load_fleet_env
@@ -915,17 +951,17 @@ run_harness() {
   # their first event so later runs can resume it
   case $HARNESS in claude|copilot) [ -n "$sid" ] || sid=$(python3 -c 'import uuid;print(uuid.uuid4())') ;; esac
   # In a subshell: the harness runs in its directory, the launcher stays where it was.
-  # Stdin is /dev/null: the caller's loop feeds stdin, and a harness that read it would
-  # eat the loop's input.
+  # Stdin is /dev/null or the prompt too long for an argument, never the caller's: its
+  # loop feeds stdin, and a harness that read it would eat the loop's input.
   (cd "$dir" && case $HARNESS in
     claude)
-      if [ ! -s "$sfile" ]; then claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS "$prompt"
-      else                       claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS "$prompt"; fi \
+      if [ ! -s "$sfile" ]; then claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}
+      else                       claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}; fi \
         >"$STATE/run.out" 2>"$STATE/run.err" ;;
     codex)
       if [ ! -s "$sfile" ]; then
         # Keep reading to EOF: closing the pipe early kills the harness with SIGPIPE.
-        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "$prompt" 2>"$STATE/run.err" \
+        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -934,10 +970,10 @@ for line in sys.stdin:
     except ValueError: continue
     if d.get("type")=="thread.started" and not seen: print(d["thread_id"]); seen=True' > "$sfile.new"
       # the flags go before "resume": the subcommand takes neither -C nor -s
-      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "$prompt" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
     opencode)
       if [ ! -s "$sfile" ]; then
-        opencode_run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS "$prompt" 2>"$STATE/run.err" \
+        opencode_run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -945,12 +981,13 @@ for line in sys.stdin:
     try: d=json.loads(line)
     except ValueError: continue
     if d.get("sessionID") and not seen: print(d["sessionID"]); seen=True' > "$sfile.new"
-      else opencode_run --format json --session "$sid" $BOT_OPENCODE_FLAGS "$prompt" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else opencode_run --format json --session "$sid" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} >>"$LOG" 2>"$STATE/run.err"; fi ;;
     copilot)
       # -s keeps copilot's stats out of the log
-      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS -p "$prompt"
-      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS -p "$prompt"; fi >>"$LOG" 2>"$STATE/run.err" ;;
-  esac </dev/null) || rc=$?
+      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}
+      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}; fi >>"$LOG" 2>"$STATE/run.err" ;;
+  esac <"$input") || rc=$?
+  rm -f "$STATE/prompt"
   if [ -s "$sfile.new" ]; then sid=$(cat "$sfile.new"); fi; rm -f "$sfile.new"
   classify_run "$rc" "$off" "$sid" "$started"
   now=$(date -u +%FT%TZ)
@@ -1345,10 +1382,19 @@ login_hint() {
 }
 
 # ---- first turn: read the rules ---------------------------------------------------
-# Everything the bot needs to know is on the board, in agents.md, scoped to its
-# workspace by its token. The first prompt says so and nothing else; no introduction
-# is posted: a standby bot is found through its registration and its workspace.
+# Everything the bot needs to know is on the board, in agents.md, composed for it by
+# its token (#344). The launcher fetches it and the first prompt carries the text and
+# nothing else; no introduction is posted: a standby bot is found through its
+# registration and its workspace. A board that serves no text (unreachable) gets the
+# URL instead, as before.
 FIRST_PROMPT="Read $BOARD/agents.md and return. Your environment holds BOARD, BOT_HANDLE and BOARD_TOKEN."
+first_prompt() {
+  if [ -s "$STATE/agents.new" ]; then
+    printf 'This is your AGENTS.md, composed for you by the board. Read it and return. Your environment holds BOARD, BOT_HANDLE and BOARD_TOKEN.\n\n%s\n' "$(cat "$STATE/agents.new")"
+  else
+    printf '%s' "$FIRST_PROMPT"
+  fi
+}
 # A stop with hand-off (bot stop --handoff, asked on /fleet): the bot's threads go to other
 # bots once it has stopped, and they start from GitHub, not from this box (#225). So one
 # last turn pushes its work in progress and says on the PR where it stands. Its outcome
@@ -1362,9 +1408,9 @@ handoff_turn() {
 }
 if [ ! -s "$STATE/session" ] && ! { [ -s "$STATE/health" ] && grep -qE '^(out of|logged out|cannot run)' "$STATE/health"; }; then
   log "first turn: reading the rules"
-  REV=$(agents_rev)
-  if run_harness "$DIR" "$STATE/session" "$FIRST_PROMPT"
-  then log "rules read"; [ -z "$REV" ] || echo "$REV" > "$STATE/agents-rev"
+  REV=$(fetch_agents)
+  if run_harness "$DIR" "$STATE/session" "$(first_prompt)"
+  then log "rules read"; agents_given "$REV"
   else log "first turn: $OUTCOME${DETAIL:+: $DETAIL}"; fi
 fi
 
@@ -1445,20 +1491,18 @@ while :; do
   N=$(wc -l <<<"$NEW")
   log "$N new message(s), prompting $HARNESS in $DIR"
   # The prompt is the envelope and the messages, nothing else: the rules are in agents.md.
-  PROMPT="New message(s) on the board. Handle them as agents.md says, then return."$'\n'
+  ENVELOPE="New message(s) on the board. Handle them as agents.md says, then return."$'\n'
+  PROMPT=""; AGENTS_CHANGED=""
   # agents.md changed since this session read it: one line says so, rather than a new
   # session that would throw the context away (#241). A board that says nothing adds none.
-  REV=$(agents_rev)
-  if [ -n "$REV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/agents-rev" 2>/dev/null)" != "$REV" ]; then
-    PROMPT+="agents.md changed since you read it; read it again ($BOARD/agents.md) before handling these."$'\n'
-  fi
-  # a skill of the bot's profile was written on the board since this session read it (#328): the
-  # files here are written again and one line says so, the same way; no new session either
-  SREV=$(skills_rev)
-  if [ -n "$SREV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/skills-rev" 2>/dev/null)" != "$SREV" ]; then
-    log "the skills of this bot's profile changed on the board; writing them again"
+  # the AGENTS.md composed for this bot changed since the session read it (#241, #344): the
+  # guide itself, its workspace, its profile or one of its skills. The new text goes in this
+  # prompt, ahead of the messages, and the skill files here are written again; no new session.
+  REV=$(fetch_agents)
+  if [ -n "$REV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/agents-rev" 2>/dev/null)" != "$REV" ] && [ -s "$STATE/agents.new" ]; then
+    log "agents.md changed on the board; giving the session the new text and writing the skills again"
     write_profile_skills
-    PROMPT+="Your profile's skills changed since you read them; read your profile again ($BOARD/api/me/profile) and the skills it lists before handling these."$'\n'
+    AGENTS_CHANGED="Your AGENTS.md changed since you read it; this is the current one. Read it, then handle the messages below it."$'\n\n'"$(cat "$STATE/agents.new")"$'\n\n---\n'
   fi
   while IFS=$'\t' read -r id channel thread author why body; do
     case $why in
@@ -1480,8 +1524,9 @@ while :; do
   ATTEMPT=1
   while :; do
     # a session that does not exist yet (the first turn failed, or the session was lost)
-    # reads the rules before the batch
-    if [ -s "$STATE/session" ]; then P=$PROMPT; else P="$FIRST_PROMPT"$'\n\n'"$PROMPT"; fi
+    # reads the rules before the batch, as the first turn does: it gets the composed text
+    # (#354), which already is the current one, so never the changed text as well
+    if [ -s "$STATE/session" ]; then P=$ENVELOPE$AGENTS_CHANGED$PROMPT; else P="$(first_prompt)"$'\n\n'"$ENVELOPE$PROMPT"; fi
     RUN_RC=0; run_harness "$DIR" "$STATE/session" "$P" || RUN_RC=$?
     if [ "$OUTCOME" = session_lost ] && [ "$ATTEMPT" -eq 1 ]; then
       # the harness no longer has the session: start a new one and run the same batch once more
@@ -1500,7 +1545,7 @@ while :; do
   receipt "${RECEIPTS/true/false}"
   if [ "$OUTCOME" = ok ]; then
     rm -f "$STATE/retries" "$STATE/unknown"; log "harness returned ok"; echo "$RUNS" > "$STATE/handled"
-    [ -z "$REV" ] || echo "$REV" > "$STATE/agents-rev"     # it has read this one now, or was told to
+    agents_given "$REV"     # it has read this one now, or was given it
     continue
   fi
   rc=$RUN_RC; log "harness exited $rc: $OUTCOME${DETAIL:+: $DETAIL}"

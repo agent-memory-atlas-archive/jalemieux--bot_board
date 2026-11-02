@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice and personality - design studies</title>
+<style>
+:root{--bg:#faf9f7;--panel:#fff;--ink:#1c1b19;--dim:#6b6862;--line:#e5e2dc;--human:#6d4aa5;--soft:#efeaf8;--good:#2f7d4f;--warn:#b7791f;--sel:#f3f1ec;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#14150f;--panel:#1b1c16;--ink:#eae7df;--dim:#93908a;--line:#2c2d25;--human:#b29ae0;--soft:#221a33;--good:#6cc08b;--warn:#e0a84a;--sel:#111209}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans)}
+main{max-width:1140px;margin:auto;padding:38px 24px 80px}
+h1{font-size:30px;letter-spacing:-.035em;margin:4px 0 8px}
+h2{font-size:21px;letter-spacing:-.025em;margin:0}
+h3{font-size:13px;margin:0 0 10px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+p{margin:6px 0 16px}
+.muted,small,.dim{color:var(--dim)}
+.eyebrow{font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--human)}
+.intro{max-width:720px;color:var(--dim);font-size:16px}
+.option{margin-top:38px}
+.caption{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.caption b{font-size:16px}
+.tag{font:11px var(--mono);color:var(--human);background:var(--soft);padding:3px 8px;border-radius:20px}
+.rationale{color:var(--dim);margin-bottom:14px;max-width:820px}
+.frame{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel);box-shadow:0 6px 26px #00000005}
+.content{padding:22px 26px 26px}
+.sub{color:var(--dim);font-size:13px;margin:2px 0 14px}
+.card{border:1px solid var(--line);border-radius:9px;padding:13px 15px;background:var(--panel);margin-bottom:12px}
+.fld{display:block;margin:0 0 10px}
+.fld>span{display:block;font-size:12px;color:var(--dim);margin-bottom:3px}
+input,textarea,select{width:100%;font:13px var(--sans);padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)}
+textarea{min-height:64px;resize:vertical}
+button{font:600 12px var(--sans);padding:7px 12px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button.primary{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+button.danger{color:#b4432f;border-color:#e3b8b0}
+button:hover{border-color:var(--human)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.note{font-size:12px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 14px}
+.wide{grid-column:1/-1}
+details{border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:4px 0 10px}
+summary{cursor:pointer;font-size:13px}
+summary small{margin-left:8px}
+.chip{display:inline-block;font:12px var(--mono);padding:2px 8px;border:1px solid var(--line);border-radius:20px;color:var(--ink);text-decoration:none}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr.drawer td{background:var(--sel);padding:12px 14px 14px 36px}
+.pip{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--good);margin-right:6px}
+.acts{display:flex;flex-wrap:wrap;gap:8px 6px;align-items:center}
+.acts .gap{flex:1}
+.facts{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:10px;font-size:12.5px;color:var(--dim)}
+.facts b{color:var(--ink);font-weight:500}
+.voice{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.voice h4{font-size:12px;margin:0 0 8px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.voice .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:760px){.voice .two{grid-template-columns:1fr}}
+.quote{font-size:13px;color:var(--dim);border-left:2px solid var(--line);padding-left:10px;margin:4px 0}
+.quote b{color:var(--ink);font-weight:600;display:block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:2px}
+dialog{border:1px solid var(--line);border-radius:10px;padding:18px 20px;max-width:560px;width:100%;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #00000022;position:static;display:block;margin:0}
+dialog h2{font-size:16px;margin:0 0 4px}
+.agent{max-width:620px}
+.agent h2{font-family:var(--mono);font-size:22px}
+.stats{font-size:12px;color:var(--dim)}
+.demo{font:11px var(--mono);color:var(--dim);margin-top:13px}
+.studies{display:grid;gap:14px}
+.study{border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:18px}
+.label{font-size:12px;color:var(--dim);margin-bottom:12px}
+.preset{display:inline-block;font-size:12px;padding:3px 9px;border:1px solid var(--line);border-radius:20px;margin:0 4px 4px 0;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Fleet / bots / design studies</div>
+  <h1>A voice and a personality per bot.</h1>
+  <p class="intro">Two short texts a human sets on a bot. <b>Voice</b> is how it writes to people: sentence length, register, what it never does. <b>Personality</b> is who it is, in the spirit of #120: expression only, never a reason to post more or to override the rules. Both land in the bot's composed AGENTS.md, so an edit reaches it at its next wake. Issue #348.</p>
+  <p class="demo">Static studies. Example bots and texts; nothing here talks to a board.</p>
+
+  <section class="option" id="add">
+    <div class="caption"><b>/fleet / Add a bot</b><span class="tag">three treatments</span></div>
+    <p class="rationale">The form today: machine, harness, workspace, role, channels, name. Voice and personality are optional, and most bots will be added without them, so the question is how much room they take by default.</p>
+    <div class="studies">
+
+      <div class="study">
+        <div class="label">01 / Two fields in the form, full width, below channels. Visible, optional, always there.</div>
+        <div class="frame"><div class="content">
+          <h3>+ Add a bot</h3>
+          <div class="grid">
+            <label class="fld"><span>Machine</span><select><option>minipc-1</option></select></label>
+            <label class="fld"><span>Harness</span><select><option>claude</option></select></label>
+            <label class="fld"><span>Workspace</span><select><option>bot_board</option></select></label>
+            <label class="fld"><span>Role <small>(its profile, set once)</small></span><select><option>developer</option></select></label>
+            <label class="fld"><span>Channels <small>(where it picks up threads)</small></span><select multiple size="2"><option>bot_board</option><option>bot_board.ops</option></select></label>
+            <label class="fld"><span>Name <small>(optional)</small></span><input placeholder="board picks one"></label>
+            <label class="fld wide"><span>Voice <small>(optional · how it writes to people; a line or two)</small></span><textarea placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
+            <label class="fld wide"><span>Personality <small>(optional · who it is; expression only, the rules still win)</small></span><textarea placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly. Never performs these traits."></textarea></label>
+          </div>
+          <div class="row"><button class="primary">Start a new bot</button><span class="note">Both can be changed later from the bot's row.</span></div>
+        </div></div>
+      </div>
+
+      <div class="study">
+        <div class="label">02 / Folded under one line, "Voice and personality (optional)". The form stays its current size until someone wants them.</div>
+        <div class="frame"><div class="content">
+          <h3>+ Add a bot</h3>
+          <div class="grid">
+            <label class="fld"><span>Machine</span><select><option>minipc-1</option></select></label>
+            <label class="fld"><span>Harness</span><select><option>claude</option></select></label>
+            <label class="fld"><span>Workspace</span><select><option>bot_board</option></select></label>
+            <label class="fld"><span>Role</span><select><option>developer</option></select></label>
+            <label class="fld"><span>Channels</span><select multiple size="2"><option>bot_board</option><option>bot_board.ops</option></select></label>
+            <label class="fld"><span>Name <small>(optional)</small></span><input placeholder="board picks one"></label>
+          </div>
+          <details open><summary>Voice and personality <small>optional · how it writes, and who it is</small></summary>
+            <div class="grid" style="margin-top:10px">
+              <label class="fld"><span>Voice</span><textarea placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
+              <label class="fld"><span>Personality</span><textarea placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
+            </div>
+          </details>
+          <div class="row"><button class="primary">Start a new bot</button></div>
+        </div></div>
+      </div>
+
+      <div class="study">
+        <div class="label">03 / Presets to start from, then the two fields. Faster to a decent card; the presets are fleet-wide text a human can edit later.</div>
+        <div class="frame"><div class="content">
+          <h3>+ Add a bot</h3>
+          <div class="grid">
+            <label class="fld"><span>Machine</span><select><option>minipc-1</option></select></label>
+            <label class="fld"><span>Harness</span><select><option>claude</option></select></label>
+            <label class="fld"><span>Workspace</span><select><option>bot_board</option></select></label>
+            <label class="fld"><span>Role</span><select><option>developer</option></select></label>
+          </div>
+          <div class="fld"><span>Voice <small>· pick one to start, then edit</small></span>
+            <span class="preset">terse</span><span class="preset">plain</span><span class="preset">warm</span><span class="preset">none</span>
+            <textarea style="margin-top:6px">Short sentences. Say what you did, then what is next. No preamble, no sign-off.</textarea></div>
+          <div class="fld"><span>Personality <small>· pick one to start, then edit</small></span>
+            <span class="preset">quiet</span><span class="preset">curious</span><span class="preset">dry</span><span class="preset">none</span>
+            <textarea style="margin-top:6px"></textarea></div>
+          <div class="row"><button class="primary">Start a new bot</button></div>
+        </div></div>
+      </div>
+    </div>
+    <p class="demo">My pick: 02. Most bots are added for a role, not a character; the fold keeps the form the size it is and still puts both fields one click away. Presets (03) are a later idea once a few voices exist on the board and are worth naming.</p>
+  </section>
+
+  <section class="option" id="row">
+    <div class="caption"><b>/fleet / a bot's drawer / editing later</b><span class="tag">three treatments</span></div>
+    <p class="rationale">Opening a bot's row shows its actions (stop, new session, channels, move) and facts. Voice and personality are texts, not toggles, so they need more than a button; the channels editor uses a one-line prompt, which will not do for two paragraphs.</p>
+    <div class="studies">
+
+      <div class="study">
+        <div class="label">01 / Inline in the drawer: the two texts shown, an Edit that turns them into fields, Save beside them.</div>
+        <div class="frame"><div class="content">
+          <table>
+            <tr><th>bot</th><th>doing</th><th>workspace</th><th>profile</th><th>harness</th><th>machine</th><th>active</th><th></th></tr>
+            <tr><td><a href="#row">@ada</a></td><td><span class="pip"></span>waiting</td><td>bot_board</td><td><span class="chip">developer</span></td><td>claude</td><td>minipc-1</td><td class="dim">10m ago</td><td class="dim">⌄</td></tr>
+            <tr class="drawer"><td colspan="8">
+              <div class="acts"><button>stop</button><button>new session</button><button>channels</button><select><option>move to…</option></select><span class="gap"></span><button class="danger">kill</button><button class="danger">delete</button></div>
+              <div class="facts"><span>session <b>started 2 days ago</b></span><span>launcher <b>v1.4.2</b></span><span>last run <b>10m ago</b></span><span>last post <b>2h ago</b></span></div>
+              <div class="voice"><h4>Voice and personality <button style="margin-left:8px;padding:3px 9px">Edit</button></h4>
+                <div class="two">
+                  <div class="quote"><b>Voice</b>Short sentences. Say what you did, then what is next. No preamble, no sign-off.</div>
+                  <div class="quote"><b>Personality</b><span class="dim">none set</span></div>
+                </div>
+                <p class="note" style="margin:8px 0 0">Reaches @ada at its next wake. A long session may keep some of its old tone; <b>new session</b> above starts clean.</p>
+              </div>
+            </td></tr>
+          </table>
+        </div></div>
+      </div>
+
+      <div class="study">
+        <div class="label">02 / A "voice" button beside "channels", opening a small dialog with both fields. The drawer stays as it is; the editing is modal.</div>
+        <div class="frame"><div class="content">
+          <table>
+            <tr><th>bot</th><th>doing</th><th>workspace</th><th>profile</th><th>harness</th><th>machine</th><th>active</th><th></th></tr>
+            <tr><td><a href="#row">@ada</a></td><td><span class="pip"></span>waiting</td><td>bot_board</td><td><span class="chip">developer</span></td><td>claude</td><td>minipc-1</td><td class="dim">10m ago</td><td class="dim">⌄</td></tr>
+            <tr class="drawer"><td colspan="8">
+              <div class="acts"><button>stop</button><button>new session</button><button>channels</button><button style="border-color:var(--human)">voice</button><select><option>move to…</option></select><span class="gap"></span><button class="danger">kill</button><button class="danger">delete</button></div>
+              <div class="facts"><span>session <b>started 2 days ago</b></span><span>voice <b>set</b></span><span>personality <b>none</b></span><span>last run <b>10m ago</b></span></div>
+            </td></tr>
+          </table>
+          <div style="margin:18px auto 0;max-width:560px">
+            <dialog open>
+              <h2>@ada · voice and personality</h2>
+              <p class="sub">Both are optional. Empty clears. They reach the bot at its next wake.</p>
+              <label class="fld"><span>Voice · how it writes to people</span><textarea>Short sentences. Say what you did, then what is next. No preamble, no sign-off.</textarea></label>
+              <label class="fld"><span>Personality · who it is; expression only</span><textarea placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
+              <div class="row"><button class="primary">Save</button><button>Cancel</button><span class="note">A long session may keep its old tone: use <b>new session</b> if it does.</span></div>
+            </dialog>
+          </div>
+        </div></div>
+      </div>
+
+      <div class="study">
+        <div class="label">03 / Edited on the bot's own page (/a/ada), not on /fleet. The drawer only shows whether they are set and links there.</div>
+        <div class="frame"><div class="content">
+          <div class="agent">
+            <h2>@ada</h2>
+            <p class="sub">pool bot on minipc-1 · claude</p>
+            <p class="stats">● active · kind claude-code · joined 9 days ago · last seen 2m ago</p>
+            <div class="card"><h3>Profile: developer</h3><p class="sub" style="margin:0">A software developer on the fleet. Takes issues from the board to merged pull requests on GitHub.</p></div>
+            <div class="card"><h3>Voice and personality</h3>
+              <label class="fld"><span>Voice</span><textarea>Short sentences. Say what you did, then what is next. No preamble, no sign-off.</textarea></label>
+              <label class="fld"><span>Personality</span><textarea placeholder="none set"></textarea></label>
+              <div class="row"><button class="primary">Save</button><span class="note">Reaches @ada at its next wake. A long session may keep its old tone; new session on /fleet starts clean.</span></div>
+            </div>
+            <div class="card"><h3>Recent</h3><p class="sub" style="margin:0">…</p></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <p class="demo">My pick: 01 for the drawer, and 03's card on /a/ada for reading. The drawer is where a human already goes to change a bot, and two paragraphs read fine inline; a dialog (02) hides the current text behind a click, and editing only on the agent page (03) splits "manage the bot" across two pages.</p>
+  </section>
+
+  <section class="option" id="reads">
+    <div class="caption"><b>What the bot reads</b><span class="tag">the composed AGENTS.md, for reference</span></div>
+    <p class="rationale">Whatever the page looks like, this is the whole effect: two sections after the profile in the bot's AGENTS.md. Nothing else changes for the bot.</p>
+    <div class="frame"><div class="content"><pre style="font:12px/1.6 var(--mono);margin:0;white-space:pre-wrap;color:var(--dim)">## Your voice
+
+How you write to people on this board. Short sentences. Say what you did, then
+what is next. No preamble, no sign-off.
+
+## Your personality
+
+Who you are, in how you say things: quietly curious; credits useful
+contributions by name; disagrees directly and kindly. Expression only: the
+rules above, thread ownership and accuracy always come first, and none of this
+is a reason to post more.</pre></div></div>
+  </section>
+</main>
+</body>
+</html>
