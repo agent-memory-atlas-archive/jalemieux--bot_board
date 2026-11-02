@@ -888,7 +888,7 @@ def fleet_report(name: str, body: FleetReportIn, agent: dict = Depends(current_a
     fleet.moved(name.lower(), body.handed, body.fetched)
     first = fleet.default_bot(name.lower(), agent["handle"], body.default_bot, body.operators,
                               [b.model_dump() for b in body.bots])
-    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems), "secrets": fleet.secrets_version(),
+    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems) + fleet.leftovers(name.lower()), "secrets": fleet.secrets_version(),
             "release": COMMIT, "min_protocol": versions.MIN_PROTOCOL,
             **({"default_bot": first} if first else {})}
 

@@ -97,6 +97,41 @@ class Board(unittest.TestCase):
         self.assertTrue(self.report('stopped')[0]['deleted'])
         self.assertEqual(self.report(), [])
 
+    def test_a_copy_on_another_box_is_asked_too(self):
+        # #368: one row, on one box, but the other box reports a copy; it is asked when it next reports
+        other = self.register('keeper-old', 'keeper')
+        def old(*bots):
+            r = self.client.put('/api/fleet/hosts/old', headers=other, json={'bots': [
+                {'handle': h, 'harness': 'codex', 'status': s, 'serves': '/pool', 'pool': True} for h, s in bots]})
+            self.assertEqual(r.status_code, 200, r.text)
+            return r.json()['want']
+        self.assertEqual(old(('tarzan', 'waiting')), [], 'not while the bot is alive')
+        self.report('waiting')
+        self.delete()
+        self.assertTrue(self.report('waiting')[0]['deleted'])
+
+        want = old(('tarzan', 'waiting'))
+        self.assertEqual([(w['handle'], w['harness'], w['run'], bool(w['deleted'])) for w in want], [('tarzan', 'codex', False, True)])
+        self.assertEqual(old(('tarzan', 'moved')), [], "a hand-over copy is the keeper's own")
+        self.assertEqual(old(), [])
+
+        # the row goes when its own box is done; a box that was dark is still asked when it returns
+        self.assertEqual(self.report(), [])
+        self.assertEqual(db.conn().execute("SELECT COUNT(*) FROM fleet_bots WHERE handle='tarzan'").fetchone()[0], 0)
+        self.assertTrue(old(('tarzan', 'stopped'))[0]['deleted'])
+
+        # the keeper's part takes it as it takes a row (its reconcile is tested with one below)
+        self.assertEqual({'handle', 'host', 'harness', 'run', 'set_by', 'set_at', 'deleted'} - set(want[0]), set())
+
+    def test_a_copy_of_a_living_bot_or_a_retired_keeper_is_not_asked(self):
+        other = self.register('keeper-old', 'keeper')
+        self.register('keeper-gone', 'keeper')
+        with db._write_lock, db.conn() as c:
+            c.execute("UPDATE agents SET retired_at='2020-01-01T00:00:00+00:00' WHERE handle='keeper-gone'")
+        r = self.client.put('/api/fleet/hosts/old', headers=other, json={'bots': [
+            {'handle': h, 'harness': 'claude', 'status': 'stopped', 'serves': '/pool', 'pool': True} for h in ('tarzan', 'keeper-gone')]})
+        self.assertEqual(r.json()['want'], [])
+
     def test_the_fleet_page_and_the_bot_page_offer_it(self):
         self.report('running proj')
         self.assertIn('class="act delete-bot" data-handle="tarzan"', self.client.get('/fleet').text)
@@ -144,6 +179,12 @@ class Keeper(unittest.TestCase):
             hands.reconcile(want, [{'handle': 'tarzan', 'status': 'stopped'}])
             self.assertEqual(ran, [['delete', 'tarzan']])
             hands.reconcile(want, [])                            # gone: nothing more to do
+            # a leftover (#368) has only these fields, and goes the same way
+            ran.clear()
+            left = [{'handle': 'tarzan', 'host': 'old', 'harness': 'codex', 'run': False, 'set_by': 'board',
+                     'set_at': '2026-11-02T00:00:00+00:00', 'deleted': '2026-11-02T00:00:00+00:00'}]
+            self.assertEqual(hands.reconcile(left, [{'handle': 'tarzan', 'status': 'stopped'}]), {})
+            self.assertEqual(ran, [['delete', 'tarzan']])
             self.assertEqual(ran, [['delete', 'tarzan']])
         finally:
             self.keeper.subprocess.run = real
