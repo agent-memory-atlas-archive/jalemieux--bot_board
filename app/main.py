@@ -389,16 +389,18 @@ API_MAP = {
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
         "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
         "GET /api/skills": "the fleet's skill registry: every skill with its revision and the profiles that list it",
-        "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields and body; ?revision=N for an older one",
+        "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields (base among them) and body; ?revision=N for an older one",
         "PUT /api/skills/{name}": "humans and admin bots create or replace a skill {body, fields?, base_revision, reason};"
-                                  " body may be a whole SKILL.md; bots on it are told at their next prompt",
-        "DELETE /api/skills/{name}": "remove a skill {base_revision, reason}; refused while a profile lists it",
+                                  " body may be a whole SKILL.md; bots on it are told at their next prompt;"
+                                  " base: true in the fields or frontmatter gives it to every bot, false takes it back,"
+                                  " left out keeps it",
+        "DELETE /api/skills/{name}": "remove a skill {base_revision, reason}; refused while a profile lists it or it is base",
         "POST /api/skills/{name}/reset": "a human gives every bot whose profile lists the skill a new session",
         "POST /api/profiles/{name}/reset": "a human gives every bot that carries the profile a new session",
         "GET /api/skills/{name}/history": "every revision of a skill, newest first",
         "GET /api/profiles": "every profile: role, skills, the bots that carry it and the profiles cloned from it",
         "GET /api/profiles/templates": "the shipped starters a new profile can begin from",
-        "GET /api/profiles/{name}": "one profile, with the text a bot of it reads",
+        "GET /api/profiles/{name}": "one profile, with the text a bot of it reads; base_skills: what its bots also have",
         "POST /api/profiles": "humans and admin bots create a profile {name, role, responsibilities, focus, avoid,"
                               " skills: [{name, mandatory}], from?}; profiles are never edited: clone instead",
         "DELETE /api/profiles/{name}": "remove a profile; refused while a bot carries it; the name stays taken",
@@ -593,7 +595,8 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
     of the admin workspace gets the administration reference instead. Fetched with
     a bot's token, the guide is composed for that bot (#344): the file, then a
     section on who it is — its workspace and channels, its profile, its skills as
-    name@revision with every mandatory one written out. The launcher fetches it
+    name@revision with every mandatory one written out, or named if the text
+    would grow too long for a prompt (#355). The launcher fetches it
     that way and puts the whole text in the session's prompt; the model fetches
     nothing. Without a token, or with a human's, it is the file alone. The
     X-Agents-Revision header is a hash of the text served: a launcher compares it
@@ -610,7 +613,7 @@ def agents_md(request: Request, agent: dict | None = Depends(optional_agent)) ->
     base = str(request.base_url).rstrip("/")
     text = text.replace("http://127.0.0.1:8080", base)
     if agent and agent["kind"] not in db.UNSCOPED_KINDS:
-        text += registry.identity_text(agent, base)
+        text += registry.identity_text(agent, base, len(text.encode()))
     return PlainTextResponse(text, headers={"X-Agents-Revision": hashlib.sha256(text.encode()).hexdigest()[:16]})
 
 
@@ -902,7 +905,7 @@ def fleet_report(name: str, body: FleetReportIn, agent: dict = Depends(current_a
     fleet.moved(name.lower(), body.handed, body.fetched)
     first = fleet.default_bot(name.lower(), agent["handle"], body.default_bot, body.operators,
                               [b.model_dump() for b in body.bots])
-    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems), "secrets": fleet.secrets_version(),
+    return {"ok": True, "want": fleet.wanted(name.lower(), body.problems) + fleet.leftovers(name.lower()), "secrets": fleet.secrets_version(),
             "release": COMMIT, "min_protocol": versions.MIN_PROTOCOL,
             **({"default_bot": first} if first else {})}
 
@@ -1225,7 +1228,7 @@ def _reset_all(handles: list[str], agent: dict) -> dict:
 
 @app.post("/api/skills/{name}/reset", tags=["skills"])
 def skill_reset(name: str, agent: dict = Depends(current_agent)) -> dict:
-    """A human gives every bot whose profile lists the skill a new session, each as POST
+    """A human gives every bot on the skill (all of them, for a base skill) a new session, each as POST
     /api/fleet/bots/{handle}/reset does: when idle, a stopped bot at its next start."""
     _registry_call(registry.get_skill, name)
     return _reset_all(registry.bots_of_skill(name), agent)
@@ -1259,7 +1262,8 @@ def profile_templates(_: dict | None = Depends(optional_agent)) -> dict:
 @app.get("/api/profiles/{name}", tags=["profiles"])
 def profile_get(name: str, request: Request, _: dict | None = Depends(optional_agent)) -> dict:
     profile = _registry_call(registry.get_profile, name)
-    return {"profile": {**profile, "text": registry.profile_text(profile, str(request.base_url))}}
+    return {"profile": {**profile, "base_skills": registry.also_has(profile),
+                        "text": registry.profile_text(profile, str(request.base_url))}}
 
 
 @app.post("/api/profiles", tags=["profiles"], status_code=201)
@@ -1288,7 +1292,7 @@ def my_profile(request: Request, agent: dict = Depends(current_agent)):
     profile = registry.profile_of(agent["handle"])
     rev = registry.skills_revision(profile)
     if "json" in request.query_params:
-        return {"profile": profile, "skills": registry.resolve(profile) if profile else [], "skills_revision": rev}
+        return {"profile": profile, "skills": registry.resolve(profile), "skills_revision": rev}
     return PlainTextResponse(registry.profile_text(profile, str(request.base_url)), headers={"X-Skills-Revision": rev})
 
 

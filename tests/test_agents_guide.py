@@ -3,13 +3,14 @@ import hashlib
 import os
 import sys
 import tempfile
+import subprocess
 import threading
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
-from app import db, main, web
+from app import db, main, registry, web
 
 
 class AgentGuide(unittest.TestCase):
@@ -145,6 +146,31 @@ class AgentGuide(unittest.TestCase):
                                                                            "voice": "Plain."}).json()["handle"]
         self.assertIn("Plain.", self.client.get("/agents.md", headers=self.register(handle, "claude-code", "proj")).text)
 
+    def test_a_large_mandatory_skill_is_named_not_written_out(self):
+        # #355: the launcher passes the document as one argument, capped at 128 KiB by Linux
+        human = self.register("op", "human")
+        keeper = self.register("keeper-box", "keeper")
+        self.client.post("/api/workspaces", headers=human, json={"slug": "proj", "name": "Proj"}).raise_for_status()
+        for name, body in (("huge", "é" * 90_000), ("mid-a", "a" * 60_000), ("mid-b", "b" * 60_000), ("tiny", "Tiny body.")):
+            self.client.put(f"/api/skills/{name}", headers=human, json={"body": body, "fields": {"description": name},
+                                                                        "base_revision": 0}).raise_for_status()
+        self.client.post("/api/profiles", headers=human, json={"name": "heavy", "role": "Carries a lot.", "skills": [
+            {"name": n, "mandatory": True} for n in ("huge", "mid-a", "mid-b", "tiny")]}).raise_for_status()
+        self.client.put("/api/fleet/hosts/box", headers=keeper, json={"bots": []}).raise_for_status()
+        self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": True, "harness": "claude",
+                                                                      "workspace": "proj", "profile": "heavy"}).raise_for_status()
+        text = self.client.get("/agents.md", headers=self.register("jane", "claude-code", "proj")).text
+        self.assertLessEqual(len(text.encode()), registry.MAX_COMPOSED)
+        self.assertIn("not written out below: huge, mid-b. Read each one now", text)
+        self.assertIn("`GET http://fleet.example:8080/api/skills/<name>`", text)
+        self.assertNotIn("### Skill: huge", text)
+        self.assertNotIn("### Skill: mid-b", text)
+        self.assertIn("### Skill: mid-a\n\n" + "a" * 60_000, text, "what fits is still written out")
+        self.assertIn("### Skill: tiny\n\nTiny body.", text, "a big skill does not push out a small one after it")
+        for name in ("huge", "mid-a", "mid-b", "tiny"):
+            self.assertIn(f"- **{name}@1** (mandatory):", text)
+        subprocess.run(["true", text], check=True)  # the kernel takes it as one argument
+
     def test_a_bot_without_a_profile_or_workspace_gets_only_what_it_has(self):
         # what a bot does not have is not listed: no "no profile" line, no empty headings
         bot = self.register("loner", "claude-code")
@@ -152,6 +178,19 @@ class AgentGuide(unittest.TestCase):
         self.assertIn("You are `@loner`", own)
         for absent in ("## Your workspace", "## Your profile", "## Your skills", "no profile", "no workspace"):
             self.assertNotIn(absent, own)
+
+    def test_a_bot_without_a_profile_gets_a_base_skill_written_out(self):
+        # #347: writing it moves the revision, which is what reaches a running bot
+        human = self.register("op", "human")
+        bot = self.register("loner", "claude-code")
+        before = self.client.get("/agents.md", headers=bot).headers["x-agents-revision"]
+        self.client.put("/api/skills/house-style", headers=human, json={"body": "Short sentences.", "base_revision": 0,
+                        "fields": {"description": "How to write.", "base": True}}).raise_for_status()
+        r = self.client.get("/agents.md", headers=bot)
+        self.assertNotEqual(r.headers["x-agents-revision"], before)
+        self.assertIn("- **house-style@1** (mandatory, every bot): How to write.", r.text)
+        self.assertIn("### Skill: house-style\n\nShort sentences.", r.text)
+        self.assertNotIn("## Your profile", r.text)
 
     def test_an_admin_bot_gets_the_administration_reference_composed(self):
         human = self.register("op", "human")
