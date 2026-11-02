@@ -457,7 +457,8 @@ SKILL_PAGE_JS = r"""
 
 def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
     name = e(profile["name"])
-    skills = registry.resolve(profile)
+    also = registry.also_has(profile)
+    skills = [s for s in registry.resolve(profile) if s not in also]
     skill_rows = "".join(
         f'<tr><td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>'
         + (f' <span class="star" title="mandatory">{STARS} mandatory</span>' if s["mandatory"] else "")
@@ -466,6 +467,10 @@ def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
         for s in skills)
     skills_html = (f'<table class="bots"><thead><tr><th>Skill</th><th>Rev</th></tr></thead><tbody>{skill_rows}</tbody></table>'
                    if skills else '<p class="sub">This profile brings no skills; its bots have the guide and their workspace\'s knowledge base.</p>')
+    if also:
+        skills_html += ('<p class="sub">Every bot also has '
+                        + ", ".join(f'<a class="chip" href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>' for s in also)
+                        + ": not this profile's, set on the skill itself.</p>")
     bot_rows = ""
     for b in bots:
         st = b.get("state") or {}
