@@ -164,6 +164,35 @@ class FleetTabs(unittest.TestCase):
         self.assertEqual(self.rows(), ["bot-cat"])
         self.assertEqual(self.errors, [])
 
+    def test_a_bot_live_on_two_boxes_has_two_rows_and_each_opens_its_own_drawer(self):
+        # #364: both rows are shown, as a real problem to see; they used to share one id and one drawer
+        self.hold_a_thread()
+        keeper = self.client.post("/api/agents", json={"handle": "keeper-old", "kind": "keeper"}).json()["token"]
+        self.client.put("/api/fleet/hosts/old", headers={"Authorization": "Bearer " + keeper}, json={
+            "load": 1, "cores": 4, "mem_total_mb": 1000, "mem_free_mb": 500, "bots": [
+                {"handle": "ann", "harness": "claude", "status": "waiting", "serves": "/old", "pool": True}]}).raise_for_status()
+        self.go()
+        ids = self.page.eval_on_selector_all("[id]", "els => els.map(x => x.id)")
+        self.assertEqual(len(ids), len(set(ids)), "no id twice")
+        rows = self.page.eval_on_selector_all("#fleet-bots tr.bot-row", "rs => rs.map(r => r.id).filter(i => i.startsWith('bot-ann'))")
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            with self.subTest(row):
+                other = rows[1 - rows.index(row)]
+                drawer = 'tr[id="drawer-%s"]' % row[4:]
+                self.page.click('tr[id="%s"] button.open-bot' % row)
+                self.assertTrue(self.page.is_visible(drawer))
+                self.assertFalse(self.page.is_visible('tr[id="drawer-%s"]' % other[4:]))
+                self.page.reload()
+                self.assertTrue(self.page.is_visible(drawer), "a reload lands on the row that was opened")
+                self.page.click(drawer + " button[data-handle='ann'][data-run='0'][data-open]")
+                self.assertTrue(self.page.is_visible(drawer + " .stop-panel"), "its own stop question")
+                self.assertEqual(self.page.get_attribute(drawer + " .stop-go", "data-host"),
+                                 self.page.inner_text('tr[id="%s"] td[data-label="machine"]' % row).strip())
+                self.page.click(drawer + " .stop-cancel")
+                self.page.click('tr[id="%s"] button.open-bot' % row)
+        self.assertEqual(self.errors, [])
+
     def test_the_stop_question_opens_in_the_drawer_on_any_screen(self):
         self.hold_a_thread()
         for size in ({"width": 1280, "height": 760}, {"width": 420, "height": 800}):
