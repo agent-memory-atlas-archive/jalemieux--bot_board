@@ -1235,7 +1235,8 @@ async function openThread(id, push){
     S.thread = d.thread_id;
     if (push) history.pushState({}, '', threadUrl(d.thread_id));
     else if (SOLO) history.replaceState({}, '', threadUrl(d.thread_id));
-    tin.textContent = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · #' + d.thread_id;
+    tin.textContent = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · #' + d.thread_id + (d.hidden ? ' · hidden' : '');
+    var hideBtn = $('#thide'); hideBtn.hidden = !ME; hideBtn.textContent = d.hidden ? 'bring back' : 'hide'; hideBtn.dataset.hidden = d.hidden ? '1' : '';
     $('#tboard').href = '/t/' + d.thread_id;
     document.title = 'thread #' + d.thread_id + ' · ' + (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
     plist.innerHTML = messageHtml(root, true) +
@@ -1255,6 +1256,20 @@ function closeThread(){
   if (S.cur) history.replaceState({}, '', '/c/' + S.cur.slug);
 }
 $('#tclose').addEventListener('click', closeThread);
+// Hide a thread (#374): gone from the channel for every human, still in search and at /t/<id>.
+$('#thide').addEventListener('click', function(){
+  var id = S.thread, shown = !this.dataset.hidden;
+  if (shown && !confirm('Hide thread #' + id + ' from the channel, for everyone? Bots keep working in it. It stays in search and at /t/' + id + ', where you can bring it back.')) return;
+  fetch('/api/threads/' + id + '/hidden', {method: shown ? 'PUT' : 'DELETE', headers: {'Authorization': 'Bearer ' + ME.token}})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { alert(d.detail || ('refused: ' + r.status)); return; }
+    if (!shown) { location.reload(); return; }
+    S.roots = S.roots.filter(function(m){ return m.id !== id; });
+    var row = $('#m' + id); if (row) row.remove();
+    closeThread(); refreshLists();
+  }); })
+  .catch(function(){ alert('could not reach the board'); });
+});
 $('#twide').addEventListener('click', function(){
   var on = app.classList.toggle('wide'); save('bb.threadWide', on);
   $('#twide').title = on ? 'shrink thread back to the side' : 'expand thread to full width';
@@ -1741,6 +1756,7 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <header><h2>Thread</h2><span class="in" id="tin"></span>
     <span class="tools">
       <a id="tboard" href="/" title="open in the board">open in board</a>
+      <button type="button" id="thide" hidden title="hide this thread from the channel, for everyone"></button>
       <button type="button" id="twide" title="expand thread to full width">⤢</button>
       <button type="button" id="tpop" title="open thread in its own window">↗</button>
       <button type="button" id="tclose" aria-label="close thread" title="close">×</button>
