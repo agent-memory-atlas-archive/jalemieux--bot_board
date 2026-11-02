@@ -14,6 +14,7 @@ from fakes import harness as fh                  # noqa: E402
 from fakes.board import FakeBoard                # noqa: E402
 from test_launcher_e2e import Launcher, BOT      # noqa: E402
 
+COMPOSED = "This is your AGENTS.md, composed for you by the board."
 FAST = {"BOT_LIMIT_WAIT": "2", "BOT_BAD_WAIT": "2", "BOT_RETRY_WAITS": "1 1", "BOT_UNKNOWN_WAIT": "1", "BOT_AUTH_WAIT": "1"}
 
 
@@ -81,7 +82,7 @@ class Outcomes(unittest.TestCase):
                 L, root = self.launch(board, harness, fh.step(harness, "session_lost"), fh.step(harness, "ok", "done", new_session="fresh-2"))
                 old = L.read("session")
                 self.settled(L, 3)
-                self.assertTrue(L.prompts()[2].startswith("Read "), "the new session reads the rules first")
+                self.assertTrue(L.prompts()[2].startswith(COMPOSED), "the new session reads the rules first")
                 self.assertIn("please fix the widget", L.prompts()[2])
                 self.assertNotEqual(L.read("session"), old)
                 self.assertTrue(L.read("session"))
@@ -103,7 +104,7 @@ class Outcomes(unittest.TestCase):
                 L.wait_for(lambda: L.read("session"), "the first turn's session")
                 old = L.read("session")
                 self.settled(L, 3)
-                self.assertTrue(L.prompts()[2].startswith("Read "), "the new session reads the rules first")
+                self.assertTrue(L.prompts()[2].startswith(COMPOSED), "the new session reads the rules first")
                 self.assertIn("please fix the widget", L.prompts()[2])
                 self.assertNotEqual(L.read("session"), old)
                 self.assertEqual([p.read_text() for p in (L.state / "old-sessions").glob("*/session")], [old + "\n"])
@@ -197,10 +198,41 @@ class Outcomes(unittest.TestCase):
             L.start()
             L.wait_for(lambda: L.read("health").startswith("out of claude usage"), "the first turn's outage")
             self.settled(L, 2)
-            self.assertTrue(L.prompts()[1].startswith("Read "), "a session that never read the rules reads them first")
+            self.assertTrue(L.prompts()[1].startswith(COMPOSED), "a session that never read the rules reads them first")
             self.assertIn("please fix the widget", L.prompts()[1])
             self.assertEqual(board.worker(root), "tbot")
             self.assertEqual(L.read("health"), "")
+
+    # ---- a new session mid-batch gets the composed text, once (#354) ---------------------
+    def test_a_new_session_carries_the_composed_text_once_with_the_batch(self):
+        for outcome in ("session_lost", "context_overflow"):
+            with self.subTest(outcome=outcome), FakeBoard() as board:
+                board.agents_rev = "r1"
+                L, root = self.launch(board, "claude", fh.step("claude", outcome), fh.step("claude", "ok", "done", new_session="fresh-2"))
+                self.settled(L, 3)
+                self.assertNotIn("the rules", L.prompts()[1], "the running session already has it")
+                self.assertTrue(L.prompts()[2].startswith(COMPOSED))
+                self.assertIn("# Your identity", L.prompts()[2])
+                self.assertIn("please fix the widget", L.prompts()[2])
+                self.assertEqual(L.read("agents-rev"), "r1")
+
+    def test_a_new_session_after_a_change_gets_the_current_text_not_both(self):
+        for outcome in ("session_lost", "context_overflow"):
+            with self.subTest(outcome=outcome), FakeBoard() as board:
+                board.agents_rev = "r1"
+                L = Launcher(board, "claude", env=FAST); self.addCleanup(L.close)
+                L.plan(fh.step("claude", "ok", "rules read"), fh.step("claude", outcome), fh.step("claude", "ok", "done", new_session="fresh-2"))
+                L.start()
+                L.wait_for(lambda: L.read("agents-rev") == "r1", "the first turn to record r1")
+                board.agents_rev = "r2"; board.agents_text = "the new rules"
+                board.post_root("ws-general", "please fix the widget")
+                self.settled(L, 3)
+                self.assertIn("Your AGENTS.md changed since you read it", L.prompts()[1], "the old session is told")
+                self.assertIn("the new rules", L.prompts()[1])
+                self.assertTrue(L.prompts()[2].startswith(COMPOSED))
+                self.assertNotIn("Your AGENTS.md changed", L.prompts()[2])
+                self.assertEqual(L.prompts()[2].count("the new rules"), 1)
+                self.assertEqual(L.read("agents-rev"), "r2")
 
     # ---- a prompt too long for one argument goes on stdin (#358) --------------------------
     def test_a_batch_too_long_for_an_argument_goes_on_stdin(self):

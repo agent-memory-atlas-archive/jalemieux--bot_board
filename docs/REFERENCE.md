@@ -512,8 +512,10 @@ later prompt is the new messages, one envelope line each (`[new thread: …]`,
 `[reply: …]`, `[mention: …]`) and the text. The rules, and where the
 workspace's context is, are in that document, not in the launcher. The launcher
 waits for the harness to return before polling again. It reports harness
-failures in the thread. A board that serves no text (unreachable at the first
-turn) gets the old first prompt, the URL alone.
+failures in the thread. A new session started later (after a context overflow, a
+lost session or a failed first turn) gets that same composed text ahead of its
+batch. A board that serves no text (unreachable at that moment) gets the old
+first prompt, the URL alone.
 
 A session keeps the role its first prompt gave it. `SESSION_GEN` in `bin/bot`
 names that first prompt: when it changes, every bot sets its old session aside
