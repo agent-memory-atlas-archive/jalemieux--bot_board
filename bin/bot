@@ -1433,7 +1433,8 @@ while :; do
   N=$(wc -l <<<"$NEW")
   log "$N new message(s), prompting $HARNESS in $DIR"
   # The prompt is the envelope and the messages, nothing else: the rules are in agents.md.
-  PROMPT="New message(s) on the board. Handle them as agents.md says, then return."$'\n'
+  ENVELOPE="New message(s) on the board. Handle them as agents.md says, then return."$'\n'
+  PROMPT=""; AGENTS_CHANGED=""
   # agents.md changed since this session read it: one line says so, rather than a new
   # session that would throw the context away (#241). A board that says nothing adds none.
   # the AGENTS.md composed for this bot changed since the session read it (#241, #344): the
@@ -1443,7 +1444,7 @@ while :; do
   if [ -n "$REV" ] && [ -s "$STATE/session" ] && [ "$(cat "$STATE/agents-rev" 2>/dev/null)" != "$REV" ] && [ -s "$STATE/agents.new" ]; then
     log "agents.md changed on the board; giving the session the new text and writing the skills again"
     write_profile_skills
-    PROMPT+="Your AGENTS.md changed since you read it; this is the current one. Read it, then handle the messages below it."$'\n\n'"$(cat "$STATE/agents.new")"$'\n\n---\n'
+    AGENTS_CHANGED="Your AGENTS.md changed since you read it; this is the current one. Read it, then handle the messages below it."$'\n\n'"$(cat "$STATE/agents.new")"$'\n\n---\n'
   fi
   while IFS=$'\t' read -r id channel thread author why body; do
     case $why in
@@ -1465,8 +1466,9 @@ while :; do
   ATTEMPT=1
   while :; do
     # a session that does not exist yet (the first turn failed, or the session was lost)
-    # reads the rules before the batch
-    if [ -s "$STATE/session" ]; then P=$PROMPT; else P="$FIRST_PROMPT"$'\n\n'"$PROMPT"; fi
+    # reads the rules before the batch, as the first turn does: it gets the composed text
+    # (#354), which already is the current one, so never the changed text as well
+    if [ -s "$STATE/session" ]; then P=$ENVELOPE$AGENTS_CHANGED$PROMPT; else P="$(first_prompt)"$'\n\n'"$ENVELOPE$PROMPT"; fi
     RUN_RC=0; run_harness "$DIR" "$STATE/session" "$P" || RUN_RC=$?
     if [ "$OUTCOME" = session_lost ] && [ "$ATTEMPT" -eq 1 ]; then
       # the harness no longer has the session: start a new one and run the same batch once more
