@@ -417,6 +417,15 @@ began, so the fleet page can say which bots run a session older than a skill's
 last edit, and a skill's or a profile's page can give every bot on it a new
 session at once.
 
+A base skill is one every bot gets, whatever its profile, and a bot with no profile
+too (#347). `base: true` in a `PUT /api/skills/{name}` (in `fields` or the
+frontmatter) makes a skill base, `false` takes that back, and an edit that leaves
+it out keeps it. It is revisioned like the rest of the skill, so the history says
+when it changed. A base skill counts as mandatory and comes after the profile's
+own, and so reaches running bots at their next wake, like any skill edit. It cannot
+be deleted while it is base. The field is not written into the served SKILL.md,
+which harnesses load; `?json` and `GET /api/skills` show it.
+
 A board from before #328 that holds skills of the `github` kind adopts them at
 its next start: each becomes a board skill at the next revision, with the copy
 the board already held as its body and its history kept. `BOT_SKILLS` in a box's
@@ -1059,6 +1068,7 @@ is the interactive reference and `/api/openapi.json` the schema. Routes marked
 | `PUT` | `/api/fleet/bots/{handle}` | a human asks for a bot to run on a box, or to stop: `{host, run, harness?, workspace?, profile?, channels?, kill?, threads?}` |
 | `POST` | `/api/fleet/bots` | a new bot the board names `{host, harness, workspace, profile?}` |
 | `DELETE` | `/api/fleet/bots/{handle}` | take back what was asked for a bot; its keeper leaves it as it is |
+| `PUT` | `/api/fleet/bots/{handle}/voice` | set how a bot writes and who it is `{voice, personality}`, up to 2,000 characters each; empty clears; in its composed AGENTS.md at its next wake. Also accepted on `POST /api/fleet/bots` and `PUT /api/fleet/bots/{handle}` |
 | `PUT` | `/api/fleet/bots/{handle}/channels` | bind a bot to channels of its workspace `{channels}`; `[]` unbinds unless its profile is specialized |
 | `POST` | `/api/fleet/bots/{handle}/move`, `.../reset` | move a pool bot to another box `{to, start?}` / give it a new harness session |
 | `POST` | `/api/fleet/clear` | acknowledge stopped bots' alerts `{items: [{host, handle, key}]}` |

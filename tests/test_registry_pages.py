@@ -246,6 +246,27 @@ class RegistryPages(unittest.TestCase):
         self.assertEqual(r.json()["reset"] + list(r.json()["skipped"]), ["jane"])
         self.assertIn('id="reset-all"', self.client.get("/fleet/profiles/developer").text)
 
+    def test_a_base_skill_is_set_in_the_editor_and_grouped_on_the_list(self):
+        # #347: the "who gets it" segment, saved with the revision, and its own group on /fleet
+        page = self.client.get("/fleet/skills/github-lifecycle").text
+        self.assertIn('name="who" value="profiles" checked', page)
+        self.assertNotIn("Base skills ·", self.client.get("/fleet").text, "no group until there is a base skill")
+        r = self.client.put("/api/skills/house-style", headers=self.human, json={"body": "Short.", "base_revision": 0,
+                            "fields": {"description": "How to write.", "base": True}, "reason": "every bot"})
+        self.assertEqual(r.status_code, 200, r.text)
+        page = self.client.get("/fleet/skills/house-style").text
+        self.assertIn('name="who" value="base" checked', page)
+        self.assertIn("Used by · every bot", page)
+        self.assertIn("Refused while every bot has it", page)
+        self.assertIn("(mandatory, every bot)", page)
+        self.assertRegex(page, r'class="act del-skill"[^>]* disabled')
+        Balance(page)
+        page = self.client.get("/fleet").text
+        base, rest = page.index("Base skills · every bot · 1"), page.index("Profile skills ·")
+        self.assertLess(base, page.index('id="skill-house-style"'))
+        self.assertLess(page.index('id="skill-house-style"'), rest)
+        self.assertLess(rest, page.index('id="skill-github-lifecycle"'))
+
 
 class Markdown(unittest.TestCase):
     def test_subset(self):

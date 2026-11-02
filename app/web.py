@@ -1892,9 +1892,10 @@ def _harness(h: str) -> str:
     return f'<span class="hz hz-{e(h)}">{e(h)}</span>' if h in HARNESS_NAMES else e(h or "?")
 
 
-def _bot_row(b: dict, host: str, others: list) -> str:
+def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
     """One bot as one table row: who, what it is doing, its workspace, role, harness, box and when last
-    active. Its buttons, facts and open threads are in a drawer row beneath, opened by clicking the row."""
+    active. Its buttons, facts and open threads are in a drawer row beneath, opened by clicking the row. key names the row in
+    its ids, the handle unless this bot already has a row (live on two boxes, #364)."""
     st = b.get("state") or fleet_mod.bot_state(b)    # the words /status and /projects use too (#100)
     up = b["status"].startswith(fleet_mod.UP)
     tone = ("run" if st["state"] == "working" else "ok" if st["can_work"] and not st["reason"]
@@ -1959,7 +1960,8 @@ def _bot_row(b: dict, host: str, others: list) -> str:
                 '<option value="">move to…</option>' + "".join(f"<option>{e(o)}</option>" for o in others) + "</select>")
     srt = _sort_value
     h = e(b["handle"])
-    row = (f'<tr id="bot-{h}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}">'
+    k = e(key or b["handle"])
+    row = (f'<tr id="bot-{k}" class="bot-row" data-state="{e(st["state"])}" data-group="{e(b.get("workspace") or "")}">'
            f'<td class="who"{srt(b["handle"])}><a href="/a/{h}">@{h}</a></td>'
            f'<td class="doing"{srt(DOING_ORDER.get(st["state"], len(DOING_ORDER)))}><span class="pip {tone}"></span>{e(st["words"])}{why}</td>'
            f'<td data-label="workspace"{srt(b.get("workspace") or b.get("serves") or "")}>{group}</td>'
@@ -1968,14 +1970,13 @@ def _bot_row(b: dict, host: str, others: list) -> str:
            f'<td data-label="machine"{srt(host)}><a href="#box-{e(host)}">{e(host)}</a></td>'
            f'<td data-label="active" class="dim nw"{srt(last)}>{e(ago(last)) if last else "never"}</td>'
            f'<td class="tog"><button type="button" class="open-bot" aria-label="Actions for @{h}" aria-expanded="false" '
-           f'aria-controls="drawer-{h}" title="its actions and details"></button></td></tr>')
-    return row + _drawer(b, host, btn, danger, _stop_panel(b, host) if asks and can else "")
+           f'aria-controls="drawer-{k}" title="its actions and details"></button></td></tr>')
+    return row + _drawer(b, host, btn, danger, _stop_panel(b, host, k) if asks and can else "", k)
 
 
-def _drawer(b: dict, host: str, acts: str, danger: str, question: str) -> str:
+def _drawer(b: dict, host: str, acts: str, danger: str, question: str, k: str) -> str:
     """The row beneath a bot's: its everyday buttons on the left, kill and delete set apart on the right,
     then what its keeper and the board know about it, and the threads it holds."""
-    h = e(b["handle"])
     buttons = (f'<div class="acts d-acts">{acts}'
                + (f'<span class="gap"></span><div class="d-danger">{danger}</div>' if danger else "") + '</div>') if acts or danger else ""
     facts = [(k, v) for k, v in (
@@ -1985,22 +1986,38 @@ def _drawer(b: dict, host: str, acts: str, danger: str, question: str) -> str:
         ("last post", ago(b["last_post"]) if b.get("last_post") else ""),
     ) if v]
     facts_html = ('<div class="d-facts">' + "".join(f'<span>{e(k)} <b>{e(v)}</b></span>' for k, v in facts) + '</div>') if facts else ""
+    facts_html += _voice_block(b)
     held, listed = b.get("open_threads") or 0, b.get("open_thread_list") or []
     items = "".join(f'<li><a href="/t/{t["thread_id"]}">#{e(t["channel"])} · {e(t["title"] or "(untitled)")}</a>'
                     f' <span class="dim">{e(ago(t["last_at"]))}</span></li>' for t in listed[:3])
     more = held - min(len(listed), 3)
     items += f'<li class="dim">and {more} more</li>' if more > 0 else ""
     threads = f'<ul class="d-threads">{items}</ul>' if items else ""
-    return (f'<tr class="bot-drawer" id="drawer-{h}" hidden><td colspan="8">{buttons}{facts_html}{threads}{question}</td></tr>')
+    return (f'<tr class="bot-drawer" id="drawer-{k}" hidden><td colspan="8">{buttons}{facts_html}{threads}{question}</td></tr>')
 
 
-def _stop_panel(b: dict, host: str) -> str:
+def _voice_block(b: dict) -> str:
+    """A fleet bot's voice and personality in its drawer, with an Edit that turns them into fields
+    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing."""
+    if not b.get("want") or b["status"] == "moved" or b.get("deleted"):
+        return ""
+    h, voice, personality = e(b["handle"]), b.get("voice") or "", b.get("personality") or ""
+    shown = lambda text: e(text) if text else '<span class="dim">none set</span>'
+    return (f'<div class="d-voice" data-handle="{h}" data-voice="{e(voice)}" data-personality="{e(personality)}">'
+            '<h4>Voice and personality <button type="button" class="act voice-edit">Edit</button></h4><div class="d-voice-two">'
+            f'<div class="quote"><b>Voice</b><span>{shown(voice)}</span></div>'
+            f'<div class="quote"><b>Personality</b><span>{shown(personality)}</span></div></div>'
+            f'<p class="dim">Reaches @{h} at its next wake. A long session may keep some of its old tone; '
+            'a <b>new session</b> starts clean.</p></div>')
+
+
+def _stop_panel(b: dict, host: str, k: str) -> str:
     """Opened by stop or kill on a bot that holds open threads: hand them off once it has
     stopped (the default, #217), keep them, or retire it (#167). Lives in the bot's drawer."""
     h, n = e(b["handle"]), b["open_threads"]
-    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{h}" value="{v}"{on}> <b>{label}</b>'
+    opt = lambda v, label, note, on="": (f'<label><input type="radio" name="threads-{k}" value="{v}"{on}> <b>{label}</b>'
                                          f' <span class="dim">{note}</span></label>')
-    return (f'<div class="stop-panel" id="stop-{h}" hidden>'
+    return (f'<div class="stop-panel" id="stop-{k}" hidden>'
             f'<p>@{h} holds {n} open thread{"s" * (n != 1)}. What should happen to {"them" if n != 1 else "it"} when it stops?</p>'
             '<div class="opts">'
             # hand off by default: a stopped bot that keeps its threads holds them from everyone (#217)
@@ -2013,7 +2030,11 @@ def _stop_panel(b: dict, host: str) -> str:
 
 def _bot_table(entries: list, others_of) -> str:
     head = f'<thead><tr>{_sortable("Bot", "Doing", "Workspace", "Role", "Harness", "Machine", "Active", None)}</tr></thead>'
-    rows = "".join(_bot_row(b, h["name"], others_of(h)) for h, b in entries)
+    seen, rows = set(), ""
+    for h, b in entries:
+        name = b["handle"].lower()
+        rows += _bot_row(b, h["name"], others_of(h), f'{b["handle"]}~{h["name"]}' if name in seen else b["handle"])
+        seen.add(name)
     return f'<table class="bots">{head}<tbody>{rows}</tbody></table>'
 
 
@@ -2133,14 +2154,15 @@ machineCopy.addEventListener('click', async function () {
     machineStatus.textContent = 'Clipboard unavailable. Select and copy the command manually.';
   }
 });
-function ask(handle, host, run, harness, kill, workspace, threads, profile, channels) {   // no handle: a new bot, named by the board
+function ask(handle, host, run, harness, kill, workspace, threads, profile, channels, voice, personality) {   // no handle: a new bot, named by the board
   if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
   fetch('/api/fleet/bots' + (handle ? '/' + encodeURIComponent(handle) : ''), {method: handle ? 'PUT' : 'POST',
     headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
     body: JSON.stringify(handle ? {host: host, run: run, harness: harness || null, kill: !!kill, workspace: workspace || null,
-                                   threads: threads || null, profile: profile || null, channels: channels || null}
+                                   threads: threads || null, profile: profile || null, channels: channels || null,
+                                   voice: voice || null, personality: personality || null}
                                 : {host: host, harness: harness, workspace: workspace || null, profile: profile || null,
-                                   channels: channels || null})})
+                                   channels: channels || null, voice: voice || null, personality: personality || null})})
   .then(function (r) { return r.json().then(function (d) {
     if (r.ok) location.reload(); else alert(d.error || ('refused: ' + r.status)); }); })
   .catch(function () { alert('could not reach the board'); });
@@ -2160,7 +2182,7 @@ document.addEventListener('click', function (ev) {
   // only the bot rows' start, stop and kill, the buttons that carry data-run: others are styled .act too (Check
   // on, + Add a skill, delete, channels) and have handlers of their own (#314)
   var b = ev.target.closest('button.act[data-handle][data-run]'); if (!b) return;
-  var panel = document.getElementById('stop-' + b.dataset.handle);
+  var drawer = b.closest('.bot-drawer'), panel = drawer && drawer.querySelector('.stop-panel');   // a bot live on two boxes has two (#364)
   if (b.dataset.open && panel) {
     panel.hidden = false;
     if (b.dataset.kill) panel.dataset.kill = '1'; else delete panel.dataset.kill;
@@ -2271,7 +2293,39 @@ document.addEventListener('submit', function (ev) {
   var prof = f.elements.profile.selectedOptions[0];
   if (prof && prof.dataset.specialized && !picked.length) { alert(prof.value + ' is a specialized profile: pick at least one channel for the bot.'); return; }
   ask(f.elements.handle.value.trim().replace(/^@/, ''), f.elements.host.value, true,
-      f.elements.harness.value, false, f.elements.workspace.value, null, f.elements.profile.value, picked.length ? picked : null);
+      f.elements.harness.value, false, f.elements.workspace.value, null, f.elements.profile.value, picked.length ? picked : null,
+      f.elements.voice.value.trim(), f.elements.personality.value.trim());
+});
+// A bot's voice and personality: Edit turns the two texts into fields, built only then, so a
+// closed editor leaves nothing for the page's reload to wait on.
+document.addEventListener('click', function (ev) {
+  var box = ev.target.closest('.d-voice'); if (!box) return;
+  var two = box.querySelector('.d-voice-two');
+  if (ev.target.closest('button.voice-edit')) {
+    if (box.querySelector('form')) return;
+    var f = document.createElement('form');
+    [['voice', 'Voice', 'how it writes to people'], ['personality', 'Personality', 'who it is; expression only, the rules still win']].forEach(function (x) {
+      var l = document.createElement('label'), t = document.createElement('textarea');
+      l.innerHTML = '<b>' + x[1] + '</b> <small>' + x[2] + '</small>';
+      t.name = x[0]; t.maxLength = 2000; t.rows = 3; t.value = box.dataset[x[0]];
+      l.appendChild(t); f.appendChild(l);
+    });
+    f.insertAdjacentHTML('beforeend', '<div class="d-voice-go"><button type="submit" class="act">Save</button> <button type="button" class="act voice-cancel">cancel</button></div>');
+    two.hidden = true; box.insertBefore(f, two); f.elements.voice.focus();
+  } else if (ev.target.closest('button.voice-cancel')) {
+    box.querySelector('form').remove(); two.hidden = false;
+  }
+});
+document.addEventListener('submit', function (ev) {
+  var box = ev.target.closest('.d-voice'); if (!box) return;
+  ev.preventDefault();
+  if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
+  fetch('/api/fleet/bots/' + encodeURIComponent(box.dataset.handle) + '/voice', {method: 'PUT',
+    headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
+    body: JSON.stringify({voice: ev.target.elements.voice.value, personality: ev.target.elements.personality.value})})
+  .then(function (r) { return r.json().then(function (d) {
+    if (r.ok) { ev.target.remove(); location.reload(); } else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
+  .catch(function () { alert('could not reach the board'); });
 });
 function showAddBot(open) {
   var card = document.getElementById('addbot'), btn = document.querySelector('.addbot-btn'); if (!card || !btn) return;
@@ -2527,7 +2581,8 @@ try {
 setInterval(function () {
   var a = document.activeElement;
   if (!(a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'))
-      && !Array.from(document.querySelectorAll('.fleet-page input')).some(function (input) { return input.value; })) {
+      && !document.querySelector('.d-voice form')     // an open editor, even with both fields emptied to clear them
+      && !Array.from(document.querySelectorAll('.fleet-page textarea, .fleet-page input')).some(function (input) { return input.value; })) {
     try {
       sessionStorage.setItem('fleet.expanded', JSON.stringify(
         Array.from(document.querySelectorAll('.fleet-page details[open]')).map(fleetDetailKey)));
@@ -2634,7 +2689,13 @@ FLEET_CSS = """
 .fleet-page .fleet-settings h3{margin:14px 0 6px}
 .fleet-page .fleet-settings pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .fleet-page .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .addbot-cta{display:none}
+body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .addbot-cta,body.out .fleet-page .voice-edit{display:none}
+.fleet-page .d-voice{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;font-size:13px}
+.fleet-page .d-voice h4{font-size:12px;margin:0 0 8px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.fleet-page .d-voice-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.fleet-page .d-voice-two[hidden]{display:none}
+.fleet-page .d-voice .quote{white-space:pre-wrap;overflow-wrap:anywhere}.fleet-page .d-voice .quote b{display:block;font-size:12px}
+.fleet-page .d-voice p{margin:8px 0 0;font-size:12.5px}
+.fleet-page .d-voice form label{display:block;margin:0 0 8px}.fleet-page .d-voice textarea,.fleet-page form.newbot-top textarea{display:block;box-sizing:border-box;width:100%;margin-top:4px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);resize:vertical}
 .fleet-page .addbot-btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:600 13.5px/1.6 var(--sans);cursor:pointer}
 .fleet-page .addbot-btn[aria-expanded=true]{background:var(--ink)}
 .fleet-page .addbot-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:0 0 16px;padding:12px 0 0}
@@ -2683,6 +2744,7 @@ body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .add
  .fleet-page table.bots tr.bot-drawer{padding:0}
  .fleet-page table.bots tr.bot-drawer td{display:block;padding:8px 12px 12px}
  .fleet-page .d-danger{padding-left:0;border:0}
+ .fleet-page .d-voice-two{grid-template-columns:1fr}
  .fleet-page .newbot-grid{grid-template-columns:1fr}.fleet-page .newbot-grid .span2,.fleet-page .newbot-grid .span3{grid-column:auto}
  .fleet-page .newbot-foot{flex-wrap:wrap}
  .fleet-page .fleet-alert{flex-direction:column}
@@ -2739,18 +2801,22 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
             if not live and b.get("retired"):
                 continue     # retired with its threads handed off (#167)
             (active if live else stopped if h["reporting"] else []).append((h, b))
+    # A box can go on reporting a stopped copy of a bot that has moved on. A page has one row
+    # per bot: two with one id share a drawer that neither can open (#362). Keep the live one,
+    # or else the one a human asked for.
+    seen, kept = {b["handle"].lower() for _, b in active}, []
+    for h, b in sorted(stopped, key=lambda x: not x[1].get("want")):
+        if b["handle"].lower() not in seen:
+            seen.add(b["handle"].lower()); kept.append((h, b))
+    stopped = kept
     active.sort(key=lambda x: (order.get(x[1]["state"]["state"], 6), x[1]["handle"].lower()))
     stopped.sort(key=lambda x: x[1]["handle"].lower())
-    # a delete reaches one box: the one asked for the bot, else the first that reports it (fleet.delete).
-    # With a copy on another box, its confirm says so (#366, #368)
+    # delete takes the bot off every box that reports it (#368), so its confirm names the others (#366)
     for h, b in active + stopped:
-        same = lambda x: x["handle"].lower() == b["handle"].lower()
-        others = [o["name"] for o, x in active if same(x) and o is not h]
+        others = [o["name"] for o, x in active if x["handle"].lower() == b["handle"].lower() and o is not h]
         if others:
-            acts = (next((o["name"] for o in hosts for x in o["bots"] if same(x) and x.get("want")), None)
-                    or next(o["name"] for o in hosts for x in o["bots"] if same(x) and x["status"] != "moved"))
-            b["also_on"] = (f'It is also listed on {", ".join(others)}. Only {acts} removes it. '
-                            "On the other boxes its token stops working, but its files stay.")
+            b["also_on"] = (f'It is also listed on {", ".join(others)}, and this deletes it there too; '
+                            "a box not reporting does that when it returns.")
     # bots with no profile, gathered on the Profiles table's last row so they are not forgotten
     orphans = sorted({b["handle"] for _, b in active + stopped if not b.get("profile")}, key=str.lower)
     working = sum(b["state"]["state"] == "working" for _, b in active)
@@ -2847,10 +2913,12 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
 <label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
 <fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
+<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people, a line or two</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
+<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
 </div>
 <div class="revive" id="revive" hidden></div>
 <div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
-<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life.</span>
+<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life. Voice and personality can be changed later from its row.</span>
 <button type="button" class="addbot-cancel">cancel</button></div>
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
@@ -2914,7 +2982,7 @@ subscription's usage limits.</p>
 <script>{FLEET_JS}{registry_web.REG_SECTION_JS}</script>""")
 
 
-def agent_page(board_name, agent, recent, profile=None) -> str:
+def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
     stream = "".join(message_html(m) for m in recent) or \
         '<div class="empty">This agent has not said anything yet.</div>'
     prof = ""
@@ -2923,6 +2991,8 @@ def agent_page(board_name, agent, recent, profile=None) -> str:
                            for s in profile.get("skills", []))
         prof = (f'<h2>Profile: <a href="/fleet/profiles/{e(profile["name"])}">{e(profile["name"])}</a></h2>'
                 f'<p class="sub">{e(profile.get("role") or "")}</p>' + (f'<p class="stats">skills: {skills}</p>' if skills else ""))
+    voice_html = "".join(f'<h2>{title}</h2><p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
+                         for title, text in zip(("Voice", "Personality"), voice) if text)     # #348
     # a human deletes a bot from its page too (#280); humans, keepers and runners are not deleted here
     delete = "" if agent["kind"] in db.UNSCOPED_KINDS else f"""<p><button type="button" id="delete-bot">delete @{e(agent['handle'])}</button></p>
 <script>document.getElementById('delete-bot').addEventListener('click', function () {{
@@ -2936,7 +3006,7 @@ def agent_page(board_name, agent, recent, profile=None) -> str:
 <p class="stats">{presence_dot(agent['last_seen_at'])}{e(db.presence(agent['last_seen_at']))} ·
 kind {e(agent['kind'])} · joined {e(ago(agent['created_at']))} ·
 last seen {e(ago(agent['last_seen_at']))}</p>
-{prof}{delete}<h2>Recent</h2>{stream}
+{prof}{voice_html}{delete}<h2>Recent</h2>{stream}
 """)
 
 

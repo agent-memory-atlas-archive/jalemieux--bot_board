@@ -197,10 +197,20 @@ def _skill(row, body: bool = True) -> dict:
     fields = json.loads(row["fields"] or "{}")
     out = {"name": row["name"], "description": fields.get("description", ""), "revision": row["revision"],
            "reason": row["reason"], "author": row["author"] or "board", "updated_at": row["created_at"],
-           "deleted": bool(row["deleted"])}
+           "deleted": bool(row["deleted"]), "base": fields.get("base") is True}
     if body:
         out["body"] = row["body"]
     return out
+
+
+def _is_base(name: str) -> bool:
+    row = db.conn().execute(_CURRENT + " AND s.name=? AND s.deleted=0", (name,)).fetchone()
+    return bool(row) and _skill(row, body=False)["base"]
+
+
+def base_skills() -> list[dict]:
+    """The skills every bot gets, whatever its profile (#347)."""
+    return [s for s in list_skills() if s["base"]]
 
 
 def list_skills() -> list[dict]:
@@ -247,10 +257,16 @@ def put_skill(name: str, body: str, fields: dict | None, base_revision: int, rea
     if not description:
         raise ValueError("a skill needs a description: one line saying when to use it")
     stored = {"description": description[:500]}
+    if not isinstance(fields.get("base", False), bool):
+        raise ValueError("base is true or false")
     with db._write_lock, db.conn() as c:
         current = current_revision(name)
         if base_revision != current:
             raise Conflict(f"{name} is at revision {current}, not {base_revision}: read it again, merge, and retry")
+        # an edit that does not mention base keeps it: only an explicit false takes it from every bot
+        base = fields["base"] if "base" in fields else bool(current) and _is_base(name)
+        if base:
+            stored["base"] = True
         c.execute("INSERT INTO skills(name,revision,fields,body,reason,author_id,created_at) VALUES (?,?,?,?,?,?,?)",
                   (name, current + 1, json.dumps(stored), body.strip() + "\n", (reason or "")[:500],
                    agent["id"] if agent else None, db.now()))
@@ -259,8 +275,10 @@ def put_skill(name: str, body: str, fields: dict | None, base_revision: int, rea
 
 def delete_skill(name: str, base_revision: int, reason: str, agent: dict | None) -> dict:
     """Refused while a profile lists the skill: a profile cannot be edited to drop it,
-    so clone the profiles without it first."""
+    so clone the profiles without it first. Refused while it is base too: every bot has it."""
     name = _check_name(name)
+    if _is_base(name):
+        raise Conflict(f"{name} is a base skill, so every bot has it: make it profile-only first")
     users = used_by().get(name, [])
     if users:
         raise Conflict(f"{name} is listed by the profile{'s' * (len(users) != 1)} {', '.join(users)}:"
@@ -320,7 +338,10 @@ FIELDS = ("role", "responsibilities", "focus", "avoid")
 
 
 def bots_of_skill(name: str) -> list[str]:
-    """The bots whose profile lists this skill: the ones a new session would give its current text."""
+    """The bots whose profile lists this skill, or every bot for a base skill: the ones a new
+    session would give its current text."""
+    if _is_base(name):
+        return [r["handle"] for r in db.conn().execute("SELECT handle FROM fleet_bots ORDER BY handle")]
     bots = bots_by_profile()
     return sorted({b for p in used_by().get(name.lower(), []) for b in bots.get(p, [])})
 
@@ -487,29 +508,52 @@ def profiles_of_handles() -> dict[str, str]:
 
 # ------------------------------------------------------------ what a bot gets
 
-def resolve(profile: dict) -> list[dict]:
-    """The profile's skills, each with what the registry holds now."""
+def resolve(profile: dict | None) -> list[dict]:
+    """A bot's skills, each with what the registry holds now: its profile's, if it has one, then
+    the base skills, which every bot reads before work (#347)."""
     out = []
-    for s in profile.get("skills", []):
+    for s in (profile or {}).get("skills", []):
         try:
             sk = get_skill(s["name"])
         except (KeyError, ValueError):
             continue
-        out.append({"name": sk["name"], "mandatory": bool(s.get("mandatory")), "description": sk["description"],
-                    "revision": sk["revision"]})
+        out.append({"name": sk["name"], "mandatory": bool(s.get("mandatory")) or sk["base"], "base": sk["base"],
+                    "description": sk["description"], "revision": sk["revision"]})
+    listed = {s["name"] for s in out}
+    out += [{"name": sk["name"], "mandatory": True, "base": True, "description": sk["description"],
+             "revision": sk["revision"]} for sk in base_skills() if sk["name"] not in listed]
     return out
+
+
+def also_has(profile: dict) -> list[dict]:
+    """The base skills a profile does not list itself: what its bots have that it does not bring."""
+    own = {s["name"].lower() for s in profile.get("skills", [])}
+    return [s for s in resolve(profile) if s["name"] not in own]
+
+
+def _tag(skill: dict) -> str:
+    return " (mandatory, every bot)" if skill["base"] else " (mandatory)" if skill["mandatory"] else ""
 
 
 def skills_revision(profile: dict | None) -> str:
     """One short token for the revisions of a profile's skills: it changes whenever any of
     them is written, and a launcher compares it at each prompt to know the bot's skills
-    moved (#328). Empty for no profile, or a profile with no skills."""
-    parts = [f"{s['name']}@{s['revision']}" for s in resolve(profile)] if profile else []
+    moved (#328). Empty for a bot with no skills at all."""
+    parts = [f"{s['name']}@{s['revision']}" for s in resolve(profile)]
     return hashlib.sha256(",".join(parts).encode()).hexdigest()[:16] if parts else ""
 
 
 NO_PROFILE = ("You have no profile. The guide you just read is all there is: work the threads you are\n"
               "given, in your workspace, as it says.\n")
+
+
+def voice_of(handle: str) -> tuple[str, str]:
+    """A fleet bot's voice and personality (#348), empty when it has none or is hand-run."""
+    try:
+        row = db.conn().execute("SELECT voice, personality FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
+    except db.sqlite3.OperationalError:
+        return "", ""
+    return (row["voice"] or "", row["personality"] or "") if row else ("", "")
 
 
 def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
@@ -546,14 +590,20 @@ def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
         for key, title in (("responsibilities", "Responsibilities"), ("focus", "Focus"), ("avoid", "Avoid")):
             if profile.get(key):
                 lines += [f"### {title}", "", profile[key].strip(), ""]
-    skills = resolve(profile) if profile else []
+    voice, personality = voice_of(agent["handle"])
+    if voice:
+        lines += ["## Your voice", "", "How you write to people.", "", voice, ""]
+    if personality:
+        lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
+                  " always win, and it is never a reason to post more.", "", personality, ""]
+    skills = resolve(profile)
     if skills:
         lines += ["## Your skills", "",
                   "Your launcher keeps each of these installed where your harness loads skills, at the revision"
                   " listed. The mandatory ones are written out below: read them now, before any work. The others"
                   " your harness offers when a thread calls for what they describe.", ""]
         for s in skills:
-            lines.append(f"- **{s['name']}@{s['revision']}**{' (mandatory)' if s['mandatory'] else ''}: {s['description']}")
+            lines.append(f"- **{s['name']}@{s['revision']}**{_tag(s)}: {s['description']}")
         lines.append("")
         mandatory = [s["name"] for s in skills if s["mandatory"]]
         too_long = ("Too long to carry here, so not written out below: {}. Read each one now, before any work, with"
@@ -579,11 +629,25 @@ def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
     return "\n".join(lines)
 
 
+WHEN_A_SKILL_CHANGES = ("When a skill you have changes, your launcher says so in a prompt: read it again then. Until then,"
+                        " what you read now holds.")
+
+
+def _skill_lines(skills: list[dict], api: str) -> str:
+    lines = ["## Skills", "", "Each skill is a SKILL.md you read with `GET " + api + "/skills/<name>`. Read the mandatory ones"
+             " now, before any work; the others when a thread calls for what they describe.", ""]
+    lines += [f"- **{s['name']}**{_tag(s)}: {s['description']}" for s in skills]
+    return "\n".join(lines + ["", WHEN_A_SKILL_CHANGES, ""])
+
+
 def profile_text(profile: dict | None, base: str = "") -> str:
     """The profile as a bot reads it at the start of a session."""
-    if profile is None:
-        return NO_PROFILE
     api = base.rstrip("/") + "/api"
+    if profile is None:
+        skills = resolve(None)
+        if not skills:
+            return NO_PROFILE
+        return "You have no profile: work the threads you are given, in your workspace, as the guide says.\n\n" + _skill_lines(skills, api)
     lines = [f"# Your profile: {profile['name']}", "", f"**Role.** {profile['role']}", ""]
     if profile.get("specialized"):
         lines += ["**Specialized.** This profile is for one kind of work. The board offers you new threads only"
@@ -592,19 +656,11 @@ def profile_text(profile: dict | None, base: str = "") -> str:
         if profile.get(key):
             lines += [f"## {title}", "", profile[key].strip(), ""]
     skills = resolve(profile)
-    lines += ["## Skills", ""]
     if not skills:
-        lines.append("This profile brings no skills; the guide and your workspace's knowledge base are what you have.")
-    else:
-        lines.append("Each skill is a SKILL.md you read with `GET " + api + "/skills/<name>`. Read the mandatory ones"
-                     " now, before any work; the others when a thread calls for what they describe.")
-        lines.append("")
-        for s in skills:
-            tag = " (mandatory)" if s["mandatory"] else ""
-            lines.append(f"- **{s['name']}**{tag}: {s['description']}")
-    lines += ["", "When a skill you have changes, your launcher says so in a prompt: read it again then. Until then,"
-              " what you read now holds.", ""]
-    return "\n".join(lines)
+        lines += ["## Skills", "", "This profile brings no skills; the guide and your workspace's knowledge base are what you have.",
+                  "", WHEN_A_SKILL_CHANGES, ""]
+        return "\n".join(lines)
+    return "\n".join(lines) + "\n" + _skill_lines(skills, api)
 
 
 # ------------------------------------------------------------------- templates

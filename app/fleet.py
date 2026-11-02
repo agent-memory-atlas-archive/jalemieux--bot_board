@@ -98,7 +98,8 @@ def init() -> None:
             have.add("workspace")
         # profile: the profile the bot was added with (its role and skills); set once, never changed.
         # channels: the channels of its workspace it claims new threads in (JSON list); empty: any.
-        for col in EXTRA_COLUMNS + ("workspace", "profile", "channels"):
+        # voice, personality: how it writes to people and who it is, set by a human (#348).
+        for col in EXTRA_COLUMNS + ("workspace", "profile", "channels", "voice", "personality"):
             if col not in have:
                 c.execute(f"ALTER TABLE fleet_bots ADD COLUMN {col} TEXT")
         c.commit()
@@ -279,18 +280,19 @@ def forget(name: str) -> bool:
 
 
 def _set_want(c, handle, host, harness, run, by, now, kill=False, workspace=None, threads=None, profile=None,
-              channels=None):
+              channels=None, voice=None, personality=None):
     c.execute(
-        "INSERT INTO fleet_bots (handle, host, harness, run, set_by, set_at, kill, workspace, threads, profile, channels)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO fleet_bots (handle, host, harness, run, set_by, set_at, kill, workspace, threads, profile, channels,"
+        " voice, personality) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(handle) DO UPDATE SET host=excluded.host, harness=excluded.harness, run=excluded.run,"
         " set_by=excluded.set_by, set_at=excluded.set_at, problem='', move_to=NULL, kill=excluded.kill,"
         " threads=excluded.threads, retired=CASE WHEN excluded.run THEN NULL ELSE retired END,"
         " workspace=COALESCE(excluded.workspace, workspace), profile=COALESCE(excluded.profile, profile),"
-        " channels=COALESCE(excluded.channels, channels)",
+        " channels=COALESCE(excluded.channels, channels), voice=COALESCE(excluded.voice, voice),"
+        " personality=COALESCE(excluded.personality, personality)",
         (handle, host.lower(), harness, int(run), by, now, now if kill else None, workspace or None,
          threads if threads in ("handoff", "retire") else None, profile or None,
-         json.dumps(channels) if channels is not None else None),
+         json.dumps(channels) if channels is not None else None, voice, personality),
     )
 
 
@@ -318,7 +320,7 @@ def _channels_problem(workspace: str | None, profile: str | None, channels: list
 
 def want(handle: str, host: str, run: bool, harness: str | None, by: str, kill: bool = False,
          workspace: str | None = None, threads: str | None = None, profile: str | None = None,
-         channels: list[str] | None = None) -> str | None:
+         channels: list[str] | None = None, voice: str | None = None, personality: str | None = None) -> str | None:
     """Record that a human wants this bot running, or stopped, on this box. A bot
     has one box: asking for it on another moves the request there, which is how a
     bot unpacked on a new box is started. kill: stop it now, without waiting for the
@@ -328,7 +330,8 @@ def want(handle: str, host: str, run: bool, harness: str | None, by: str, kill: 
     retire (hand off, and drop it from the stopped list). profile: for a new bot, the profile
     it is added with; a bot that has one cannot be given another. channels: the channels of its
     workspace it claims new threads in; required for a specialized profile, and changed any
-    time with set_channels. Returns None, or why not."""
+    time with set_channels. voice, personality: how it writes and who it is, changed any time
+    with set_voice; None leaves them as they are. Returns None, or why not."""
     if kill and run:
         return "a kill stops the bot: ask for run false"
     if threads not in (None,) + THREADS:
@@ -379,7 +382,7 @@ def want(handle: str, host: str, run: bool, harness: str | None, by: str, kill: 
                                 row["channels"] if row else None, run)
         if why:
             return why
-        _set_want(c, handle, host, harness, run, by, now, kill, workspace, threads, profile, channels)
+        _set_want(c, handle, host, harness, run, by, now, kill, workspace, threads, profile, channels, voice, personality)
         c.commit()
     if workspace and known and not known.get("workspace_id"):
         workspaces.assign_bot(handle, workspace)
@@ -407,6 +410,16 @@ def set_channels(handle: str, channels: list[str]) -> str | None:
         c.execute("UPDATE fleet_bots SET channels=? WHERE handle=?", (json.dumps(channels), handle))
         c.commit()
     return None
+
+
+def set_voice(handle: str, voice: str, personality: str) -> str | None:
+    """Set a fleet bot's voice and personality; an empty text clears it. They reach the bot
+    through its composed AGENTS.md at its next wake. Returns None, or why not."""
+    c = db.conn()
+    with db._write_lock:
+        n = c.execute("UPDATE fleet_bots SET voice=?, personality=? WHERE handle=?", (voice, personality, handle)).rowcount
+        c.commit()
+    return None if n else f"{handle} is not a fleet bot"
 
 
 def _channels(w: dict) -> list[str]:
@@ -834,13 +847,15 @@ def hosts() -> list[dict]:
                 b.update(want="running" if w["run"] else "stopped", set_by=w["set_by"], set_at=w["set_at"],
                          problem=w["problem"], harness=b.get("harness") or w["harness"],
                          move_to=w["move_to"], fetch=w["fetch"], kill=w["kill"], profile=w.get("profile"),
-                         channels=_channels(w), threads=w["threads"], retired=w["retired"], reset=w["reset"],
+                         channels=_channels(w), voice=w.get("voice") or "", personality=w.get("personality") or "",
+                         threads=w["threads"], retired=w["retired"], reset=w["reset"],
                          deleted=w["deleted"])
         h["bots"] += [{"handle": w["handle"], "harness": w["harness"], "status": "stopped", "serves": "",
                        "want": "running" if w["run"] else "stopped", "set_by": w["set_by"], "set_at": w["set_at"],
                        "problem": w["problem"], "move_to": w["move_to"], "fetch": w["fetch"],
                        "threads": w["threads"], "retired": w["retired"], "profile": w.get("profile"),
-                       "channels": _channels(w)}
+                       "channels": _channels(w), "voice": w.get("voice") or "",
+                       "personality": w.get("personality") or ""}
                       for w in asked.values() if not w["deleted"]]
         # a deleted bot leaves /fleet, but for the time its box, reporting, still has it
         h["bots"] = [b for b in h["bots"] if b["handle"].lower() not in retired or (b.get("deleted") and h["reporting"])]
