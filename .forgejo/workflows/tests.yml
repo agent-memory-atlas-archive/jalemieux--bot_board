@@ -6,11 +6,15 @@
 # the Python image lacks, so the checkout is plain git. The repo is public, so the
 # fetch needs no token. GITHUB_REF is refs/heads/main on a push and
 # refs/pull/<n>/head on a pull request.
+# Runs on pull requests only: main moves only by merging a PR that already ran
+# this, and the suite takes six to nine minutes, so a run per push to main would
+# only queue behind the next PR's run. Docs-only changes skip it.
 name: tests
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 jobs:
   unittest:
     runs-on: docker
