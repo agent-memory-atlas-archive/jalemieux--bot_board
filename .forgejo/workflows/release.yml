@@ -12,12 +12,28 @@
 # automounts the socket), so Forgejo's registry is reached as 127.0.0.1:3000 from
 # the daemon's point of view, which Docker treats as insecure without any config.
 # Others pull the same image as minipc-2.taild87368.ts.net:3000/jac/bot_board.
-# ghcr.io gets the same image for people outside the tailnet; the secret
-# GHCR_TOKEN is a GitHub token with write:packages (jac sets it on the repo).
+# ghcr.io gets the same image for people outside the tailnet.
+#
+# Secrets, set on the repository by jac (the run's own job token can log in to
+# the registry but has no package scope, "unauthorized: reqPackageAccess"):
+#   REGISTRY_TOKEN  a Forgejo token of jac's with write:package; the image lives
+#                   under jac/, which only jac's account may write to
+#   GHCR_TOKEN      a GitHub token with write:packages; without it the ghcr.io
+#                   step is skipped and says so
+#
+# Manual runs: "Run workflow" on a branch with a version (say v0.0.0-test)
+# builds, smoke-tests and publishes that tag without waiting for the box, for
+# trying the workflow before it merges. Only a run on main moves :latest.
 name: release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "publish under this tag instead of waiting for the box's tag (v0.0.0-test)"
+        required: false
+        default: ""
 jobs:
   release:
     runs-on: docker
@@ -29,8 +45,10 @@ jobs:
       PUBLIC_REGISTRY: minipc-2.taild87368.ts.net:3000
       GHCR_IMAGE: ghcr.io/jalemieux/bot_board
       GHCR_USER: jalemieux
-      JOB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REGISTRY_USER: jac
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
       GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      MANUAL_VERSION: ${{ github.event.inputs.version }}
       TAG_WAIT_SECONDS: "420"
     steps:
       - run: apk add -q git curl bash
@@ -46,6 +64,14 @@ jobs:
         id: version
         shell: bash
         run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "the REGISTRY_TOKEN secret is not set on this repository; see the comment at the top of this workflow"
+            exit 1
+          fi
+          if [ -n "$MANUAL_VERSION" ]; then
+            echo "manual run: publishing as $MANUAL_VERSION"
+            echo "version=$MANUAL_VERSION" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if git log -1 --format=%B | grep -qiF '[skip release]'; then
             echo "commit says [skip release]; nothing to publish"
             echo "version=" >> "$GITHUB_OUTPUT"; exit 0
@@ -116,12 +142,15 @@ jobs:
         env:
           VER: ${{ steps.version.outputs.version }}
         run: |
-          echo "$JOB_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
-          docker tag "$REGISTRY/$IMAGE:$VER" "$REGISTRY/$IMAGE:latest"
+          echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin >/dev/null
           docker push -q "$REGISTRY/$IMAGE:$VER"
-          docker push -q "$REGISTRY/$IMAGE:latest"
+          echo "published $PUBLIC_REGISTRY/$IMAGE:$VER"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            docker tag "$REGISTRY/$IMAGE:$VER" "$REGISTRY/$IMAGE:latest"
+            docker push -q "$REGISTRY/$IMAGE:latest"
+            echo "published $PUBLIC_REGISTRY/$IMAGE:latest"
+          fi
           docker logout "$REGISTRY" >/dev/null
-          echo "published $PUBLIC_REGISTRY/$IMAGE:$VER and :latest"
 
       - name: publish to ghcr.io
         if: steps.version.outputs.version != ''
@@ -132,13 +161,16 @@ jobs:
             echo "GHCR_TOKEN is not set on this repository; skipping ghcr.io"
             exit 0
           fi
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null
           docker tag "$REGISTRY/$IMAGE:$VER" "$GHCR_IMAGE:$VER"
-          docker tag "$REGISTRY/$IMAGE:$VER" "$GHCR_IMAGE:latest"
           docker push -q "$GHCR_IMAGE:$VER"
-          docker push -q "$GHCR_IMAGE:latest"
+          echo "published $GHCR_IMAGE:$VER"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            docker tag "$REGISTRY/$IMAGE:$VER" "$GHCR_IMAGE:latest"
+            docker push -q "$GHCR_IMAGE:latest"
+            echo "published $GHCR_IMAGE:latest"
+          fi
           docker logout ghcr.io >/dev/null
-          echo "published $GHCR_IMAGE:$VER and :latest"
 
       - name: clean up the host daemon
         if: always() && steps.version.outputs.version != ''
