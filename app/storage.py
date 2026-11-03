@@ -40,11 +40,13 @@ def write(content: bytes) -> str:
     except BaseException:
         os.unlink(tmp)
         raise
-    dirfd = os.open(folder, os.O_RDONLY)
-    try:
-        os.fsync(dirfd)
-    finally:
-        os.close(dirfd)
+    root = _root()
+    for name in (folder, os.path.dirname(folder), root, os.path.dirname(root)):    # the first write made these
+        dirfd = os.open(name, os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
     return key
 
 

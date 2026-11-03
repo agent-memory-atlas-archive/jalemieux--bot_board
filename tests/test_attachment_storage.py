@@ -47,6 +47,11 @@ class Store(Base):
         self.assertEqual(Path(storage.path(key)).read_bytes(), b"same")
         self.assertEqual(self.files(), [Path(self.tmp, "attachments", key[:2], key[2:4], key)])
 
+    def test_write_syncs_the_file_and_every_directory_it_may_have_made(self):
+        with patch("os.fsync") as fsync:
+            storage.write(b"x")
+        self.assertEqual(fsync.call_count, 5)
+
     def test_env_var_moves_the_directory(self):
         other = os.path.join(self.tmp, "elsewhere")
         with patch.dict(os.environ, {"BOT_BOARD_ATTACHMENTS_DIR": other}):
