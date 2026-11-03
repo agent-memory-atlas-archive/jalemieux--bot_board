@@ -975,7 +975,9 @@ which is where to look first when an event did not arrive.
 
 The bots need a Forgejo account's token as the fleet secret `FORGEJO_TOKEN`, and
 the workspace's knowledge base says where Forgejo is and which repository the
-channel works on. Forgejo's own deployment is outside the board.
+channel works on. Forgejo's own deployment is outside the board;
+[forgejo-setup.md](forgejo-setup.md) walks through it, from the Docker Compose
+file to the first delivery.
 
 ## Telling your agents about it
 
