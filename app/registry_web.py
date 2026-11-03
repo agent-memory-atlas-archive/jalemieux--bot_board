@@ -4,9 +4,9 @@ The fleet page gets two sections between Machines and Versions: Skills (every sk
 its revision and the profiles that list it; + Add a skill opens an inline panel with
 one form, the skill written there) and Profiles (every profile, its skills and
 the bots that carry it; view, clone, and delete only when no bot carries it). Each
-skill has a page with an editor, history and who uses it; each profile a read-only
-page with what it says, its fixed skills, its bots, the text a bot reads, and its
-lineage. One form, /fleet/profiles/new, creates a profile from a template, a blank, or
+skill has a page with an editor, history and who uses it; each profile a page with
+an edit form for what it says and its skills (#397), its bots, the text a bot reads,
+its history and its lineage. One form, /fleet/profiles/new, creates a profile from a template, a blank, or
 an existing profile (which is what Clone is).
 
 Writes go through the API with the identity the board page keeps in this browser
@@ -200,7 +200,7 @@ def profiles_section(profiles: list, orphans: list) -> str:
     return (f'<section class="fleet-section reg" id="fleet-profiles"><div class="sec-head"><h2>Roles · {len(profiles)}</h2>'
             '<a class="addbot-btn needs-me" href="/fleet/profiles/new">+ Create a role</a></div>'
             '<p class="sub">A role is a profile: what a bot is for, and the skills that go with it. A bot is given one when you add it '
-            'and keeps it. A role never changes: clone it to make a different one.</p>'
+            'and keeps it. A role is edited on its page; its bots follow at their next prompt. Clone makes a variant.</p>'
             f'{table}</section>')
 
 
@@ -329,7 +329,7 @@ def skill_page(board_name: str, skill: dict, history: list, profiles: list) -> s
     danger = (f'<button type="button" class="act del-skill" data-name="{name}" data-rev="{skill["revision"]}"'
               + (" disabled" if used or base else "") + '>Delete this skill</button>'
               + ('<p>Refused while every bot has it. Make it profile-only first.</p>' if base else f'<p>Refused while {len(used)} profile{"s" * (len(used) != 1)} list{"" if len(used) != 1 else "s"} it: '
-                 f'{", ".join(e(p) for p in used)}. Clone {"them" if len(used) != 1 else "it"} without it, delete the old, then come back.</p>'
+                 f'{", ".join(e(p) for p in used)}. Edit {"them" if len(used) != 1 else "it"} to drop it, then come back.</p>'
                  if used else '<p>No profile lists it. History is kept; the name can be used again.</p>'))
     body_field = f'<textarea name="body" rows="22" required>{e(skill["body"])}</textarea>'
     content = f"""
@@ -371,7 +371,7 @@ def skill_page(board_name: str, skill: dict, history: list, profiles: list) -> s
 <dt>revision</dt><dd>{skill["revision"]} · {e(ago(skill["updated_at"]))} · {e(skill["author"])}</dd>
 <dt>who gets it</dt><dd>{"every bot" if base else "profiles that list it"}</dd></dl></div>
 <div class="card"><h2>Used by · {"every bot" if base else len(used)}</h2><ul class="hist">{used_html}</ul>
-<p class="sub" style="margin:8px 0 0">Read-only here: a profile's skill list is fixed when the profile is created.</p>
+<p class="sub" style="margin:8px 0 0">Read-only here: a profile's skill list is edited on the profile's page.</p>
 {'<button type="button" class="act needs-me" id="reset-all" style="margin-top:8px">New session for all bots on it</button>' if bots else ''}
 <p class="status-line" id="reset-note" role="status" aria-live="polite"></p></div>
 <div class="card" id="history"><h2>History · {len(history)}</h2><ul class="hist">{hist_html}</ul>
@@ -485,18 +485,20 @@ SKILL_PAGE_JS = r"""
 
 # ------------------------------------------------------------ profile page
 
-def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
+def profile_page(board_name: str, profile: dict, bots: list, history: list, skills: list, base: str) -> str:
     name = e(profile["name"])
     also = registry.also_has(profile)
-    skills = [s for s in registry.resolve(profile) if s not in also]
+    own = {s["name"]: bool(s.get("mandatory")) for s in profile.get("skills") or []}
     skill_rows = "".join(
-        f'<tr><td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>'
-        + (f' <span class="star" title="mandatory">{STARS} mandatory</span>' if s["mandatory"] else "")
-        + f'<div class="by desc">{e(s["description"])}</div></td>'
+        f'<tr><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"{" checked" if s["name"] in own else ""}></td>'
+        f'<td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a><div class="by desc">{e(s["description"])}</div></td>'
+        f'<td data-label="mandatory"><label><input type="checkbox" name="mandatory" value="{e(s["name"])}" aria-label="{e(s["name"])} mandatory"'
+        f'{" checked" if own.get(s["name"]) else ""}> read before any work</label></td>'
         f'<td data-label="revision" class="nw dim">rev {s["revision"]}</td></tr>'
-        for s in skills)
-    skills_html = (f'<table class="bots"><thead><tr><th>Skill</th><th>Rev</th></tr></thead><tbody>{skill_rows}</tbody></table>'
-                   if skills else '<p class="sub">This profile brings no skills; its bots have the guide and their workspace\'s knowledge base.</p>')
+        for s in skills if not s.get("base"))
+    skills_html = (f'<table class="bots pick"><thead><tr><th><span class="sr-only">Include</span></th><th>Skill</th><th>Mandatory</th><th>Rev</th></tr></thead>'
+                   f'<tbody>{skill_rows}</tbody></table>' if skill_rows else
+                   '<p class="sub">The registry has no profile skill yet; its bots have the guide and their workspace\'s knowledge base.</p>')
     if also:
         skills_html += ('<p class="sub">Every bot also has '
                         + ", ".join(f'<a class="chip" href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>' for s in also)
@@ -536,33 +538,50 @@ def profile_page(board_name: str, profile: dict, bots: list, base: str) -> str:
     clones = profile.get("clones") or []
     clones_html = ("".join(f'<li><a class="chip" href="/fleet/profiles/{e(c)}">{e(c)}</a></li>' for c in clones)
                    if clones else '<li class="dim">no profile was cloned from it yet</li>')
+    hist_html = "".join(
+        f'<li><span class="rev">rev {h["revision"]}</span><span class="dim nw">{e(ago(h["updated_at"]))} · {e(h["author"])}</span>'
+        f'<span class="reason">{e(h["reason"]) or "<span class=dim>no reason given</span>"}</span></li>' for h in history)
+    latest = history[0] if history else {"updated_at": profile["created_at"], "author": profile["created_by"]}
     n = len(bots)
     danger = (f'<button type="button" class="act del-profile" data-name="{name}"{" disabled" if n else ""}>Delete this profile</button>'
               + (f'<p>Not while {n} bot{"s" * (n != 1)} carr{"y" if n != 1 else "ies"} it. Retire {"them" if n != 1 else "it"} first; the name is never reused.</p>'
                  if n else '<p>No bot carries it. The name stays taken: profiles are never reused under an old name.</p>'))
-    says = "".join(f'<dt>{k}</dt><dd>{_paragraphs(profile.get(k) or "") or "<span class=dim>—</span>"}</dd>'
-                   for k in ("responsibilities", "focus", "avoid"))
+    data = _json({"name": profile["name"], "revision": profile["revision"], "bots": [b["handle"] for b in bots]})
     content = f"""
 <style>{FLEET_CSS}{REG_CSS}</style>
 <div class="fleet-page"><div class="reg">
 <p class="crumbs"><a href="/fleet">Fleet</a> › <a href="/fleet#fleet-profiles">Profiles</a> › {name}</p>
 <div class="reg-head"><h1>{name}</h1>
-<div class="right"><a class="addbot-btn needs-me" href="/fleet/profiles/new?from={name}">Clone</a></div></div>
+<div class="right">rev {profile["revision"]} · {e(ago(latest["updated_at"]))} · {e(latest["author"])} · <a class="addbot-btn needs-me" href="/fleet/profiles/new?from={name}">Clone</a></div></div>
 <p class="role">{e(profile["role"])}</p>
-<p class="sub">created {e(ago(profile["created_at"]))} by {e(profile["created_by"])} · {from_html}. A profile never changes: to change this one, clone it and add new bots with the clone.{" <b>Specialized:</b> a bot added with it is bound to channels of its workspace and claims new threads only there." if profile.get("specialized") else ""}</p>
+<p class="sub">created {e(ago(profile["created_at"]))} by {e(profile["created_by"])} · {from_html}. Edited in place: a change reaches the bots that carry it at their next prompt, with no new session. Clone makes a variant under another name.{" <b>Specialized:</b> a bot added with it is bound to channels of its workspace and claims new threads only there." if profile.get("specialized") else ""}</p>
 <div class="two"><div>
-<div class="card" id="says"><h2>What it says</h2><dl>{says}</dl></div>
-<div class="card" id="skills"><h2>Skills · {len(skills)}</h2>{skills_html}
-<p class="sub" style="margin:8px 0 0">This list does not change. Skill text does: a skill's edits reach these bots at their next prompt.</p></div>
+<form class="card reg-form" id="profile-edit" style="gap:12px"><h2>What it says</h2>
+<label class="fld"><span>Role <small>· one line: what this bot is</small></span><input name="role" required maxlength="4000" value="{e(profile["role"])}" autocomplete="off"></label>
+<label class="fld"><span>Responsibilities <small>· what the bot is for, in a paragraph it can judge work against</small></span><textarea name="responsibilities" rows="4" maxlength="4000">{e(profile.get("responsibilities") or "")}</textarea></label>
+<label class="fld"><span>Focus <small>· what to prefer when several threads are open</small></span><textarea name="focus" rows="4" maxlength="4000">{e(profile.get("focus") or "")}</textarea></label>
+<label class="fld"><span>Avoid <small>· work this bot leaves to others</small></span><textarea name="avoid" rows="3" maxlength="4000">{e(profile.get("avoid") or "")}</textarea></label>
+<label class="fld"><span><input type="checkbox" name="specialized"{" checked" if profile.get("specialized") else ""}> Specialized <small>· one kind of work: a bot added with it is bound to channels of its workspace and claims new threads only there. Refused while a bot that carries it is bound to no channel.</small></span></label>
+<div><h2 style="margin-bottom:6px">Skills · {len(own)}</h2>{skills_html}
+<p class="sub" style="margin:8px 0 0">A skill dropped here leaves its bots' skill directories at their next prompt; one added arrives there.</p></div>
+<label class="fld"><span>Reason for this change <small>· required, as in a knowledge write; it shows in History</small></span>
+<input name="reason" required maxlength="500" placeholder="what changed, and why" autocomplete="off"></label>
+<div class="row needs-me"><button type="submit" class="addbot-go">Save as rev {profile["revision"] + 1}</button>
+<span class="note">{f"{n} bot{'s' * (n != 1)} on it read it at their next prompt." if n else "No bot carries it yet."}</span></div>
+<p class="status-line" role="status" aria-live="polite"></p>
+</form>
 <div class="card" id="bots"><h2>Bots with this profile · {n}</h2>
-<p class="sub">A bot reads this profile and its skills when its session starts. New session makes one read them again.</p>{bots_html}
+<p class="sub">A bot reads this profile and its skills at the start of a session, and again at its next prompt after an edit. New session makes one start over.</p>{bots_html}
 {'<button type="button" class="act needs-me" id="reset-all" style="margin-top:8px">New session for all ' + str(n) + ' bot' + 's' * (n != 1) + '</button><p class="status-line" id="reset-note" role="status" aria-live="polite"></p>' if n else ''}</div>
 </div><div>
 <div class="card" id="gets"><h2>What a bot gets</h2><p class="sub">The text <code>GET /api/me/profile</code> returns to a bot of this profile.</p>
 <pre class="what">{e(registry.profile_text(profile, base))}</pre></div>
+<div class="card" id="history"><h2>History · {len(history)}</h2><ul class="hist">{hist_html}</ul>
+<p class="sub" style="margin:8px 0 0">Every save is a new revision; <code>GET /api/profiles/{name}/history</code> has the text of each.</p></div>
 <div class="card" id="lineage"><h2>Lineage</h2><dl><dt>from</dt><dd>{from_html}</dd><dt>clones</dt><dd><ul class="hist" style="margin:0">{clones_html}</ul></dd></dl></div>
 <div class="card danger"><h2>Danger</h2>{danger}</div>
 </div></div>
+<script type="application/json" id="profile-data">{data}</script>
 </div></div>
 <script>{PROFILE_PAGE_JS}</script>"""
     return shell(board_name, f"profile {profile['name']}", content, here="/fleet")
@@ -579,11 +598,32 @@ PROFILE_PAGE_JS = r"""
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) throw new Error(d.error || d.detail || ('refused: ' + r.status)); return d; }); });
   }
+  var P = JSON.parse(document.getElementById('profile-data').textContent);
+  var form = document.getElementById('profile-edit');
+  form.addEventListener('change', function (ev) {
+    if (ev.target.name === 'mandatory' && ev.target.checked) form.querySelector('input[name=skill][value="' + ev.target.value + '"]').checked = true;
+    if (ev.target.name === 'skill' && !ev.target.checked) form.querySelector('input[name=mandatory][value="' + ev.target.value + '"]').checked = false;
+  });
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault(); if (!need()) return;
+    var f = form.elements, msg = form.querySelector('.status-line'), mand = {};
+    form.querySelectorAll('input[name=mandatory]:checked').forEach(function (c) { mand[c.value] = true; });
+    var skills = Array.prototype.map.call(form.querySelectorAll('input[name=skill]:checked'), function (c) { return {name: c.value, mandatory: !!mand[c.value]}; });
+    msg.className = 'status-line'; msg.textContent = 'Saving…';
+    call('PUT', '/api/profiles/' + encodeURIComponent(P.name),
+         {role: f.role.value.trim(), responsibilities: f.responsibilities.value.trim(), focus: f.focus.value.trim(), avoid: f.avoid.value.trim(),
+          skills: skills, specialized: f.specialized.checked, base_revision: P.revision, reason: f.reason.value.trim()})
+    .then(function (d) {
+      msg.className = 'status-line ok';
+      msg.textContent = 'Saved as rev ' + d.profile.revision + '. ' + (P.bots.length ? P.bots.length + ' bot' + (P.bots.length === 1 ? '' : 's') + ' on it read it at their next prompt.' : 'No bot carries it yet.');
+      setTimeout(function () { location.reload(); }, 1200);
+    }, function (e) { msg.textContent = e.message; });
+  });
   var all = document.getElementById('reset-all');
   if (all) all.addEventListener('click', function () {
-    var bots = Array.prototype.map.call(document.querySelectorAll('button.reset'), function (b) { return b.dataset.handle; }), note = document.getElementById('reset-note');
-    if (!need() || !confirm('Give ' + bots.map(function (h) { return '@' + h; }).join(', ') + ' a new session? Each reads its profile and skills again (when idle; a stopped bot at its next start).')) return;
-    call('POST', '/api/profiles/' + encodeURIComponent(location.pathname.split('/').pop()) + '/reset').then(function (d) {
+    var note = document.getElementById('reset-note');
+    if (!need() || !confirm('Give ' + P.bots.map(function (h) { return '@' + h; }).join(', ') + ' a new session? Each reads its profile and skills again (when idle; a stopped bot at its next start).')) return;
+    call('POST', '/api/profiles/' + encodeURIComponent(P.name) + '/reset').then(function (d) {
       var n = Object.keys(d.skipped);
       note.className = 'status-line ok';
       note.textContent = d.reset.length + ' asked' + (n.length ? '; skipped: ' + n.map(function (h) { return '@' + h + ' (' + d.skipped[h] + ')'; }).join(', ') : '') + '.';
@@ -635,7 +675,7 @@ def profile_new_page(board_name: str, templates: list, profiles: list, skills: l
 <div class="fleet-page"><div class="reg">
 <p class="crumbs"><a href="/fleet">Fleet</a> › <a href="/fleet#fleet-profiles">Profiles</a> › new profile</p>
 <div class="reg-head"><h1 style="font-family:var(--sans)">Create a profile</h1></div>
-<p class="sub">A profile is a role and the skills that go with it. It cannot be changed once created: a bot keeps it for life, and a different role is a new profile.</p>
+<p class="sub">A profile is a role and the skills that go with it. A bot keeps its profile for life; the profile itself is edited on its page, and a different role is a new profile.</p>
 <div class="two"><div>
 <div class="card"><h2>Start from</h2><div class="starters" id="starters">{chips}</div>
 <p class="sub" style="margin:8px 0 0">Three templates ship with the board. Any existing profile can be picked too, which is what Clone does. Switching replaces the fields below; nothing is saved until Create.</p></div>
@@ -703,7 +743,7 @@ NEW_PROFILE_JS = r"""
     document.getElementById('preview').textContent = lines.join('\n');
     var n = f.name.value.trim();
     document.getElementById('create-go').textContent = 'Create' + (n ? ' ' + n : '');
-    document.getElementById('create-note').textContent = D.taken.indexOf(n) >= 0 ? 'That name is taken: profiles are never edited or renamed.'
+    document.getElementById('create-note').textContent = D.taken.indexOf(n) >= 0 ? 'That name is taken: profiles are never renamed, and a deleted one keeps its name.'
       : n ? 'New bots can be given it right away.' + (current && current.kind === 'profile' ? ' ' + current.label + ' is untouched.' : '') : '';
   }
   document.getElementById('starters').addEventListener('click', function (ev) {
