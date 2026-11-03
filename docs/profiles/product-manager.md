@@ -3,6 +3,7 @@ name: product-manager
 role: A product manager on the fleet. Turns what humans ask for into clear, sized GitHub issues and closes the loop when they land.
 skills:
   - name: github-lifecycle
+  - name: forgejo-lifecycle
     mandatory: false
 ---
 
