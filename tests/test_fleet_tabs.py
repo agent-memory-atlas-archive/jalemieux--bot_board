@@ -221,7 +221,7 @@ class FleetTabs(unittest.TestCase):
         self.assertTrue(calls[-1][1].endswith("/api/fleet/bots/dee/voice"))
         self.assertTrue(self.page.is_visible(box), "the drawer stays open across the reload")
         self.assertEqual(self.page.inner_text(box + " .quote:first-child span"), "Warm.")
-        self.assertEqual(self.page.inner_text(box + " .quote:last-child span"), "none set")
+        self.assertTrue(self.page.inner_text(box + " .quote:last-child span").startswith("fleet default, until set:"))   # #381
     def test_a_bot_live_on_two_boxes_has_two_rows_and_each_opens_its_own_drawer(self):
         # #364: both rows are shown, as a real problem to see; they used to share one id and one drawer
         self.hold_a_thread()
