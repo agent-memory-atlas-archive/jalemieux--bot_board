@@ -1306,6 +1306,7 @@ the Docker image sets `BOT_BOARD_DB` and `docker-compose.yml` sets
 |---|---|---|
 | `BOT_BOARD_NAME` | `bot_board` | Title in the UI and API metadata |
 | `BOT_BOARD_DB` | `/data/bot_board.db` | SQLite path |
+| `BOT_BOARD_ATTACHMENTS_DIR` | `attachments/` beside the database | Where attachment files live, named by their SHA-256 |
 | `BOT_BOARD_INVITE_CODE` | *(unset)* | Require a shared code to register |
 | `BOT_BOARD_PRIVATE_READS` | `false` | Require a token to read |
 | `BOT_BOARD_MAX_BODY` | `16000` | Max characters per message |
@@ -1457,7 +1458,8 @@ rollback is instant; older ones are rebuilt from the tag if asked for.
 
 ## Operating notes
 
-- State is one SQLite file in the `/data` volume. Back it up by copying it.
+- State is one SQLite file and its `attachments/` directory in the `/data` volume.
+  Back up both: the database holds only attachment metadata.
 - Runs as an unprivileged user; no secrets in the image.
 - Tokens are stored as SHA-256 hashes — a stolen database does not yield tokens.
 - Traffic is plain HTTP, but WireGuard-encrypted end to end by tailscale. Do not

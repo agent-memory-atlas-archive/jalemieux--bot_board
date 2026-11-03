@@ -131,6 +131,11 @@ is already usable; nothing waits on you.
 No context is a valid outcome. If the material holds nothing a bot would need,
 say so and complete the thread without writing anything.
 
+## Where attachments live
+
+Attachment files live in `attachments/` beside the database, in the `/data` volume.
+`BOT_BOARD_ATTACHMENTS_DIR` moves them. A backup needs the database and that directory.
+
 ## Routines
 
 A request for a routine in the admin channel is yours, and its thread is where

@@ -27,6 +27,8 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
+from . import storage
+
 DB_PATH = os.environ.get("BOT_BOARD_DB", "/data/bot_board.db")
 
 MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
@@ -119,13 +121,13 @@ CREATE TABLE IF NOT EXISTS message_receipts (
 
 CREATE TABLE IF NOT EXISTS text_attachments (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-    content    TEXT NOT NULL,
+    storage_key TEXT NOT NULL,
     size_bytes INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS image_attachments (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    content BLOB NOT NULL,
+    storage_key TEXT NOT NULL,
     media_type TEXT NOT NULL,
     name TEXT NOT NULL,
     size_bytes INTEGER NOT NULL
@@ -202,9 +204,35 @@ def init() -> None:
                 c.execute(f"ALTER TABLE boards ADD COLUMN {col} {ddl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id, kind)")
         c.commit()
+        _attachments_to_files(c)
     from . import workspaces, routines
     workspaces.init()
     routines.init()
+
+
+def _attachments_to_files(c: sqlite3.Connection) -> None:
+    """Move attachments stored in the database to the file store, one row at a time (#390).
+    A crash loses nothing: a row without a key still has its content, and the next start goes on."""
+    moved = False
+    for table in ("text_attachments", "image_attachments"):
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if "content" not in cols:
+            continue
+        if "storage_key" not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN storage_key TEXT")
+            c.commit()
+        for row in c.execute(f"SELECT message_id FROM {table} WHERE storage_key IS NULL").fetchall():
+            content = c.execute(f"SELECT CAST(content AS BLOB) FROM {table} WHERE message_id=?",
+                                (row["message_id"],)).fetchone()[0]
+            c.execute(f"UPDATE {table} SET storage_key=? WHERE message_id=?",
+                      (storage.write(content), row["message_id"]))
+            c.commit()
+        c.execute(f"ALTER TABLE {table} DROP COLUMN content")
+        c.commit()
+        moved = True
+    if moved:       # give the space back once: dropping a column only frees pages inside the file
+        c.execute("VACUUM")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
 
 
 # ---------------------------------------------------------------- scope
@@ -693,14 +721,11 @@ def post_message(
         if image_attachment is not None:
             content, media_type, name = image_attachment
             c.execute(
-                "INSERT INTO image_attachments (message_id, content, media_type, name, size_bytes)"
-                " VALUES (?,?,?,?,?)", (mid, content, media_type, name, len(content)),
+                "INSERT INTO image_attachments (message_id, storage_key, media_type, name, size_bytes)"
+                " VALUES (?,?,?,?,?)", (mid, storage.write(content), media_type, name, len(content)),
             )
         if text_attachment is not None:
-            c.execute(
-                "INSERT INTO text_attachments (message_id, content, size_bytes) VALUES (?,?,?)",
-                (mid, text_attachment, len(text_attachment.encode("utf-8"))),
-            )
+            add_text_attachment(c, mid, text_attachment)
         if parent_thread is None:
             c.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
         for h in handles:
@@ -858,14 +883,39 @@ def get_message(mid: int) -> dict | None:
     return hydrated[0] if hydrated else None
 
 
+def add_text_attachment(c: sqlite3.Connection, mid: int, text: str) -> None:
+    """Inside the caller's write lock, so a delete cannot take the file between write and insert."""
+    content = text.encode("utf-8")
+    c.execute("INSERT INTO text_attachments (message_id, storage_key, size_bytes) VALUES (?,?,?)",
+              (mid, storage.write(content), len(content)))
+
+
 def get_text_attachment(mid: int) -> str | None:
-    row = conn().execute("SELECT content FROM text_attachments WHERE message_id=?", (mid,)).fetchone()
-    return row["content"] if row else None
+    """The file holding a message's text attachment."""
+    row = conn().execute("SELECT storage_key FROM text_attachments WHERE message_id=?", (mid,)).fetchone()
+    return storage.path(row["storage_key"]) if row else None
 
 
 def get_image_attachment(mid: int) -> dict | None:
+    """An image's metadata, with `path` the file holding it."""
     row = conn().execute("SELECT * FROM image_attachments WHERE message_id=?", (mid,)).fetchone()
-    return dict(row) if row else None
+    return {**row, "path": storage.path(row["storage_key"])} if row else None
+
+
+def delete_attachments(mid: int) -> None:
+    """Remove a message's attachments, and each file no other message still uses. Nothing deletes
+    messages today; whatever does first calls this, since a key can be shared."""
+    c = conn()
+    with _write_lock:
+        keys = set()
+        with c:
+            for table in ("text_attachments", "image_attachments"):
+                keys |= {r["storage_key"] for r in c.execute(f"SELECT storage_key FROM {table} WHERE message_id=?", (mid,))}
+                c.execute(f"DELETE FROM {table} WHERE message_id=?", (mid,))
+        for key in keys:
+            if not c.execute("SELECT 1 FROM text_attachments WHERE storage_key=?"
+                             " UNION ALL SELECT 1 FROM image_attachments WHERE storage_key=?", (key, key)).fetchone():
+                storage.delete(key)
 
 
 def thread_workers(tids: list[int]) -> dict[int, str | None]:

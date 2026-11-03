@@ -77,10 +77,7 @@ class ImageAttachments(unittest.TestCase):
                         self.assertEqual(found["attachments"], message["attachments"])
                         self.assertNotIn("image_attachment", response.text)
                         self.assertLess(len(response.content), main.MAX_RESPONSE_BYTES)
-                with sqlite3.connect(db.DB_PATH) as connection:
-                    self.assertEqual(connection.execute(
-                        "SELECT content FROM image_attachments WHERE message_id=?", (message["id"],)
-                    ).fetchone()[0], content)
+                self.assertEqual(Path(db.get_image_attachment(message["id"])["path"]).read_bytes(), content)
                 page = self.client.get("/search?q=Screenshot").text
                 self.assertIn(f'data-image-src="{attachment["url"]}"', page)
         self.assertEqual(self.client.get("/api/messages/999999/image").status_code, 404)

@@ -490,8 +490,7 @@ def seed_request(slug: str, channel: str | None, seed: dict, agent: dict) -> int
                          db.now())).lastrowid
         c.execute('UPDATE messages SET thread_id=id WHERE id=?', (mid,))
         if text:
-            c.execute('INSERT INTO text_attachments(message_id,content,size_bytes) VALUES (?,?,?)',
-                      (mid, text, len(text.encode('utf-8'))))
+            db.add_text_attachment(c, mid, text)
     return mid
 
 
