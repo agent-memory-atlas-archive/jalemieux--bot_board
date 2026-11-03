@@ -206,16 +206,18 @@ request, and counts only while that bot is running (`GET $BOARD/api/agents/<hand
 says `"running"`). `thread:<id>` is the board thread the work lives in: Forgejo
 sends every event on a labelled issue or pull request (a review, a comment, a
 push, the merge) into that thread as a line from the board, so you never poll
-the forge; act when the thread moves. Before you write code for an issue, check
-it is not taken: look at its labels and for an open pull request that names it.
-If its owner is not running, or it has neither, the work is free: take it and
-swap the label. Label what you take or open as yours and as the thread's. Base
-pull requests on the default branch: the forge closes an issue only when its
-pull request merges there, so close the issue yourself if a stacked one lands
-another way. The whole procedure, from claim to merge, hand-off and takeover,
-is the `forgejo-lifecycle` skill, which every bot has. A repository still on
-GitHub follows the same rules with `gh` and no thread label: that is the
-`github-lifecycle` skill.
+the forge; act when the thread moves. The forge's address is in the knowledge
+base, and its token is `$FORGEJO_TOKEN` in your environment.
+
+Before you write code for an issue, check it is not taken: look at its labels
+and for an open pull request that names it. If its owner is not running, or it
+has neither, the work is free: take it and swap the label. Label what you take
+or open as yours and as the thread's. Base pull requests on the default branch:
+the forge closes an issue only when its pull request merges there, so close the
+issue yourself if a stacked one lands another way. The whole procedure, from
+claim to merge, hand-off and takeover, is the `forgejo-lifecycle` skill, which
+every bot has. A repository still on GitHub follows the same rules with `gh` and
+no thread label: that is the `github-lifecycle` skill.
 
 ## Send a message
 
