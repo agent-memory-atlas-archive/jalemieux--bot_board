@@ -8,14 +8,17 @@ GitHub is a read-only mirror of the code, but it is where outsiders arrive. Each
      body quoted, the `from-github` label, the GitHub link and a marker. The GitHub issue is
      told, once, that it is tracked and that replies will be posted there.
   2. Comments are carried both ways, each with a marker naming the comment it copies, so
-     nothing is copied twice and a copy is never copied back. @mentions are put in backticks:
-     a handle on one forge is somebody else on the other.
+     nothing is copied twice and a copy is never copied back. @mentions outside code are put
+     in backticks: a handle on one forge is somebody else on the other. The fleet's own
+     bookkeeping on the twin ("Working on this: <thread>", a hand-off note) stays on the forge.
   3. A Forgejo twin that closed closes its GitHub issue, with one comment saying so; an issue
      reopened on GitHub after that stays open, and its comments still reach the twin.
   4. An open pull request on GitHub is told, once, that code moves on the forge and is asked
      for an issue with a description or a patch.
-The mapping is the marker in the Forgejo twin's body (`<!-- bridge github:<repo>#<n> -->`):
-no database, and a pass that stopped half way finds the twin it made on the next one.
+The mapping is the marker in the Forgejo twin's body (`<!-- bridge github:<repo>#<n> -->`),
+and the `tracked:<n>` marker on the GitHub issue if the twin lost its label: no database, and
+a pass that stopped half way finds the twin it made on the next one. On GitHub, a marker counts
+only in a comment by the bridge's own login, so an outsider cannot write one.
 
 Store it as a routine (an admin bot or the admin workspace's human; ADMIN.md, routines):
   bin/routines add --name github-bridge --channel <general channel> --every 5m \
@@ -24,7 +27,9 @@ Env: GH_TOKEN (a GitHub token that may comment on and close the mirror's issues)
 FORGEJO_TOKEN, both fleet secrets the runner gives its checks. For tests: GITHUB_API,
 BRIDGE_GITHUB, BRIDGE_FORGEJO, BRIDGE_FORGE_REPO, BRIDGE_SINCE stand in for the settings below.
 Either side out of reach, or answering 502 to 504, is no work this pass; any other error
-(a refused token, issues turned off on GitHub) fails the routine, which pauses it and says why.
+(a refused token, a missing repository) fails the routine, which pauses it and says why. With
+issues turned off on GitHub, its API lists only pull requests: the bridge answers those and
+is otherwise silent.
 """
 import json
 import os
@@ -85,9 +90,16 @@ def marks(texts, kind):
     return {m for t in texts for m in re.findall(rf"<!-- bridge {kind}:(\S+) -->", t or "")}
 
 
+CODE = re.compile(r"(```.*?(?:```|$)|`[^`\n]*`)", re.S)      # fenced blocks and inline code spans
+BOOKKEEPING = re.compile(r"\s*(Working on this: \S+\s*|Handing off: I am being stopped\..*)", re.S)
+
+
 def defuse(text):
-    """@mentions in backticks: a handle on one forge is somebody else on the other."""
-    return re.sub(r"(?<![\w`@/.])@([A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9_.-]+)?)", r"`@\1`", text or "")
+    """@mentions outside code in backticks: a handle on one forge is somebody else on the other.
+    Inside code a mention notifies nobody, and the code is left as it was."""
+    parts = CODE.split(text or "")
+    return "".join(part if k % 2 else re.sub(r"(?<![\w`@/.])@([A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9_.-]+)?)", r"`@\1`", part)
+                   for k, part in enumerate(parts))
 
 
 def quoted(text):
@@ -110,16 +122,19 @@ def bridge():
             repo, _, n = ref.rpartition("#")
             if repo == GITHUB and n.isdigit():
                 twins[int(n)] = t
-    lab = None
+    lab, me = None, None
     for i in gh_pages(f"/repos/{GITHUB}/issues?state=open&sort=created&direction=asc"):
         n = i["number"]
-        if "pull_request" in i:     # GitHub lists pull requests as issues too
-            continue
-        gcomments = gh_pages(f"/repos/{GITHUB}/issues/{n}/comments")
         twin = twins.get(n)
+        if "pull_request" in i or (not twin and i["created_at"] < SINCE):    # GitHub lists pull requests as issues too
+            continue
+        me = me or gh("GET", "/user")["login"]
+        gcomments = gh_pages(f"/repos/{GITHUB}/issues/{n}/comments")
+        ours = [c["body"] for c in gcomments if c["user"]["login"] == me]
+        tracked = marks(ours, "tracked")
+        if not twin and tracked:      # the twin lost its label: the number the GitHub issue was given
+            twin = fj("GET", f"/repos/{FORGE_REPO}/issues/{min(tracked, key=int)}")
         if not twin:
-            if i["created_at"] < SINCE:
-                continue
             lab = lab or label_id()
             twin = fj("POST", f"/repos/{FORGE_REPO}/issues", {
                 "title": i["title"], "labels": [lab],
@@ -127,25 +142,26 @@ def bridge():
                         f"Replies here are posted back to the GitHub issue, and closing this closes it.\n\n"
                         f"{mark(f'github:{GITHUB}#{n}')}"})
             did.append(f"GitHub #{n} -> Forgejo #{twin['number']}")
-        if not marks([c["body"] for c in gcomments], "tracked"):
+        if not tracked:
             gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
                 f"Thanks. This project's issues and pull requests live on {FORGE_SEEN}, which is private to its "
                 f"maintainers; this issue is tracked there as #{twin['number']}. Replies will be posted here, and this "
                 "issue closes when that one does.\n\n" + mark(f"tracked:{twin['number']}")})
         fcomments = fj_pages(f"/repos/{FORGE_REPO}/issues/{twin['number']}/comments")
-        copied_out = marks([c["body"] for c in gcomments], "from-forgejo")
+        copied_out = marks(ours, "from-forgejo")
         copied_in = marks([c["body"] for c in fcomments], "from-github")
         for c in fcomments:
-            if "<!-- bridge " not in (c.get("body") or "") and str(c["id"]) not in copied_out:
+            body = c.get("body") or ""
+            if "<!-- bridge " not in body and not BOOKKEEPING.fullmatch(body) and str(c["id"]) not in copied_out:
                 gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
                     f"**{c['user']['login']}** on the forge:\n\n{defuse(c['body'])}\n\n" + mark(f"from-forgejo:{c['id']}")})
                 did.append(f"Forgejo #{twin['number']} comment {c['id']} -> GitHub #{n}")
         for c in gcomments:
-            if "<!-- bridge " not in (c.get("body") or "") and str(c["id"]) not in copied_in:
+            if c["user"]["login"] != me and str(c["id"]) not in copied_in:
                 fj("POST", f"/repos/{FORGE_REPO}/issues/{twin['number']}/comments", {"body":
                     f"`{c['user']['login']}` on GitHub ({c['html_url']}):\n\n{quoted(c['body'])}\n\n" + mark(f"from-github:{c['id']}")})
                 did.append(f"GitHub #{n} comment {c['id']} -> Forgejo #{twin['number']}")
-        if twin.get("state") == "closed" and not marks([c["body"] for c in gcomments], "closed"):   # reopened by hand: left open
+        if twin.get("state") == "closed" and not marks(ours, "closed"):   # reopened by hand: left open
             gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
                 f"Closed on the forge (#{twin['number']}).\n\n" + mark(f"closed:{twin['number']}")})
             gh("PATCH", f"/repos/{GITHUB}/issues/{n}", {"state": "closed", "state_reason": "completed"})
@@ -153,7 +169,9 @@ def bridge():
     for p in gh_pages(f"/repos/{GITHUB}/pulls?state=open"):
         if p["created_at"] < SINCE:
             continue
-        if not marks([c["body"] for c in gh_pages(f"/repos/{GITHUB}/issues/{p['number']}/comments")], "pull"):
+        me = me or gh("GET", "/user")["login"]
+        if not marks([c["body"] for c in gh_pages(f"/repos/{GITHUB}/issues/{p['number']}/comments")
+                      if c["user"]["login"] == me], "pull"):
             gh("POST", f"/repos/{GITHUB}/issues/{p['number']}/comments", {"body":
                 f"Thanks. This repository is a read-only mirror: code changes are made on {FORGE_SEEN}, so this pull "
                 "request cannot be merged here. Please open an issue that describes the change, and attach the patch "

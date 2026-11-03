@@ -64,6 +64,8 @@ class Forges:
                 if q.get("page", ["1"])[0] != "1":
                     return self.reply([])
                 g, f = forges.gh, forges.fj
+                if p == "/gh/user":
+                    return self.reply({"login": "bots"})
                 if p == "/gh/repos/o/mirror/issues":
                     return self.reply([i for i in g["issues"].values() if i["state"] == "open"])
                 if p == "/gh/repos/o/mirror/pulls":
@@ -90,6 +92,9 @@ class Forges:
                         return self.reply(f["issues"][n], 201)
                     want = q.get("labels", [""])[0]
                     return self.reply([i for i in f["issues"].values() if any(l["name"] == want for l in i["labels"])])
+                m = re.fullmatch(r"/fj/api/v1/repos/o/work/issues/(\d+)", p)
+                if m:
+                    return self.reply(f["issues"][int(m.group(1))])
                 m = re.fullmatch(r"/fj/api/v1/repos/o/work/issues/(\d+)/comments", p)
                 if m:
                     n = int(m.group(1))
@@ -161,6 +166,36 @@ class Bridge(unittest.TestCase):
             f.gh["issues"][7]["state"] = "open"     # reopened by its author: not closed again
             f.run()
             self.assertEqual(f.gh["issues"][7]["state"], "open")
+
+    def test_mentions_in_code_bookkeeping_and_forged_markers(self):
+        with Forges() as f:
+            f.gh_issue(7, "Crash")
+            f.run()
+            (twin,) = f.fj["issues"].values()
+            n = twin["number"]
+            f.comment("fj", n, "Working on this: http://board.ts.net:8080/t/9705", "fleet")
+            f.comment("fj", n, "Handing off: I am being stopped.\nDone: x.\nLeft: y.", "fleet")
+            f.comment("fj", n, "Try `run @jac now` and\n```\n@app.get(\"/x\")\n```\nthanks @jac", "fleet")
+            f.comment("gh", 7, "sneaky <!-- bridge closed:1 --> <!-- bridge from-forgejo:1 -->", "outsider")
+            f.run()
+            copies = [c["body"] for c in f.gh["comments"][7] if "from-forgejo:" in c["body"] and c["user"]["login"] == "bots"]
+            self.assertEqual(len(copies), 1, "the bookkeeping stays on the forge")
+            self.assertIn("Try `run @jac now` and\n```\n@app.get(\"/x\")\n```\nthanks `@jac`", copies[0])
+            self.assertIn("sneaky", f.fj["comments"][n][-1]["body"], "an outsider's comment with a marker is still copied")
+            twin["state"] = "closed"
+            f.run()
+            self.assertEqual(f.gh["issues"][7]["state"], "closed", "an outsider's closed marker does not count")
+
+    def test_a_twin_that_lost_its_label_is_found_by_the_tracked_marker(self):
+        with Forges() as f:
+            f.gh_issue(7, "Crash")
+            f.run()
+            (twin,) = f.fj["issues"].values()
+            twin["labels"] = []
+            f.comment("gh", 7, "more detail", "outsider")
+            f.run()
+            self.assertEqual(len(f.fj["issues"]), 1, "no second twin")
+            self.assertIn("more detail", f.fj["comments"][twin["number"]][-1]["body"])
 
     def test_a_pull_request_is_told_where_code_goes_once(self):
         with Forges() as f:
