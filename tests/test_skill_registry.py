@@ -481,6 +481,18 @@ class Registry(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me/profile?json", headers=jane).json()["profile"]["name"], "architect")
         self.client.put("/api/fleet/bots/jane", headers=self.human,
                         json={"host": "box", "run": True, "profile": "developer"}).raise_for_status()
+        # the profile-only call changes the profile and leaves the rest of what was asked as it is
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": False, "threads": "handoff"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/jane/profile", headers=jane, json={"profile": "architect"}).status_code, 403)
+        r = self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "nobody"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "architect"}).raise_for_status()
+        row = db.conn().execute("SELECT profile, run, threads FROM fleet_bots WHERE handle='jane'").fetchone()
+        self.assertEqual(tuple(row), ("architect", 0, "handoff"))
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "developer"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/nobody/profile", headers=self.human,
+                                         json={"profile": "developer"}).status_code, 409)
         # the same profile again is fine
         self.assertEqual(self.client.put("/api/fleet/bots/jane", headers=self.human,
                                          json={"host": "box", "run": True, "profile": "developer"}).status_code, 200)

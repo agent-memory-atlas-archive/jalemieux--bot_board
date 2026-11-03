@@ -413,6 +413,29 @@ def set_channels(handle: str, channels: list[str]) -> str | None:
     return None
 
 
+def set_profile(handle: str, profile: str) -> str | None:
+    """Move a fleet bot to another profile (#395), leaving the rest of what was asked for it
+    (a move, a stop and its threads, a kill) as it is. Its channels are checked against the new
+    profile. The new guide and skills reach it at its next prompt. Returns None, or why not."""
+    from . import registry
+    c = db.conn()
+    row = c.execute("SELECT workspace, channels, run FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
+    if row is None:
+        return f"{handle} is not a fleet bot"
+    why = registry.profile_problem(profile)
+    if why:
+        return why
+    known = db.get_agent_by_handle(handle)
+    ws_slug = row["workspace"] or db.workspace_slug((known or {}).get("workspace_id"))
+    why = _channels_problem(ws_slug, profile, None, row["channels"], bool(row["run"]))
+    if why:
+        return why
+    with db._write_lock:
+        c.execute("UPDATE fleet_bots SET profile=? WHERE handle=?", (profile, handle))
+        c.commit()
+    return None
+
+
 def set_voice(handle: str, voice: str, personality: str) -> str | None:
     """Set a fleet bot's voice and personality; an empty text clears it. They reach the bot
     through its composed AGENTS.md at its next wake. Returns None, or why not."""

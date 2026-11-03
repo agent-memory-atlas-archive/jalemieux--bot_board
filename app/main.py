@@ -376,6 +376,8 @@ API_MAP = {
                                          " search and at its link, and bots still see it. DELETE brings it back",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
+        "PUT /api/fleet/bots/{handle}/profile": "a human moves a bot to another profile {profile}, leaving the"
+                                                " rest of what was asked for it as it is; its next prompt carries the new guide",
         "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
                                               " clears; in its composed AGENTS.md at its next wake",
         "POST /api/fleet/bots/{handle}/move": "a human moves a pool bot to another box {to, start?}; the keepers of"
@@ -957,6 +959,23 @@ def fleet_channels(handle: str, body: FleetChannelsIn, agent: dict = Depends(cur
     if why:
         raise HTTPException(409, why)
     return {"ok": True, "channels": db.bot_channels(handle)}
+
+
+class FleetProfileIn(BaseModel):
+    profile: str = Field(min_length=1, max_length=64, description="The profile the bot has from its next prompt (GET /api/profiles).")
+
+
+@app.put("/api/fleet/bots/{handle}/profile", tags=["fleet"])
+def fleet_profile(handle: str, body: FleetProfileIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human moves a fleet bot to another profile (#395). It keeps its handle, token, box,
+    channels and voice, and whatever else was asked for it; its channels are checked against
+    the new profile. Its next prompt carries the new guide and skills."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human gives a bot a profile")
+    why = fleet.set_profile(handle, body.profile.strip().lower())
+    if why:
+        raise HTTPException(409, why)
+    return {"ok": True, "profile": body.profile.strip().lower()}
 
 
 class FleetVoiceIn(BaseModel):

@@ -2134,8 +2134,7 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
                     else '<div class="by dim">any channel</div>')
         chans = (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
                  f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels…</button>')
-        chans += (f'<button type="button" class="act role-edit needs-me" data-handle="{e(b["handle"])}" data-host="{e(host)}"'
-                  f' data-running="{int(b.get("want") == "running" if b.get("want") else up)}"'
+        chans += (f'<button type="button" class="act role-edit needs-me" data-handle="{e(b["handle"])}"'
                   f' data-profile="{e(b.get("profile") or "")}">role…</button>')
     # last active: the keeper knows its last harness run, the board its last post
     last = max((b.get(k) or "" for k in ("last_run", "last_post")), default="")
@@ -2571,7 +2570,7 @@ document.addEventListener('click', function (ev) {
   .then(function (r) { return r.json().then(function (d) { if (r.ok) location.reload(); else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
   .catch(function () { alert('could not reach the board'); });
 });
-// A bot's role: ask for the profile and send it with the bot's box and run as they are (#395).
+// A bot's role: ask for the profile and send only that, so a move, stop or kill asked stays (#395).
 // The new guide and skills reach it at its next prompt; a new session drops the old role's context.
 document.addEventListener('click', function (ev) {
   var b = ev.target.closest('button.role-edit'); if (!b) return;
@@ -2580,7 +2579,7 @@ document.addEventListener('click', function (ev) {
   var v = prompt('The profile @' + b.dataset.handle + ' has from its next prompt.' + (names.length ? '\\nProfiles: ' + names.join(', ') : ''), b.dataset.profile);
   if (v === null || !v.trim() || v.trim() === b.dataset.profile) return;
   var h = {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, url = '/api/fleet/bots/' + encodeURIComponent(b.dataset.handle);
-  fetch(url, {method: 'PUT', headers: h, body: JSON.stringify({host: b.dataset.host, run: b.dataset.running === '1', profile: v.trim()})})
+  fetch(url + '/profile', {method: 'PUT', headers: h, body: JSON.stringify({profile: v.trim()})})
   .then(function (r) { return r.json().then(function (d) {
     if (!r.ok) { alert(d.error || d.detail || ('refused: ' + r.status)); return; }
     if (!confirm('@' + b.dataset.handle + ' is now ' + v.trim() + '. Give it a new session too, so nothing of its old role stays in context?')) { location.reload(); return; }

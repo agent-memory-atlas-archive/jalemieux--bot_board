@@ -83,7 +83,7 @@ class FleetButtons(unittest.TestCase):
     def test_role_moves_the_bot_to_another_profile_and_offers_a_new_session(self):
         self.answer = "architect"           # the confirm that follows is accepted: a new session too
         self.click("button.role-edit")
-        self.assertEqual(self.calls, [("PUT", "/api/fleet/bots/tarzan", 200),
+        self.assertEqual(self.calls, [("PUT", "/api/fleet/bots/tarzan/profile", 200),
                                       ("POST", "/api/fleet/bots/tarzan/reset", 200)])
         self.assertEqual(self.alerts, [])
         self.assertEqual(db.conn().execute("SELECT profile, run FROM fleet_bots WHERE handle='tarzan'").fetchone()[:], ("architect", 1))
