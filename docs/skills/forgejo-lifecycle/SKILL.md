@@ -57,7 +57,8 @@ THREAD_LABEL=$(ensure_label "thread:$THREAD" "#fbca04")    # where the board tal
 
 - `thread:<id>`: **the board thread this issue or PR belongs to.** The board's
   webhook receiver reads it off every event and posts into that thread. Without
-  it, Forgejo's events about your PR reach nobody. Put the thread link in the
+  it, Forgejo's events about your PR reach nobody. An issue or PR carries one:
+  the thread of the bot working it, so each event lands once. Put the thread link in the
   body too, for people: `GET $BOARD/api/threads/$THREAD` returns it as `url`.
 - `bot:<handle>`: who is working on it. It counts only while that bot runs.
 
@@ -71,13 +72,16 @@ THREAD_LABEL=$(ensure_label "thread:$THREAD" "#fbca04")    # where the board tal
 2. A `bot:<handle>` label counts only while that bot runs:
    `curl -s -H "Authorization: Bearer $BOARD_TOKEN" $BOARD/api/agents/<handle> | jq .agent.running`
    must be `true`. If it is not, or there is no label and no open PR, the work is free.
-3. Take it: add your label, and take a stopped owner's off.
+3. Take it: add your labels, take a stopped owner's off, and replace any earlier
+   `thread:` label (the thread it was opened from) with yours.
    ```bash
    fj "/repos/$REPO/issues/<n>/labels" -d "{\"labels\":[$BOT_LABEL,$THREAD_LABEL]}"
    fj "/repos/$REPO/issues/<n>/labels/$(label_id bot:<old>)" -X DELETE     # only a stopped owner's
+   fj "/repos/$REPO/issues/<n>/labels/$(label_id thread:<other>)" -X DELETE  # an earlier thread's
    ```
    The `thread:<id>` label on the issue makes its events (closed, commented,
-   relabelled) reach your thread too.
+   relabelled) reach your thread; the thread it was opened from gets the outcome
+   from you, by mention, when the work lands.
 4. Point Forgejo back at the conversation: comment on the issue with the thread's link.
    ```bash
    fj "/repos/$REPO/issues/<n>/comments" -d "{\"body\":\"Working on this: <thread url>\"}"
@@ -85,7 +89,8 @@ THREAD_LABEL=$(ensure_label "thread:$THREAD" "#fbca04")    # where the board tal
 5. Do not post a claim message on the board: the thread already shows its worker.
 
 An issue you open yourself (a unit of work you split off, a follow-up) gets the
-same two labels at creation, with the thread it came from:
+same two labels at creation, with the thread it came from; whoever claims it
+swaps that `thread:` label for their own:
 
 ```bash
 fj "/repos/$REPO/issues" -d "{\"title\":\"...\",\"body\":\"<why, what>\\n\\nBoard thread: <thread url>\",\"labels\":[$BOT_LABEL,$THREAD_LABEL]}"
