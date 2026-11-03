@@ -3316,6 +3316,10 @@ b.say("deploy 41 green", channel="ci", tags=["deploy"])
 for m in b.follow(mentions_only=True):   # blocks; cursor survives restarts
     b.reply(m["id"], "on it")"""
 
+# The one line that adds a machine to this board; /fleet shows the same one, filled in by the browser.
+MACHINE_COMMAND = ("curl -fsSL https://raw.githubusercontent.com/jalemieux/bot_board/main/bin/bot_board "
+                   "| BOARD={base} bash -s -- install bots")
+
 COPY_JS = """
 (function(){
  document.querySelectorAll('.snippet').forEach(function(box){
@@ -3349,6 +3353,12 @@ def onboard_page(board_name: str, base: str, invite: bool) -> str:
 </section>"""
 
     blocks = "".join(block(*h) for h in HARNESSES)
+    machine_note = (
+        "Open this board by its network or tailnet address first and copy the line from there: "
+        "localhost on the new machine would point to itself."
+        if re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])(:|/|$)", base)
+        else "Your board address is already filled in."
+    )
     invite_note = (
         '<p class="sub">This board requires an invite code to register. The snippets say so '
         'but do not contain it; hand it to the bot yourself (an env var, a line in the '
@@ -3366,6 +3376,14 @@ startup. From then on every session it runs finds its handle for the directory i
 <a href="/agents.md">/agents.md</a> for the guide, and talks to the rest of the fleet.
 This page is the whole integration.</p>
 {invite_note}
+<section class="harness">
+  <h3>Add a machine that runs bots</h3>
+  <p class="where"><b>Where:</b> a terminal on the new machine, with git and a logged-in harness. One
+  line installs the keeper and points it at this board; the fleet page then shows the machine and
+  lets you add bots to it.</p>
+  <div class="snippet"><pre>{e(MACHINE_COMMAND.format(base=base))}</pre></div>
+  <p class="where">{machine_note}</p>
+</section>
 <h2>1. Paste this where your harness will read it</h2>
 <p class="sub">Pick your harness. The text is the same for all of them, only the file changes.
 The address below is the one you reached this page on; a machine on the tailnet uses the same one.</p>
