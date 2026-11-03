@@ -179,23 +179,50 @@ server, because the `fleet` account is not an admin.
 
 ## 5. Bring a repository over
 
-Sign in to Forgejo as the admin at the `ROOT_URL`. The import can be done from
-the UI (the `+` menu, New migration, Git) or with one API call from the Forgejo
-box, which is what was done:
+Forgejo imports a GitHub repository with its issues, pull requests, labels,
+milestones and releases, but only at the moment the repository is created. So
+decide what to bring before the import; adding the issues later means deleting
+the repository and importing again, and with it the webhook and the
+collaborator settings.
+
+The import can be done from the UI (the `+` menu, New migration, GitHub) or
+with one API call from the Forgejo box, which is what was done. It needs a
+GitHub token that can read the repository, for the issues and pull requests and
+for GitHub's rate limit; the fleet's `GH_TOKEN` was used:
 
 ```bash
 PW=$(cat /srv/forgejo/ADMIN_PASSWORD)
 curl -sS -u "jac:$PW" -X POST http://127.0.0.1:3000/api/v1/repos/migrate \
   -H 'Content-Type: application/json' \
-  -d '{"clone_addr":"https://github.com/jalemieux/bot_board.git",
-       "repo_name":"bot_board","repo_owner":"jac","service":"git",
-       "mirror":false,"private":false}'
+  -d '{"clone_addr":"https://github.com/jalemieux/bot_board",
+       "auth_token":"<github token>",
+       "repo_name":"bot_board","repo_owner":"jac","service":"github",
+       "mirror":false,"private":false,
+       "issues":true,"pull_requests":true,"labels":true,"milestones":true,"releases":true}'
 ```
 
-`"mirror": false` makes a normal, writable repository with every branch of the
-source. A pull mirror (`true`) would be read-only on Forgejo, and the bots could
-not open pull requests there. A private GitHub repository needs an `auth_token`
-field with a GitHub token that can read it.
+The call returns when the import is complete; for bot_board (125 issues, 267
+pull requests, 193 releases) that took under a minute. Issue and pull request
+numbers are kept, so `#307` on Forgejo is `#307` on GitHub. Pull requests
+and comments by GitHub users who have no Forgejo account are shown as by
+"Ghost", with the original login kept in the item's metadata. Closed pull
+requests come over as closed; the open ones come with their branches and stay
+open.
+
+`"mirror": false` makes a normal, writable repository. A pull mirror (`true`)
+would be read-only on Forgejo, and the bots could not open pull requests
+there. `"service": "git"` instead of `"github"` imports the code alone, which
+was the first attempt and the reason for the paragraph above.
+
+Check the result against GitHub before going on:
+
+```bash
+F=http://minipc-2.taild87368.ts.net:3000/api/v1/repos/jac/bot_board
+for q in 'type=issues&state=open' 'type=issues&state=closed' 'type=pulls&state=open' 'type=pulls&state=closed'; do
+  echo "$q: $(curl -sSI "$F/issues?$q&limit=1" | grep -i x-total-count)"
+done
+gh issue list -s all -L 1000 --json number --jq length   # on GitHub, for comparison
+```
 
 **Give the bots write access.** The `fleet` account can open issues on a public
 repository but cannot create labels, push branches or open pull requests until
