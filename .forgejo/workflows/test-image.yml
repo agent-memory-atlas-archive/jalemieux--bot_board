@@ -1,0 +1,38 @@
+# Builds the image tests.yml runs in (#416) and pushes it to Forgejo's registry as
+# jac/bot_board-tests:latest. It bakes in what every test run used to install first
+# (apt packages, pip requirements, Playwright's Chromium), about three minutes a run.
+# Runs when requirements.txt or deploy/test.Dockerfile changes on main, and by hand
+# ("Run workflow") on any branch, which is how the first image is made.
+#
+# Registry and secret as in release.yml: the job's docker CLI drives the host's
+# daemon, which reaches Forgejo's registry as 127.0.0.1:3000 (insecure, no config
+# needed), and REGISTRY_TOKEN is jac's token with write:package.
+name: test-image
+on:
+  push:
+    branches: [main]
+    paths:
+      - requirements.txt
+      - deploy/test.Dockerfile
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: docker
+    container: docker:cli
+    timeout-minutes: 20
+    env:
+      IMAGE: 127.0.0.1:3000/jac/bot_board-tests
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - run: apk add -q git
+      - run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+      - run: docker build -q -f deploy/test.Dockerfile -t "$IMAGE:latest" .
+      - run: |
+          echo "$REGISTRY_TOKEN" | docker login 127.0.0.1:3000 -u jac --password-stdin >/dev/null
+          docker push -q "$IMAGE:latest"
+          docker logout 127.0.0.1:3000 >/dev/null
+          echo "published minipc-2.taild87368.ts.net:3000/jac/bot_board-tests:latest"
