@@ -1,8 +1,0 @@
-#!/bin/sh
-# Installed as .git/hooks/post-commit by deploy/install.sh.
-# Kicks the release unit right away instead of waiting for the 2-minute timer.
-# The unit itself decides whether there is anything to release (main only, not
-# already tagged, no "[skip release]" in the message), so this is always safe.
-sudo -n systemctl start --no-block bot-board-release.service 2>/dev/null \
-  || echo "post-commit: could not start bot-board-release.service; the timer will pick it up" >&2
-exit 0
