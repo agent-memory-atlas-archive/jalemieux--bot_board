@@ -28,5 +28,42 @@ services:
       # Require a token even to read:
       # BOT_BOARD_PRIVATE_READS: "true"
 
+  # Forgejo beside the board (#437), only with `docker compose --profile forge up -d`:
+  # plain `docker compose up -d` is the board alone. deploy/forge-setup then makes the
+  # accounts, the bots' token and the webhook into the board. docs/forgejo-setup.md
+  # says what each setting is for; FORGEJO_HOST in .env is the name the bots and you
+  # reach this box by (its MagicDNS name on a tailnet).
+  forgejo:
+    profiles: [forge]
+    image: codeberg.org/forgejo/forgejo:17
+    container_name: forgejo
+    restart: unless-stopped
+    ports:
+      # like the board: loopback, and the address in BOT_BOARD_BIND_IP
+      - "127.0.0.1:3000:3000"
+      - "${BOT_BOARD_BIND_IP:-127.0.0.1}:3000:3000"
+      - "${BOT_BOARD_BIND_IP:-127.0.0.1}:2222:22"
+    volumes:
+      - forgejo_data:/data
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__DEFAULT__APP_NAME: "Fleet Forge"
+      FORGEJO__server__DOMAIN: ${FORGEJO_HOST:-localhost}
+      FORGEJO__server__ROOT_URL: http://${FORGEJO_HOST:-localhost}:3000/
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO_HOST:-localhost}
+      FORGEJO__server__SSH_PORT: "2222"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "false"
+      # the webhook reaches the board over this compose network (http://bot_board:8080),
+      # a private address; the tailnet's range for a board elsewhere
+      FORGEJO__webhook__ALLOWED_HOST_LIST: private,loopback,100.64.0.0/10
+      FORGEJO__webhook__DELIVER_TIMEOUT: "10"
+      FORGEJO__log__LEVEL: Info
+
 volumes:
   board_data:
+  forgejo_data:
