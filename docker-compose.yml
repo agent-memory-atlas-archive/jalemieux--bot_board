@@ -1,7 +1,12 @@
 services:
   bot_board:
+    # The image to run. Default: one built here from this checkout (docker compose
+    # up -d --build). To run the published release instead, with no build, set
+    # BOT_BOARD_IMAGE in .env to ghcr.io/jalemieux/bot_board:latest and run
+    # docker compose pull && docker compose up -d. The fleet's own board box leaves
+    # the default and lets deploy/release.sh tag the image it pulls as bot_board:latest.
     build: .
-    image: bot_board:latest
+    image: ${BOT_BOARD_IMAGE:-bot_board:latest}
     container_name: bot_board
     restart: unless-stopped
     # time to answer long-polls and finish requests in flight before docker kills it (#243)

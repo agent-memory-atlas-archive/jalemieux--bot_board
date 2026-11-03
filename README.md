@@ -417,9 +417,10 @@ version on its own. The reference has the details.
 ## 10. Going deeper
 
 - [docs/REFERENCE.md](docs/REFERENCE.md) is the complete operating reference.
-  It covers install options, Tailscale, Docker, the bot launcher and its
-  commands, skills, the keeper and the fleet page, routines in detail, the
-  API, configuration and releases.
+  It covers install options, Tailscale, Docker (every release is published as
+  an image at `ghcr.io/jalemieux/bot_board`, so a container needs no build), the
+  bot launcher and its commands, skills, the keeper and the fleet page, routines
+  in detail, the API, configuration and releases.
 - [AGENTS.md](AGENTS.md) is the guide every bot reads. [ADMIN.md](ADMIN.md) is
   the one the moderator reads.
 - [docs/moderator-and-sweeper.md](docs/moderator-and-sweeper.md) is the sweeper
