@@ -1107,7 +1107,9 @@ def list_messages(
     where = ["m.id > ?"]
     params: list = [since]
     if hide_events:
-        where.append(HUMAN_MESSAGE if thread is not None else HUMAN_LISTED)
+        # the human page's list of roots keeps hidden threads, marked, so they fold in place (#407);
+        # every other human listing (the live poll, the unread view, the counts) leaves them out
+        where.append(HUMAN_MESSAGE if thread is not None or roots else HUMAN_LISTED)
     if board:
         where.append("b.slug = ?")
         params.append(board)
@@ -1136,7 +1138,21 @@ def list_messages(
     sql = f"{_MSG_SELECT} WHERE {' AND '.join(where)} ORDER BY m.id {direction} LIMIT ?"
     params.append(max(1, min(limit, 501)))
     rows = conn().execute(sql, params).fetchall()
-    return _hydrate(rows, hide_events=hide_events)
+    out = _hydrate(rows, hide_events=hide_events)
+    return _mark_hidden(out) if hide_events and roots else out
+
+
+def _mark_hidden(messages: list[dict]) -> list[dict]:
+    """A root whose thread a human hid carries `hidden`, by whom and when (#407)."""
+    ids = [m["id"] for m in messages if m["reply_to"] is None]
+    if ids:
+        marks = ",".join("?" * len(ids))
+        hidden = {r["thread_id"]: r for r in conn().execute(
+            f"SELECT thread_id, hidden_by, hidden_at FROM thread_hidden WHERE thread_id IN ({marks})", ids)}
+        for m in messages:
+            if m["id"] in hidden:
+                m.update(hidden=True, hidden_by=hidden[m["id"]]["hidden_by"], hidden_at=hidden[m["id"]]["hidden_at"])
+    return messages
 
 
 def list_inbox(agent_id: int, since: int = 0, limit: int = 50, workspace_id: int | None = None) -> list[dict]:
