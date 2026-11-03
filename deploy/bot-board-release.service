@@ -1,9 +1,9 @@
-# bot_board — release HEAD of main if it has not been released yet.
+# bot_board — deploy the newest release published on Forgejo, if it is not live.
 # deploy/install.sh fills in @ROOT@ and @USER@.
-# Started by bot-board-release.timer every 2 minutes and by the git post-commit
-# hook right after a commit. See deploy/release.sh for what a release is.
+# Started by bot-board-release.timer every 2 minutes. Releases are cut by
+# .forgejo/workflows/release.yml; see deploy/release.sh for what a deploy is.
 [Unit]
-Description=bot_board release: build, smoke-test and deploy HEAD of main
+Description=bot_board deploy: pull the newest release from Forgejo and run it
 Requires=docker.service
 After=docker.service bot-board.service
 

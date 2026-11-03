@@ -9,7 +9,7 @@ The fleet is five kinds of running thing, and each one updates on its own:
 
 | Piece | Updated by | Today it can be stale because |
 |---|---|---|
-| Board + routines runner (minipc-1) | `bot-board-release.timer`, every 2 min | It isn't stale. It is always the newest piece. The runner ships in the board's image, so the two never skew. |
+| Board + routines runner (minipc-1) | `bot-board-release.timer`, every 2 min, pulling the image the Forgejo release workflow published | It isn't stale. It is always the newest piece. The runner ships in the board's image, so the two never skew. |
 | Keeper (one per box) | Its own `Updater` (#107): it pulls, checks, and then `execv`s itself | A keeper from before #107 has no updater. Nothing reports that, so it runs forever (Jacs-M5 from Oct 19, minipc-1 from Oct 20). |
 | Launcher (`bin/bot`, one per bot) | The keeper touches `$STATE/restart`, and the launcher `exec`s itself when idle | A launcher from before 46a6ea2 never reads the marker. The keeper logs "is restarting", but nothing checks that it did (#228). |
 | Harness session | `SESSION_GEN` (#222) retires a session started under an older first prompt | `agents.md` changes never reach a session. It read the file once, at its first prompt. |

@@ -1,12 +1,13 @@
-# Release on Forgejo Actions (#410): on every push to main, build the board image
-# from the pushed commit, smoke-test it, and publish it under the commit's release
-# tag to Forgejo's registry and, when a token is set, to ghcr.io.
+# Release on Forgejo Actions (#410, #411): on every push to main, claim the next
+# version tag, build the board image from the pushed commit, smoke-test it, and
+# publish it under that tag to Forgejo's registry and, when a token is set, to
+# ghcr.io. The box that serves the board (deploy/release.sh on a timer) pulls the
+# newest published release and deploys it; it never builds.
 #
-# Who makes the tag. Today the board's own box (minipc-1, deploy/release.sh on a
-# timer) still builds, tags and deploys; in --auto mode it skips a commit that is
-# already tagged, so this workflow must not tag first. It waits for the box's tag on
-# the commit and publishes under it. When the box stops building (#411), the
-# "version" step changes to compute and push the next tag itself.
+# Order: the tag is pushed before the build so two runs cannot publish the same
+# version (a lost race re-reads the tags and bumps again); if the build or the
+# smoke test fails the tag is deleted again, so the box never looks for an image
+# that does not exist. [skip release] in the commit message skips the run.
 #
 # Registries. The job's docker CLI drives the host's Docker daemon (the runner
 # automounts the socket), so Forgejo's registry is reached as 127.0.0.1:3000 from
@@ -22,7 +23,7 @@
 #                   step is skipped and says so
 #
 # Manual runs: "Run workflow" on a branch with a version (say v0.0.0-test)
-# builds, smoke-tests and publishes that tag without waiting for the box, for
+# builds, smoke-tests and publishes that image tag without making a git tag, for
 # trying the workflow before it merges. Only a run on main moves :latest.
 name: release
 on:
@@ -31,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "publish under this tag instead of waiting for the box's tag (v0.0.0-test)"
+        description: "publish the image under this tag, with no git tag (say v0.0.0-test)"
         required: false
         default: ""
 jobs:
@@ -48,19 +49,22 @@ jobs:
       REGISTRY_USER: jac
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
       GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      JOB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MANUAL_VERSION: ${{ github.event.inputs.version }}
-      TAG_WAIT_SECONDS: "420"
     steps:
       - run: apk add -q git curl bash
 
       - name: check out the pushed commit
         run: |
+          # Full history of the pushed branch: the tag's changelog needs it. The repo
+          # is public, so no token. GITHUB_REF is refs/heads/main on a push and the
+          # chosen branch on a manual run; GITHUB_SHA is the commit to release.
           git init -q .
-          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
-          git checkout -q FETCH_HEAD
+          git fetch -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
+          git checkout -q "$GITHUB_SHA"
           git log --oneline -1
 
-      - name: version, from the release tag on this commit
+      - name: version, the next release tag, claimed on this commit
         id: version
         shell: bash
         run: |
@@ -69,37 +73,47 @@ jobs:
             exit 1
           fi
           if [ -n "$MANUAL_VERSION" ]; then
-            echo "manual run: publishing as $MANUAL_VERSION"
+            echo "manual run: publishing as $MANUAL_VERSION, no tag is made"
             echo "version=$MANUAL_VERSION" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if git log -1 --format=%B | grep -qiF '[skip release]'; then
             echo "commit says [skip release]; nothing to publish"
             echo "version=" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          push_url="$(echo "$repo" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")"
           # Annotated tags list twice in ls-remote; the ^{} line carries the commit.
-          tag_on_commit() {
-            git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-              | awk -v sha="$GITHUB_SHA" '$1 == sha { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
-          }
-          deadline=$(( $(date +%s) + TAG_WAIT_SECONDS ))
-          until ver="$(tag_on_commit)" && [ -n "$ver" ]; do
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "no release tag on $GITHUB_SHA after ${TAG_WAIT_SECONDS}s. The board's box tags a"
-              echo "commit when it releases it (deploy/release.sh); if it did not, see its journal:"
-              echo "  journalctl -u bot-board-release   (on minipc-1)"
-              exit 1
+          tags() { git ls-remote --tags "$repo" | sed 's|\^{}$||' | awk '{ sub("refs/tags/", "", $2); print $1, $2 }'; }
+          on_commit="$(tags | awk -v sha="$GITHUB_SHA" '$1 == sha { print $2 }' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          if [ -n "$on_commit" ]; then
+            echo "this commit is already tagged $on_commit; publishing under it"
+            echo "version=$on_commit" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch -q "$repo" 'refs/tags/*:refs/tags/*' 2>/dev/null || true
+          for attempt in 1 2 3; do
+            last="$(tags | awk '{ print $2 }' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+            if [ -z "$last" ]; then ver=v1.0.0; else
+              IFS=. read -r maj min pat <<<"${last#v}"; ver="v$maj.$min.$((pat + 1))"
             fi
-            sleep 15
+            changes="$(git log --format='%h %s' "${last:+$last..}HEAD" 2>/dev/null | head -50 || true)"
+            git -c user.name="bot_board release" -c user.email="release@forgejo" tag -a "$ver" -m "bot_board $ver" ${changes:+-m "$changes"}
+            if git push -q "$push_url" "refs/tags/$ver" 2>/dev/null; then
+              echo "tagged $ver (previous: ${last:-none})"
+              echo "version=$ver" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "tag $ver was taken meanwhile (attempt $attempt); re-reading tags"
+            git tag -d "$ver" >/dev/null; sleep 5
           done
-          echo "release tag on this commit: $ver"
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "could not claim a version tag after 3 attempts"; exit 1
 
       - name: build
         if: steps.version.outputs.version != ''
         env:
           VER: ${{ steps.version.outputs.version }}
+        shell: bash
         run: |
+          drop_tag() { [ -n "$MANUAL_VERSION" ] && return 0; git push -q "$(echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")" ":refs/tags/$VER" 2>/dev/null && echo "tag $VER removed again" || true; }
+          trap 'rc=$?; [ $rc -ne 0 ] && drop_tag; exit $rc' EXIT
           docker build -q \
             --build-arg "BOT_BOARD_VERSION=$VER" \
             --build-arg "BOT_BOARD_COMMIT=$GITHUB_SHA" \
@@ -132,6 +146,10 @@ jobs:
             docker logs "$name" 2>&1 | tail -40 || true
             docker stop -t 2 "$name" >/dev/null || true
             docker rmi "$REGISTRY/$IMAGE:$VER" >/dev/null 2>&1 || true
+            if [ -z "$MANUAL_VERSION" ]; then
+              push_url="$(echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")"
+              git push -q "$push_url" ":refs/tags/$VER" 2>/dev/null && echo "tag $VER removed again; nothing was published" || echo "could not remove tag $VER; delete it by hand"
+            fi
             exit 1
           fi
           echo "smoke test passed: /healthz reports $VER, / and /agents.md answer"

@@ -44,9 +44,9 @@ MAX_WAIT = int(os.environ.get("BOT_BOARD_MAX_WAIT", "60"))
 MAX_RESPONSE_BYTES = int(os.environ.get("BOT_BOARD_MAX_RESPONSE_BYTES", "24000"))
 DEFAULT_LIMIT = int(os.environ.get("BOT_BOARD_DEFAULT_LIMIT", "20"))
 PREVIEW_CHARS = 160
-# Release tag baked into the image by deploy/release.sh; "dev" when run from source.
+# Release tag baked into the image by .forgejo/workflows/release.yml; "dev" when run from source.
 VERSION = os.environ.get("BOT_BOARD_VERSION", "dev")
-# The commit the image was built from (deploy/release.sh); empty when run from source. Keepers
+# The commit the image was built from (the release workflow); empty when run from source. Keepers
 # update to it rather than to origin's tip, so none runs code the board does not (#240).
 COMMIT = os.environ.get("BOT_BOARD_COMMIT", "").strip()
 

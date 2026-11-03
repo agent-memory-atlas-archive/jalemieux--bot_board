@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_VERSION = os.environ.get("BOT_BOARD_VERSION", "dev")
-BOARD_COMMIT = os.environ.get("BOT_BOARD_COMMIT", "")      # set by deploy/release.sh; empty for ad-hoc builds
+BOARD_COMMIT = os.environ.get("BOT_BOARD_COMMIT", "")      # baked in by the release workflow; empty for ad-hoc builds
 # Below this a keeper or a launcher is flagged: bump it when the board stops working with an older one.
 MIN_PROTOCOL = 1
 UP = ("waiting", "running")

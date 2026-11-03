@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
-# deploy/release.sh — cut a release of bot_board from git and run it here.
+# deploy/release.sh — run the newest release of bot_board here.
 #
-#   release.sh                  release HEAD of main as the next patch version
-#   release.sh --minor|--major  same, bumping that component instead
-#   release.sh v1.4.0           release HEAD as exactly that tag
-#   release.sh deploy v1.3.2    run an existing release again (rollback)
-#   release.sh --auto           what the timer and the post-commit hook run:
-#                               like plain, but exits 0 quietly when there is
-#                               nothing to do (HEAD already released, not on
-#                               main, or the commit says "[skip release]")
+# Releases are cut on Forgejo: on every push to main, .forgejo/workflows/release.yml
+# builds the image, smoke-tests it, tags the commit vX.Y.Z and publishes the image
+# to Forgejo's registry (and to ghcr.io). This script runs on the box that serves
+# the board. It never builds; it pulls.
 #
-# Pipeline, in order:
-#   git archive HEAD -> docker build bot_board:vX.Y.Z (working tree is never
-#   used, so half-edited files are never shipped) -> smoke container on a
-#   throwaway port must answer /healthz with that version -> git tag ->
-#   bot_board:latest retagged -> docker compose up -d -> the live container
-#   must go healthy and report the version, else latest is pointed back at the
-#   previous image and compose is run again.
+#   release.sh --auto           what the timer runs: if the newest release tag on
+#                               Forgejo is not what is live, pull its image and
+#                               deploy it; exits 0 quietly when there is nothing to do
+#   release.sh                  same, but says so when there is nothing to do
+#   release.sh deploy v1.3.2    run that release (rollback, or forward); pulls
+#                               the image if it is not on this box
 #
-# If the repo has an `origin` remote (GitHub), --auto first fast-forwards main
-# from origin/main so a push from anywhere gets released here, and every
-# release pushes main + the tag and creates a GitHub Release with the changelog.
+# A deploy: the pulled image is tagged bot_board:<version> and bot_board:latest,
+# docker compose up -d swaps the container, and the live container must go healthy
+# and report the version, else latest is pointed back at the previous image and
+# compose is run again. Each outcome is posted to the `runs` board if
+# ~/.bot_board-release holds a token (deploy/install.sh registers one).
 #
 # Output goes to stdout; under systemd that is `journalctl -u bot-board-release`.
-# Each outcome is also posted to the `runs` board if ~/.bot_board-release holds
-# a token (deploy/install.sh registers one).
+#
+# The registry is plain HTTP on the tailnet: deploy/install.sh puts it in Docker's
+# insecure-registries. Pulls are anonymous, so the package must be public (its
+# visibility on Forgejo follows the jac/bot_board repository).
 
 set -euo pipefail
 
@@ -33,10 +32,12 @@ cd "$ROOT"
 
 IMAGE=bot_board
 SERVICE=bot_board                 # container_name in docker-compose.yml
+REGISTRY="${BOT_BOARD_REGISTRY:-minipc-2.taild87368.ts.net:3000}"
+REMOTE_IMAGE="${BOT_BOARD_REMOTE_IMAGE:-$REGISTRY/jac/bot_board}"
+REPO_URL="${BOT_BOARD_REPO_URL:-http://minipc-2.taild87368.ts.net:3000/jac/bot_board.git}"
 BOARD_URL="${BOT_BOARD_URL:-http://127.0.0.1:8080}"
 TOKEN_FILE="${BOT_BOARD_RELEASE_TOKEN_FILE:-$HOME/.bot_board-release}"
 KEEP_IMAGES="${BOT_BOARD_KEEP_RELEASES:-5}"
-GIT=(git -c user.name="bot_board release" -c user.email="release@$(hostname)")
 
 log() { printf '%s release: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -57,36 +58,19 @@ PY
 }
 
 # ----------------------------------------------------------------- helpers
-has_origin() { git remote get-url origin >/dev/null 2>&1; }
-
-sync_from_origin() {  # fast-forward main from origin/main; never rewrites local work
-  has_origin || return 0
-  git fetch -q origin main 2>/dev/null || { log "fetch from origin failed (offline?); releasing local HEAD"; return 0; }
-  local local_sha remote_sha
-  local_sha="$(git rev-parse HEAD)"; remote_sha="$(git rev-parse origin/main)"
-  [ "$local_sha" = "$remote_sha" ] && return 0
-  if git merge-base --is-ancestor "$local_sha" "$remote_sha"; then
-    if git merge -q --ff-only origin/main 2>/dev/null; then
-      log "fast-forwarded main to origin/main (${remote_sha:0:12})"
-    else
-      log "origin/main is ahead but the working tree blocks the fast-forward (local edits touch the same files); commit or stash them"
-    fi
-  elif ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    log "local main and origin/main have diverged; releasing local HEAD, push will fail until someone rebases"
-  fi
+sync_checkout() {  # keep this checkout (and so this script) current with main; never rewrites local work
+  [ -d .git ] && git remote get-url origin >/dev/null 2>&1 || return 0
+  [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || return 0
+  git fetch -q origin main 2>/dev/null || { log "fetch from origin failed (offline?); running as is"; return 0; }
+  git merge-base --is-ancestor HEAD origin/main 2>/dev/null || return 0
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && return 0
+  git merge -q --ff-only origin/main 2>/dev/null && log "checkout fast-forwarded to origin/main ($(git rev-parse --short=12 HEAD))" \
+    || log "origin/main is ahead but the working tree blocks the fast-forward; commit or stash local edits"
 }
 
-publish() {  # publish <version> <changelog>: push main + tag, create the GitHub Release
-  has_origin || return 0
-  if ! git push -q origin main "$1" 2>&1 | sed 's/^/  push: /'; then
-    log "push to origin failed; release is local only. Fix with: git pull --rebase && git push origin main $1"
-    return 0
-  fi
-  if command -v gh >/dev/null && gh release view "$1" >/dev/null 2>&1; then return 0; fi
-  if command -v gh >/dev/null; then
-    gh release create "$1" --title "bot_board $1" --notes "$2" >/dev/null 2>&1 \
-      && log "GitHub release $1 created" || log "gh release create failed (auth?); tag is pushed anyway"
-  fi
+newest_release() {  # the newest vX.Y.Z tag on Forgejo, or nothing
+  git ls-remote --tags "$REPO_URL" 2>/dev/null \
+    | sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' | sort -V | tail -1
 }
 
 healthz_version() {  # healthz_version <url> -> prints version or nothing
@@ -105,34 +89,26 @@ wait_for_version() {  # wait_for_version <url> <version> <seconds>
   return 1
 }
 
-build_image() {  # build_image <git-ref> <version>
-  local ref=$1 ver=$2 sha tmp
-  sha="$(git rev-parse "$ref")"
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  git archive --format=tar "$ref" | tar -x -C "$tmp"
-  log "building $IMAGE:$ver from $ref (${sha:0:12})"
-  docker build -q \
-    --build-arg "BOT_BOARD_VERSION=$ver" \
-    --build-arg "BOT_BOARD_COMMIT=$(git rev-parse "$ref^{commit}")" \
-    --label "org.opencontainers.image.revision=$sha" \
-    -t "$IMAGE:$ver" "$tmp" >/dev/null
+image_env() {  # image_env <image> <VAR> -> the value baked into the image
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null | sed -n "s/^$2=//p"
 }
 
-smoke_test() {  # smoke_test <version>
-  local ver=$1 name="${SERVICE}_smoke_$$" port
-  docker run -d --rm --name "$name" -p 127.0.0.1:0:8080 "$IMAGE:$ver" >/dev/null
-  port="$(docker port "$name" 8080/tcp | head -1 | sed 's/.*://')"
-  log "smoke test on 127.0.0.1:$port"
-  if wait_for_version "http://127.0.0.1:$port" "$ver" 30 \
-     && curl -sf --max-time 3 -o /dev/null "http://127.0.0.1:$port/" \
-     && curl -sf --max-time 3 -o /dev/null "http://127.0.0.1:$port/agents.md"; then
-    docker stop -t 2 "$name" >/dev/null
-    return 0
+pull_image() {  # pull_image <version>: the published image becomes bot_board:<version> here
+  local ver=$1 baked
+  if docker image inspect "$IMAGE:$ver" >/dev/null 2>&1; then return 0; fi
+  log "pulling $REMOTE_IMAGE:$ver"
+  if ! docker pull -q "$REMOTE_IMAGE:$ver" >/dev/null 2>&1; then
+    log "pull of $REMOTE_IMAGE:$ver failed: not published yet (the release workflow on Forgejo may still be running), or the registry is not in this box's insecure-registries (deploy/install.sh), or the package is not public"
+    return 1
   fi
-  docker logs "$name" 2>&1 | tail -40 || true
-  docker stop -t 2 "$name" >/dev/null || true
-  return 1
+  docker tag "$REMOTE_IMAGE:$ver" "$IMAGE:$ver"
+  docker rmi "$REMOTE_IMAGE:$ver" >/dev/null 2>&1 || true
+  baked="$(image_env "$IMAGE:$ver" BOT_BOARD_VERSION)"
+  if [ "$baked" != "$ver" ]; then
+    log "image $REMOTE_IMAGE:$ver reports version '${baked:-none}'; refusing it"
+    docker rmi "$IMAGE:$ver" >/dev/null 2>&1 || true
+    return 1
+  fi
 }
 
 deploy() {  # deploy <version>: point latest at it, compose up, verify, else roll back
@@ -180,45 +156,27 @@ prune_images() {  # keep the newest $KEEP_IMAGES release images plus whatever ru
       done
 }
 
-next_version() {  # next_version <patch|minor|major> <last-tag-or-empty>
-  local part=$1 last=$2 maj min pat
-  [ -n "$last" ] || { echo v1.0.0; return; }
-  IFS=. read -r maj min pat <<<"${last#v}"
-  case $part in
-    major) echo "v$((maj + 1)).0.0" ;;
-    minor) echo "v$maj.$((min + 1)).0" ;;
-    *)     echo "v$maj.$min.$((pat + 1))" ;;
-  esac
-}
-
 # ------------------------------------------------------------------- lock
-exec 9>"$ROOT/.git/release.lock"
+exec 9>"$ROOT/.release.lock"
 if ! flock -n 9; then
-  [ "${1:-}" = --auto ] && { log "another release is running; skipping"; exit 0; }
-  log "waiting for the running release to finish"
-  flock -w 900 9 || die "timed out waiting for the release lock"
+  [ "${1:-}" = --auto ] && { log "another deploy is running; skipping"; exit 0; }
+  log "waiting for the running deploy to finish"
+  flock -w 900 9 || die "timed out waiting for the deploy lock"
 fi
 
 # ------------------------------------------------------------------- modes
-mode=auto; bump=patch; explicit=""; auto=0
+mode=auto; explicit=""; auto=0
 case "${1:-}" in
-  "")            mode=release ;;
-  --auto)        mode=release; auto=1 ;;
-  --minor)       mode=release; bump=minor ;;
-  --major)       mode=release; bump=major ;;
-  v[0-9]*)       mode=release; explicit=$1 ;;
+  "")            mode=auto ;;
+  --auto)        mode=auto; auto=1 ;;
   deploy)        mode=deploy; explicit=${2:-}; [ -n "$explicit" ] || die "deploy needs a version, e.g. deploy v1.2.3" ;;
   -h|--help)     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *)             die "unknown argument: $1 (try --help)" ;;
+  *)             die "unknown argument: $1 (try --help). Releases are cut on Forgejo now; this box only deploys them." ;;
 esac
 [ -z "$explicit" ] || [[ $explicit =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like v1.2.3, got $explicit"
 
 if [ "$mode" = deploy ]; then
-  git rev-parse -q --verify "refs/tags/$explicit" >/dev/null || die "no such release tag: $explicit"
-  if ! docker image inspect "$IMAGE:$explicit" >/dev/null 2>&1; then
-    log "image $IMAGE:$explicit is gone; rebuilding it from the tag"
-    build_image "$explicit" "$explicit"
-  fi
+  pull_image "$explicit" || die "no image for $explicit"
   if deploy "$explicit"; then
     post_board runs "bot_board redeployed as $explicit on $(hostname) (manual deploy/rollback)." \
       "{\"version\":\"$explicit\",\"host\":\"$(hostname)\",\"event\":\"redeploy\"}"
@@ -229,47 +187,29 @@ if [ "$mode" = deploy ]; then
   exit 1
 fi
 
-# ----------------------------------------------------------------- release
-if [ $auto = 1 ] && [ "$(git rev-parse --abbrev-ref HEAD)" = main ]; then sync_from_origin; fi
-branch="$(git rev-parse --abbrev-ref HEAD)"
-head="$(git rev-parse HEAD)"
-if [ "$branch" != main ]; then
-  [ $auto = 1 ] && { exit 0; }
-  die "releases are cut from main; you are on $branch"
-fi
-already="$(git tag --points-at HEAD 'v[0-9]*' | sort -V | tail -1)"
-if [ -n "$already" ] && [ -z "$explicit" ]; then
+# ------------------------------------------------------------------- auto
+[ $auto = 1 ] && sync_checkout
+newest="$(newest_release)"
+if [ -z "$newest" ]; then
   [ $auto = 1 ] && exit 0
-  log "HEAD is already released as $already (use: release.sh deploy $already)"; exit 0
+  die "no release tag found at $REPO_URL"
 fi
-if [ $auto = 1 ] && git log -1 --format=%B HEAD | grep -qiF '[skip release]'; then
+live="$(healthz_version "$BOARD_URL")"
+if [ "$newest" = "$live" ]; then
+  [ $auto = 1 ] || log "$live is the newest release and is live; nothing to do"
   exit 0
 fi
-
-last="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)"
-ver="${explicit:-$(next_version "$bump" "$last")}"
-git rev-parse -q --verify "refs/tags/$ver" >/dev/null && die "tag $ver already exists"
-
-log "releasing $ver from ${head:0:12} on main (previous: ${last:-none})"
-build_image HEAD "$ver"
-if ! smoke_test "$ver"; then
-  docker rmi "$IMAGE:$ver" >/dev/null 2>&1 || true
-  post_board runs "bot_board release $ver from ${head:0:12} FAILED its smoke test on $(hostname); nothing was deployed and no tag was made. Fix on main and commit again. Details: journalctl -u bot-board-release." \
-    "{\"version\":\"$ver\",\"commit\":\"$head\",\"host\":\"$(hostname)\",\"event\":\"smoke-failed\"}"
-  die "smoke test failed for $ver; not tagged, not deployed"
-fi
-
-changes="$(git log --format='%h %s' "${last:+$last..}HEAD" | head -50)"
-"${GIT[@]}" tag -a "$ver" -m "bot_board $ver" -m "$changes"
-log "tagged $ver"
-publish "$ver" "$changes"
-
-if deploy "$ver"; then
+# Not an error when the pull fails: the workflow publishes the image a minute or two
+# after it pushes the tag, and the next timer run tries again.
+pull_image "$newest" || exit 0
+commit="$(image_env "$IMAGE:$newest" BOT_BOARD_COMMIT)"
+log "release $newest (replacing ${live:-nothing}), commit ${commit:0:12}"
+if deploy "$newest"; then
   prune_images
-  post_board runs "$(printf 'bot_board %s is live on %s.\n\n%s' "$ver" "$(hostname)" "$changes")" \
-    "{\"version\":\"$ver\",\"commit\":\"$head\",\"host\":\"$(hostname)\",\"event\":\"released\"}"
+  post_board runs "bot_board $newest is live on $(hostname)." \
+    "{\"version\":\"$newest\",\"commit\":\"$commit\",\"host\":\"$(hostname)\",\"event\":\"released\"}"
   exit 0
 fi
-post_board runs "bot_board $ver was tagged but FAILED health after deploy on $(hostname) and was rolled back. Fix on main and commit again. Details: journalctl -u bot-board-release." \
-  "{\"version\":\"$ver\",\"commit\":\"$head\",\"host\":\"$(hostname)\",\"event\":\"deploy-failed\"}"
+post_board runs "bot_board $newest FAILED health after deploy on $(hostname) and was rolled back. Fix on main and commit again. Details: journalctl -u bot-board-release." \
+  "{\"version\":\"$newest\",\"commit\":\"$commit\",\"host\":\"$(hostname)\",\"event\":\"deploy-failed\"}"
 exit 1
