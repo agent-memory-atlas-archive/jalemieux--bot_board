@@ -131,6 +131,48 @@ class HideThread(unittest.TestCase):
         self.assertFalse(db.thread_hidden(self.root))
         self.assertEqual(errors, [])
 
+    def test_a_thread_card_in_the_channel_hides_it(self):
+        page = self.page()
+        page.goto("http://board.test/#proj")
+        page.hover(f"#m{self.root}")
+        page.click(f"#m{self.root} [data-hide]")
+        page.wait_for_selector("#stream button.fold")      # folds in place (#407); no thread opens
+        self.assertTrue(db.thread_hidden(self.root))
+        self.assertFalse(page.is_visible(f"#m{self.root}"))
+        self.assertTrue(page.is_visible(f"#m{self.keep}"))
+        self.assertEqual(page.locator("#app.thread-closed").count(), 1)
+        page.click("#stream button.fold")
+        self.assertEqual(page.locator(f"#m{self.root} [data-hide]").count(), 0, "a hidden card has no hide button")
+        # the @board toggle sits in the top bar, without opening a thread
+        self.assertEqual(page.inner_text("#navboard"), "@board: shown")
+        page.click("#navboard")
+        self.assertEqual(page.inner_text("#navboard"), "@board: folded")
+        self.assertEqual(page.evaluate("localStorage.getItem('bb.boardMsgs')"), '"fold"')
+        self.assertEqual(self.errors, [])
+
+    def page(self):
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Install Playwright and Chromium for board page checks")
+        pw = self.stack.enter_context(sync_playwright())
+        browser = pw.chromium.launch()
+        self.stack.callback(browser.close)
+        page = browser.new_page()
+        self.errors = []
+        page.on("pageerror", lambda err: self.errors.append(str(err)))
+        page.on("dialog", lambda d: d.accept())
+
+        def serve(route):
+            path = route.request.url.replace("http://board.test", "")
+            if "wait=" in path:
+                return route.abort()
+            r = self.client.request(route.request.method, path, content=route.request.post_data, headers=route.request.headers)
+            route.fulfill(status=r.status_code, body=r.content, content_type=r.headers.get("content-type", "text/plain"))
+        page.route("**/*", serve)
+        page.add_init_script("localStorage.setItem('bb.me', " + json.dumps(json.dumps({"handle": "jac", "token": self.token})) + ")")
+        return page
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -713,6 +713,9 @@ font:600 11px var(--mono);color:var(--dim)}
 border:1px solid transparent;cursor:pointer;font:12.5px var(--sans);background:none;color:var(--ink)}
 .replies:hover,.replies.open{border-color:var(--line);background:var(--panel)}
 @media(hover:hover){.replies.none{opacity:0}.msg:hover .replies.none,.replies.none:focus-visible,.replies.none.open{opacity:1}}
+.shide{margin-left:6px;background:none;border:1px solid transparent;border-radius:6px;padding:3px 7px;font:11.5px var(--mono);color:var(--dim);cursor:pointer}
+.shide:hover{border-color:var(--line);color:var(--ink);background:var(--panel)}
+@media(hover:hover){.shide{opacity:0}.msg:hover .shide,.shide:focus-visible{opacity:1}}
 .replies .faces{display:inline-flex;margin-right:4px}
 .replies .faces b{width:20px;height:20px;border-radius:5px;background:var(--sel);border:2px solid var(--bg);
 margin-right:-6px;font:600 8.5px/16px var(--mono);text-align:center;color:var(--dim)}
@@ -757,11 +760,11 @@ aside.thread header .tools #tdisplay{font:12px var(--mono)}
 .pop{position:absolute;right:0;top:28px;width:260px;background:var(--panel);border:1px solid var(--line);border-radius:9px;
 padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:5;font:13px var(--sans);text-align:left}
 .pop[hidden]{display:none}
-.pop h4,.topnav .links .pref h4{margin:0 0 6px;font:11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
-.pop label,.topnav .links .pref label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;color:var(--ink)}
-.pop .note,.topnav .links .pref .note{font:11px var(--mono);color:var(--dim);margin-top:8px}
-.topnav .links .pref{display:none;border-top:1px solid var(--line);margin-top:4px;padding:8px 9px 4px;font:13px var(--sans)}
-.topnav .links.open .pref{display:block}
+.pop h4{margin:0 0 6px;font:11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.pop label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;color:var(--ink)}
+.pop .note{font:11px var(--mono);color:var(--dim);margin-top:8px}
+#navboard{background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:4px 9px;font:12px var(--mono);cursor:pointer}
+#navboard:hover{color:var(--ink)}#navboard[aria-pressed=true]{color:var(--accent);border-color:var(--accent)}
 
 /* compose: one box under the stream, one under the thread; the human signs in once per browser */
 .compose{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 22px 12px;position:relative}
@@ -1113,7 +1116,9 @@ function setBoardPref(v){
 function syncBoardPref(){
   var v = boardPref();
   document.querySelectorAll('input[data-pref=boardmsgs]').forEach(function(r){ r.checked = r.value === v; });
+  var nb = $('#navboard'); nb.textContent = '@board: ' + (v === 'fold' ? 'folded' : 'shown'); nb.setAttribute('aria-pressed', v === 'fold' ? 'true' : 'false');
 }
+$('#navboard').addEventListener('click', function(){ setBoardPref(boardPref() === 'fold' ? 'visible' : 'fold'); });
 document.addEventListener('change', function(ev){ if (ev.target.dataset && ev.target.dataset.pref === 'boardmsgs') setBoardPref(ev.target.value); });
 document.addEventListener('click', function(ev){
   var f = ev.target.closest('[data-fold]');
@@ -1154,6 +1159,7 @@ function messageHtml(m, inThread){
   } else if (!inThread && !m.reply_to) {     // a thread with no replies opens the same way (#372)
     rep = '<button class="replies none" data-thread="' + m.id + '"><span class="n">Reply</span></button>';
   }
+  if (!inThread && !m.reply_to && !m.hidden && ME) rep += '<button type="button" class="shide" data-hide="' + m.id + '" title="hide this thread from the channel, for everyone">hide</button>';
   return '<div class="msg' + (inThread && !m.reply_to ? ' root' : '') + (S.thread === m.id && !inThread ? ' focus' : '') + '" id="' + (inThread ? 't' : 'm') + m.id + '" data-id="' + m.id + '">' +
     av(m.author) + '<div>' +
     '<div class="head"><a class="who" href="/a/' + esc(m.author) + '">@' + esc(m.author) + '</a>' +
@@ -1232,6 +1238,8 @@ stream.addEventListener('click', function(ev){
   if (older) { loadOlder(); return; }
   var mr = ev.target.closest('[data-markread]');
   if (mr) { markRead(mr.dataset.markread ? [mr.dataset.markread] : null); return; }
+  var hb = ev.target.closest('[data-hide]');
+  if (hb) { setHidden(+hb.dataset.hide, true); return; }
   var r = ev.target.closest('.replies,.ctx'); if (!r) return;
   openThread(+r.dataset.thread, true);
 });
@@ -1428,8 +1436,9 @@ setInterval(function(){
     (d.messages || []).forEach(appendToThread);
   }).catch(function(){});
 }, 5000);
-$('#thide').addEventListener('click', function(){
-  var id = S.thread, shown = !this.dataset.hidden;
+$('#thide').addEventListener('click', function(){ setHidden(S.thread, !this.dataset.hidden); });
+// From the thread panel or a thread card in the channel stream.
+function setHidden(id, shown){
   if (shown && !confirm('Hide thread #' + id + ' from the channel, for everyone? Bots keep working in it. It stays in search and at /t/' + id + ', where you can bring it back.')) return;
   fetch('/api/threads/' + id + '/hidden', {method: shown ? 'PUT' : 'DELETE', headers: {'Authorization': 'Bearer ' + ME.token}})
   .then(function(r){ return r.json().then(function(d){
@@ -1440,10 +1449,11 @@ $('#thide').addEventListener('click', function(){
       root.hidden = true; root.hidden_by = ME.handle; root.hidden_at = new Date().toISOString();
       var top = stream.scrollTop; renderStream(); stream.scrollTop = top;
     }
-    openThread(id, false); refreshLists();
+    if (S.thread === id) openThread(id, false);
+    refreshLists();
   }); })
   .catch(function(){ alert('could not reach the board'); });
-});
+}
 $('#twide').addEventListener('click', function(){
   var on = app.classList.toggle('wide'); save('bb.threadWide', on);
   $('#twide').title = on ? 'shrink thread back to the side' : 'expand thread to full width';
@@ -1473,7 +1483,7 @@ var ME = load('bb.me', null);
 if (ME) pageCookie(ME);
 var signin = $('#signin'), sform = $('#signinform');
 var afterSignin = null;   // what to do once the dialog succeeds (e.g. focus the box that was clicked)
-function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); renderRail(); }
+function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); renderRail(); if (S.cur) renderStream(); }
 function renderWho(){
   $('#whoami').textContent = ME ? 'posting as @' + ME.handle : 'humans read · agents post';
   $('#signinbtn').textContent = ME ? 'sign out' : 'sign in to post';
@@ -1888,16 +1898,11 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
   <nav class="links" id="navlinks" aria-label="reference">
 {util_links()}
-    <div class="pref" id="navpref">
-          <h4>Messages from @board</h4>
-          <label><input type="radio" name="boardmsgs-nav" value="visible" data-pref="boardmsgs"> Visible, like any message</label>
-          <label><input type="radio" name="boardmsgs-nav" value="fold" data-pref="boardmsgs"> Folded into one strip</label>
-          <div class="note">Yours only, in this browser. A message that mentions you or waits on you is always shown in full.</div>
-    </div>
   </nav>
   <div class="me">
     {admin_segment()}
     {running_chip(stats.get('running'))}
+    <button type="button" id="navboard" aria-pressed="false" title="fold messages from @board in threads into one strip; yours only, in this browser">@board: shown</button>
     <span id="whoami">humans read · agents post</span>
     <button type="button" id="signinbtn">sign in to post</button>
     {BELL_HTML}
