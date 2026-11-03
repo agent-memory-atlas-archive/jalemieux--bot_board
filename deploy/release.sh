@@ -6,9 +6,11 @@
 # to Forgejo's registry (and to ghcr.io). This script runs on the box that serves
 # the board. It never builds; it pulls.
 #
-#   release.sh --auto           what the timer runs: if the newest release tag on
-#                               Forgejo is not what is live, pull its image and
-#                               deploy it; exits 0 quietly when there is nothing to do
+#   release.sh --auto           what the timer runs: pull the newest release tag on
+#                               Forgejo that has an image, if it is newer than what
+#                               is live, and deploy it; a tag with no image (still
+#                               building, or its run cancelled) is passed over; exits
+#                               0 quietly when there is nothing to do
 #   release.sh                  same, but says so when there is nothing to do
 #   release.sh deploy v1.3.2    run that release (rollback, or forward); pulls
 #                               the image if it is not on this box
@@ -38,6 +40,7 @@ REPO_URL="${BOT_BOARD_REPO_URL:-http://minipc-2.taild87368.ts.net:3000/jac/bot_b
 BOARD_URL="${BOT_BOARD_URL:-http://127.0.0.1:8080}"
 TOKEN_FILE="${BOT_BOARD_RELEASE_TOKEN_FILE:-$HOME/.bot_board-release}"
 KEEP_IMAGES="${BOT_BOARD_KEEP_RELEASES:-5}"
+SEARCH_RELEASES="${BOT_BOARD_SEARCH_RELEASES:-5}"   # tags tried, newest first, for one with an image (#430)
 
 log() { printf '%s release: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -68,9 +71,9 @@ sync_checkout() {  # keep this checkout (and so this script) current with main; 
     || log "origin/main is ahead but the working tree blocks the fast-forward; commit or stash local edits"
 }
 
-newest_release() {  # the newest vX.Y.Z tag on Forgejo, or nothing
+release_tags() {  # the vX.Y.Z tags on Forgejo, newest first, at most $SEARCH_RELEASES
   git ls-remote --tags "$REPO_URL" 2>/dev/null \
-    | sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' | sort -V | tail -1
+    | sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' | sort -rV | head -n "$SEARCH_RELEASES"
 }
 
 healthz_version() {  # healthz_version <url> -> prints version or nothing
@@ -190,19 +193,26 @@ fi
 
 # ------------------------------------------------------------------- auto
 [ $auto = 1 ] && sync_checkout
-newest="$(newest_release)"
-if [ -z "$newest" ]; then
+tags="$(release_tags)"
+if [ -z "$tags" ]; then
   [ $auto = 1 ] && exit 0
   die "no release tag found at $REPO_URL"
 fi
 live="$(healthz_version "$BOARD_URL")"
-if [ "$newest" = "$live" ]; then
-  [ $auto = 1 ] || log "$live is the newest release and is live; nothing to do"
+# The newest tag with an image, newer than what is live (#430). A tag can have none:
+# the workflow pushes it a minute or two before it publishes, and a run that Forgejo
+# cancels leaves it with none for good. So a pull that fails is not an error: the
+# next tag down is tried, and the next timer run tries the newer one again.
+newest=""
+for tag in $tags; do
+  # never below what is live: a manual deploy may have rolled it forward of a missing tag
+  [ -n "$live" ] && [ "$(printf '%s\n' "$tag" "$live" | sort -V | tail -1)" = "$live" ] && break
+  if pull_image "$tag"; then newest=$tag; break; fi
+done
+if [ -z "$newest" ]; then
+  [ $auto = 1 ] || log "${live:-nothing} is live; no newer release has an image yet"
   exit 0
 fi
-# Not an error when the pull fails: the workflow publishes the image a minute or two
-# after it pushes the tag, and the next timer run tries again.
-pull_image "$newest" || exit 0
 commit="$(image_env "$IMAGE:$newest" BOT_BOARD_COMMIT)"
 log "release $newest (replacing ${live:-nothing}), commit ${commit:0:12}"
 if deploy "$newest"; then
