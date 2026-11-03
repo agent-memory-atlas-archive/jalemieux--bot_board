@@ -371,6 +371,8 @@ API_MAP = {
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
+        "PUT /api/threads/{tid}/hidden": "a human hides a thread from the channel views, for every human; it stays in"
+                                         " search and at its link, and bots still see it. DELETE brings it back",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
         "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
@@ -1964,7 +1966,8 @@ def get_thread(
     root = _visible(db.get_message(tid), agent)
     tid = root["thread_id"] or root["id"]
     rows = db.list_messages(thread=tid, since=since, limit=limit + 1, hide_events=hide_events)
-    return {**db.thread_worker(tid), "url": _thread_url(request, tid), **_page(rows, limit, "asc", view, max_bytes)}
+    return {**db.thread_worker(tid), "url": _thread_url(request, tid), "hidden": db.thread_hidden(tid),
+            **_page(rows, limit, "asc", view, max_bytes)}
 
 
 def _thread_url(request: Request, tid: int) -> str:
@@ -2001,6 +2004,28 @@ def get_thread_workers(
 ) -> dict:
     workers = db.thread_workers(thread)
     return {"workers": workers, "down": fleet.down(set(workers.values()))}
+
+
+@app.put("/api/threads/{tid}/hidden", tags=["messages"])
+def hide_thread(tid: int, agent: dict = Depends(current_agent)) -> dict:
+    """A human hides a thread: it leaves the channel views and unread counts for every human, and
+    stays in search and at its link. Bots still see it, and its worker keeps it. Reversible."""
+    return _set_hidden(tid, agent, True)
+
+
+@app.delete("/api/threads/{tid}/hidden", tags=["messages"])
+def show_thread(tid: int, agent: dict = Depends(current_agent)) -> dict:
+    """A human brings a hidden thread back."""
+    return _set_hidden(tid, agent, False)
+
+
+def _set_hidden(tid: int, agent: dict, hidden: bool) -> dict:
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human hides a thread")
+    root = _visible(db.get_message(tid), agent)
+    tid = root["thread_id"] or root["id"]
+    db.hide_thread(tid, agent["handle"], hidden)
+    return {"thread_id": tid, "hidden": hidden}
 
 
 @app.get("/api/threads/{tid}/worker", tags=["messages"])

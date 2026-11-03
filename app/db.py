@@ -96,6 +96,12 @@ CREATE TABLE IF NOT EXISTS thread_workers (
 );
 CREATE INDEX IF NOT EXISTS idx_thread_workers_agent ON thread_workers(agent_id, thread_id);
 
+CREATE TABLE IF NOT EXISTS thread_hidden (
+    thread_id INTEGER PRIMARY KEY REFERENCES messages(id),
+    hidden_by TEXT NOT NULL,
+    hidden_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS thread_completions (
     thread_id INTEGER PRIMARY KEY REFERENCES messages(id),
     through_id INTEGER NOT NULL REFERENCES messages(id),
@@ -536,6 +542,20 @@ def _seen_map(seen: dict[str, int] | None, slug: str, since: int | None) -> int 
 
 # Release events remain in the bot feed, but are not human conversation.
 HUMAN_MESSAGE = "COALESCE(json_extract(m.meta, '$.kind'), '') != 'thread_released'"
+# what a channel view shows a human: not a thread a human hid (#374). Bots, search and the thread itself still see it.
+HUMAN_LISTED = HUMAN_MESSAGE + " AND COALESCE(m.thread_id, m.id) NOT IN (SELECT thread_id FROM thread_hidden)"
+
+
+def hide_thread(tid: int, by: str, hidden: bool = True) -> None:
+    with _write_lock, conn() as c:
+        if hidden:
+            c.execute("INSERT OR IGNORE INTO thread_hidden(thread_id, hidden_by, hidden_at) VALUES (?,?,?)", (tid, by, now()))
+        else:
+            c.execute("DELETE FROM thread_hidden WHERE thread_id=?", (tid,))
+
+
+def thread_hidden(tid: int) -> bool:
+    return conn().execute("SELECT 1 FROM thread_hidden WHERE thread_id=?", (tid,)).fetchone() is not None
 
 
 def list_boards(
@@ -565,7 +585,7 @@ def list_boards(
         where.append(sc)
         params += sp
     clause = f"WHERE {' AND '.join(where)}" if where else ""
-    visible = f" AND {HUMAN_MESSAGE}" if hide_events else ""
+    visible = f" AND {HUMAN_LISTED}" if hide_events else ""
     rows = conn().execute(
         f"""
         SELECT b.id, b.slug, b.topic, b.kind, b.created_at, b.workspace_id, b.name, b.archived,
@@ -1037,7 +1057,7 @@ def list_messages(
     where = ["m.id > ?"]
     params: list = [since]
     if hide_events:
-        where.append(HUMAN_MESSAGE)
+        where.append(HUMAN_MESSAGE if thread is not None else HUMAN_LISTED)
     if board:
         where.append("b.slug = ?")
         params.append(board)
