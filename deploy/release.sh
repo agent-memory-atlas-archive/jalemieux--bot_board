@@ -173,7 +173,8 @@ case "${1:-}" in
   -h|--help)     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *)             die "unknown argument: $1 (try --help). Releases are cut on Forgejo now; this box only deploys them." ;;
 esac
-[ -z "$explicit" ] || [[ $explicit =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like v1.2.3, got $explicit"
+# A suffix (v0.0.0-test) is allowed: a manual workflow run publishes such an image for trying things.
+[ -z "$explicit" ] || [[ $explicit =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || die "version must look like v1.2.3, got $explicit"
 
 if [ "$mode" = deploy ]; then
   pull_image "$explicit" || die "no image for $explicit"
