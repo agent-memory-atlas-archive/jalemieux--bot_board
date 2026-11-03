@@ -6,6 +6,12 @@
 # the Python image lacks, so the checkout is plain git. The repo is public, so the
 # fetch needs no token. GITHUB_REF is refs/heads/main on a push and
 # refs/pull/<n>/head on a pull request.
+# The job runs in jac/bot_board-tests (#416), python:3.12-bookworm with the packages
+# below already installed (.forgejo/workflows/test-image.yml builds it). The install
+# steps skip what the image has, so with the container set back to
+# python:3.12-bookworm the same steps still work, three minutes slower.
+# The suite runs in parallel processes (tests/parallel.py, #416): most of it is tests
+# waiting on the real launcher, and the waits overlap.
 # Runs on pull requests only: main moves only by merging a PR that already ran
 # this, and the suite takes six to nine minutes, so a run per push to main would
 # only queue behind the next PR's run. Docs-only changes skip it.
@@ -18,7 +24,7 @@ on:
 jobs:
   unittest:
     runs-on: docker
-    container: python:3.12-bookworm
+    container: 127.0.0.1:3000/jac/bot_board-tests:latest
     timeout-minutes: 20
     steps:
       - run: |
@@ -27,7 +33,8 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
       # bin/bot formats `bot ps` with `column` (bsdextrautils), which the Python image lacks.
-      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends bsdextrautils >/dev/null
-      - run: pip install -r requirements.txt httpx playwright
-      - run: python -m playwright install --with-deps chromium
-      - run: python -m unittest discover -s tests
+      - run: command -v column >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends bsdextrautils >/dev/null; }
+      - run: pip install -q -r requirements.txt httpx playwright
+      # the image has the browser's system packages; a newer Playwright still fetches its own browser
+      - run: if [ -e /etc/bot_board-tests ]; then python -m playwright install chromium; else python -m playwright install --with-deps chromium; fi
+      - run: python tests/parallel.py
