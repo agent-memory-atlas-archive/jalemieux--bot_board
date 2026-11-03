@@ -547,13 +547,36 @@ NO_PROFILE = ("You have no profile. The guide you just read is all there is: wor
               "given, in your workspace, as it says.\n")
 
 
+# What every bot reads when a human has not given it a voice or a personality of its own (#381,
+# jac). A text set on /fleet replaces the default for that field only; clearing it brings the
+# default back. The voice is jac's rule for prose; the personality is professional.
+DEFAULT_VOICE = ("Write so a sentence resolves left to right with nothing left open. One idea per sentence."
+                 " Put a modifier next to the thing it modifies; never let one dangle until a later noun. When a"
+                 " sentence announces a list, the list follows at once. Keep code references (function names,"
+                 " file paths, flags) out of prose sentences: give them their own short sentence, or put them"
+                 " after the prose. Prefer two plain sentences over one sentence with a subordinate clause.")
+DEFAULT_PERSONALITY = ("Professional. You are courteous and direct, and you treat humans and other bots as"
+                       " colleagues. You answer what was asked, say what you did and what you did not do, and"
+                       " give a reason only when it changes what the reader does. No filler, no flattery, no"
+                       " jokes in work threads, no exclamation marks. When you disagree, say so plainly, once,"
+                       " with your reason, and then follow the decision.")
+
+
 def voice_of(handle: str) -> tuple[str, str]:
-    """A fleet bot's voice and personality (#348), empty when it has none or is hand-run."""
+    """A fleet bot's own voice and personality (#348), as a human set them: empty when it has
+    none or is hand-run. effective_voice fills the empty ones with the fleet default."""
     try:
         row = db.conn().execute("SELECT voice, personality FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
     except db.sqlite3.OperationalError:
         return "", ""
     return (row["voice"] or "", row["personality"] or "") if row else ("", "")
+
+
+def effective_voice(handle: str) -> tuple[str, str, bool, bool]:
+    """What the bot reads (#381): its own voice and personality, each replaced by the fleet
+    default when empty, and for each whether it is the default."""
+    voice, personality = voice_of(handle)
+    return voice or DEFAULT_VOICE, personality or DEFAULT_PERSONALITY, not voice, not personality
 
 
 def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
@@ -590,12 +613,12 @@ def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
         for key, title in (("responsibilities", "Responsibilities"), ("focus", "Focus"), ("avoid", "Avoid")):
             if profile.get(key):
                 lines += [f"### {title}", "", profile[key].strip(), ""]
-    voice, personality = voice_of(agent["handle"])
-    if voice:
-        lines += ["## Your voice", "", "How you write to people.", "", voice, ""]
-    if personality:
-        lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
-                  " always win, and it is never a reason to post more.", "", personality, ""]
+    voice, personality, voice_default, personality_default = effective_voice(agent["handle"])
+    default_note = " This is the fleet's default; a human can give you your own on /fleet."
+    lines += ["## Your voice", "", "How you write to people." + (default_note if voice_default else ""), "", voice, ""]
+    lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
+              " always win, and it is never a reason to post more." + (default_note if personality_default else ""),
+              "", personality, ""]
     skills = resolve(profile)
     if skills:
         lines += ["## Your skills", "",

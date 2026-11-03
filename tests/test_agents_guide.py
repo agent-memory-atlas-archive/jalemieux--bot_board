@@ -1,5 +1,6 @@
 """One agent guide covers collaboration and protocol."""
 import hashlib
+import html
 import os
 import sys
 import tempfile
@@ -135,13 +136,49 @@ class AgentGuide(unittest.TestCase):
         changed = self.client.get("/agents.md", headers=jane)
         self.assertNotEqual(changed.headers["X-Agents-Revision"], guide.headers["X-Agents-Revision"], "an edit reaches the bot")
         self.assertIn("Warm.", changed.text)
-        self.assertNotIn("## Your personality", changed.text)
+        # the personality, cleared, is the fleet default again (#381); the voice set by hand is not
+        self.assertIn(registry.DEFAULT_PERSONALITY, changed.text.split("## Your personality")[1])
+        self.assertNotIn(registry.DEFAULT_VOICE, changed.text)
         self.assertEqual((row()["voice"], row()["personality"]), ("Warm.", ""))
 
-        self.assertIn("Warm.", self.client.get("/a/jane").text)
+        page = self.client.get("/a/jane").text
+        self.assertIn("Warm.", page)
+        self.assertIn("<h2>Personality <small>(fleet default)</small></h2>", page)
+        self.assertNotIn("<h2>Voice <small>(fleet default)</small></h2>", page)
         self.client.put(url, headers=human, json={"voice": "", "personality": ""}).raise_for_status()
-        self.assertNotIn("<h2>Voice</h2>", self.client.get("/a/jane").text)
-        self.assertNotIn("## Your voice", self.client.get("/agents.md", headers=jane).text)
+        self.assertIn("<h2>Voice <small>(fleet default)</small></h2>", self.client.get("/a/jane").text)
+        self.assertIn("How you write to people. This is the fleet's default", self.client.get("/agents.md", headers=jane).text)
+
+    def test_a_bot_with_no_voice_of_its_own_reads_the_fleet_default(self):
+        # #381: every bot starts from the default, a hand-run one with no fleet row too; a human's
+        # own text replaces the default for that field only
+        human = self.register("op", "human")
+        self.client.post("/api/workspaces", headers=human, json={"slug": "proj", "name": "Proj"}).raise_for_status()
+        guide = self.client.get("/agents.md", headers=self.register("solo", "claude-code", "proj")).text
+        self.assertIn("## Your voice\n\nHow you write to people. This is the fleet's default; a human can give you"
+                      " your own on /fleet.\n\n" + registry.DEFAULT_VOICE + "\n", guide)
+        self.assertIn("## Your personality\n\nWho you are, in expression only: task rules, ownership and accuracy"
+                      " always win, and it is never a reason to post more. This is the fleet's default; a human can"
+                      " give you your own on /fleet.\n\n" + registry.DEFAULT_PERSONALITY + "\n", guide)
+        self.assertIn("Professional.", registry.DEFAULT_PERSONALITY)
+        page = self.client.get("/a/solo").text
+        self.assertIn("<h2>Voice <small>(fleet default)</small></h2>", page)
+        self.assertIn(html.escape(registry.DEFAULT_VOICE), page)
+
+        keeper = self.register("keeper-box", "keeper")
+        self.client.put("/api/fleet/hosts/box", headers=keeper, json={"bots": []}).raise_for_status()
+        self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": True, "harness": "claude", "workspace": "proj",
+                                                                      "voice": "Terse."}).raise_for_status()
+        guide = self.client.get("/agents.md", headers=self.register("jane", "claude-code", "proj")).text
+        self.assertIn("## Your voice\n\nHow you write to people.\n\nTerse.\n", guide)
+        self.assertNotIn(registry.DEFAULT_VOICE, guide)
+        self.assertIn(registry.DEFAULT_PERSONALITY, guide)
+        # the fleet report carries what the human set, so the page knows what is the default
+        bot = [b for h in self.client.get("/api/fleet", headers=human).json()["hosts"] for b in h["bots"] if b["handle"] == "jane"][0]
+        self.assertEqual((bot["voice"], bot["personality"]), ("Terse.", ""))
+        fleet = self.client.get("/fleet").text
+        self.assertIn("fleet default, until set:</span> " + html.escape(registry.DEFAULT_PERSONALITY), fleet)
+        self.assertNotIn("fleet default, until set:</span> " + html.escape(registry.DEFAULT_VOICE), fleet)
 
     def test_a_bot_added_without_naming_it_can_have_a_voice(self):
         human = self.register("op", "human")
