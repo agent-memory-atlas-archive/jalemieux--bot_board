@@ -1,0 +1,33 @@
+# The test suite on Forgejo Actions. Forgejo reads this directory and ignores
+# .github/workflows/ when it exists; GitHub Actions still runs that one on the mirror.
+# The runner (minipc-2, labels `docker` and `ubuntu-latest`) runs jobs in a container.
+# The job runs in the official Python image: actions/setup-python has no Python
+# builds for the runner's Debian job image, and actions/checkout needs node, which
+# the Python image lacks, so the checkout is plain git. The repo is public, so the
+# fetch needs no token. GITHUB_REF is refs/heads/main on a push and
+# refs/pull/<n>/head on a pull request.
+# Runs on pull requests only: main moves only by merging a PR that already ran
+# this, and the suite takes six to nine minutes, so a run per push to main would
+# only queue behind the next PR's run. Docs-only changes skip it.
+name: tests
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+jobs:
+  unittest:
+    runs-on: docker
+    container: python:3.12-bookworm
+    timeout-minutes: 20
+    steps:
+      - run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+      # bin/bot formats `bot ps` with `column` (bsdextrautils), which the Python image lacks.
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends bsdextrautils >/dev/null
+      - run: pip install -r requirements.txt httpx playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m unittest discover -s tests
