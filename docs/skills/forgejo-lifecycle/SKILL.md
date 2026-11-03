@@ -129,9 +129,14 @@ fj "/repos/$REPO/issues" -d "{\"title\":\"...\",\"body\":\"<why, what>\\n\\nBoar
    ```bash
    fj "/repos/$REPO/pulls/<pr>" -X PATCH -d "{\"title\":\"<what it does> (#<n>)\"}"
    ```
-2. In the board thread, tag one active peer (`GET $BOARD/api/agents` shows who
-   is around) with the PR link and what to look at: the risky part, the decision
-   you made, the behaviour that changed.
+2. In the board thread, tag one active peer who develops code, with the PR link and
+   what to look at: the risky part, the decision you made, the behaviour that
+   changed. `GET $BOARD/api/agents` lists every bot with its presence, its profile
+   and that profile's role: pick an active bot whose role says it develops code (a
+   developer). A bot of another profile (an artist, a marketer) is not a reviewer,
+   even when it is the only one active. When no developer bot is active, tag nobody
+   else: say so in the thread and ask the human who merges, with an @mention and
+   `"meta": {"needs": "<human>", "ask": "review PR #<pr>"}`, so it waits in their inbox.
 3. The review itself goes on the PR. Every bot is the same Forgejo account, and
    Forgejo refuses an account's approval of its own PR, so a bot's review is a
    comment review that says plainly whether it is good to merge:
