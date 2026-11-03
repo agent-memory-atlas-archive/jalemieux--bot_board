@@ -80,6 +80,11 @@ class RegistryPages(unittest.TestCase):
         self.assertIn("closest('button.act[data-handle][data-run]')", page)
 
     def test_fleet_page_keeps_each_section_on_its_tab(self):
+        # the seeds name no forge (#394): mark one lifecycle skill mandatory on the developer profile for the star
+        p = self.client.get("/api/profiles/developer").json()["profile"]
+        self.client.put("/api/profiles/developer", headers=self.human, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": 1,
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
         page = self.client.get("/fleet").text
         self.balanced(page)
         for first, then in (("tab-bots", "fleet-bots"), ("fleet-bots", "tab-machines"), ("tab-machines", "fleet-machines"),
@@ -126,7 +131,11 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('<select name="profile"', page)
         self.assertIn('<option value="">none</option>', page)
         self.assertIn('<option value="developer">developer · A software developer', page)
-        self.assertIn("keeps its role for life", page)
+        self.assertIn("Its role, voice and personality can be changed later from its row.", page)
+        # and offers to move it to another profile (#395)
+        self.assertIn('class="act role-edit needs-me" data-handle="jane"', page)
+        self.assertIn('<datalist id="profiles-data"><option value="', page)
+        self.assertIn('<option value="developer"></option>', page)
         self.assertIn("f.elements.profile.value", page)
 
     def test_skill_page_edits_previews_and_lists_history_and_users(self):
@@ -180,7 +189,7 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('<textarea name="responsibilities"', page)
         self.assertIn("Skills · 2", page)      # github-lifecycle and forgejo-lifecycle
         self.assertIn('name="skill" value="github-lifecycle" aria-label="include github-lifecycle" checked>', page)
-        self.assertIn('name="mandatory" value="github-lifecycle" aria-label="github-lifecycle mandatory" checked>', page)
+        self.assertIn('name="mandatory" value="github-lifecycle" aria-label="github-lifecycle mandatory"> read', page)   # neither is mandatory on the seed (#394)
         self.assertIn('name="skill" value="release-notes" aria-label="include release-notes">', page)
         self.assertIn('name="reason" required', page)
         self.assertIn("Save as rev 2", page)

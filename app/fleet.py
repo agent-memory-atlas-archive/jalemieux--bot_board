@@ -96,7 +96,7 @@ def init() -> None:
         if "project" in have and "workspace" not in have:
             c.execute("ALTER TABLE fleet_bots RENAME COLUMN project TO workspace")
             have.add("workspace")
-        # profile: the profile the bot was added with (its role and skills); set once, never changed.
+        # profile: the profile the bot has (its role and skills); a human may give it another (#395).
         # channels: the channels of its workspace it claims new threads in (JSON list); empty: any.
         # voice, personality: how it writes to people and who it is, set by a human (#348).
         for col in EXTRA_COLUMNS + ("workspace", "profile", "channels", "voice", "personality"):
@@ -327,8 +327,9 @@ def want(handle: str, host: str, run: bool, harness: str | None, by: str, kill: 
     harness run it is in. workspace: the workspace a new bot belongs to; the keeper
     starts it with that, and a registered bot of no workspace is put in it. threads,
     with a stop: keep its open threads, handoff (release them once it has stopped) or
-    retire (hand off, and drop it from the stopped list). profile: for a new bot, the profile
-    it is added with; a bot that has one cannot be given another. channels: the channels of its
+    retire (hand off, and drop it from the stopped list). profile: the profile it is added
+    with, or another one for a bot that has one (#395): it keeps its handle, token, box,
+    channels and voice, and its next prompt carries the new guide and skills. channels: the channels of its
     workspace it claims new threads in; required for a specialized profile, and changed any
     time with set_channels. voice, personality: how it writes and who it is, changed any time
     with set_voice; None leaves them as they are. Returns None, or why not."""
@@ -374,7 +375,7 @@ def want(handle: str, host: str, run: bool, harness: str | None, by: str, kill: 
             return f"say which workspace {handle} belongs to"
         if profile:
             from . import registry
-            why = registry.profile_problem(handle, profile, row["profile"] if row else None)
+            why = registry.profile_problem(profile)
             if why:
                 return why
         ws_slug = workspace or (row["workspace"] if row else None) or db.workspace_slug((known or {}).get("workspace_id"))
@@ -408,6 +409,29 @@ def set_channels(handle: str, channels: list[str]) -> str | None:
         return why
     with db._write_lock:
         c.execute("UPDATE fleet_bots SET channels=? WHERE handle=?", (json.dumps(channels), handle))
+        c.commit()
+    return None
+
+
+def set_profile(handle: str, profile: str) -> str | None:
+    """Move a fleet bot to another profile (#395), leaving the rest of what was asked for it
+    (a move, a stop and its threads, a kill) as it is. Its channels are checked against the new
+    profile. The new guide and skills reach it at its next prompt. Returns None, or why not."""
+    from . import registry
+    c = db.conn()
+    row = c.execute("SELECT workspace, channels, run FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
+    if row is None:
+        return f"{handle} is not a fleet bot"
+    why = registry.profile_problem(profile)
+    if why:
+        return why
+    known = db.get_agent_by_handle(handle)
+    ws_slug = row["workspace"] or db.workspace_slug((known or {}).get("workspace_id"))
+    why = _channels_problem(ws_slug, profile, None, row["channels"], bool(row["run"]))
+    if why:
+        return why
+    with db._write_lock:
+        c.execute("UPDATE fleet_bots SET profile=? WHERE handle=?", (profile, handle))
         c.commit()
     return None
 

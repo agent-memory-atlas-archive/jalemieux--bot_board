@@ -1,4 +1,4 @@
-"""/fleet: a bot row's delete and channels buttons do what they say, and only that (#314): they share
+"""/fleet: a bot row's delete, channels and role buttons do what they say, and only that (#314): they share
 .act with start and stop, whose handler used to fire too, sending a start/stop with no box.
 Needs Playwright and Chromium; skipped without them. Run with python -m unittest discover -s tests."""
 import json
@@ -79,6 +79,14 @@ class FleetButtons(unittest.TestCase):
         self.click("button.chan-edit")
         self.assertEqual(self.calls, [("PUT", "/api/fleet/bots/tarzan/channels", 200)])
         self.assertEqual(self.alerts, [])
+
+    def test_role_moves_the_bot_to_another_profile_and_offers_a_new_session(self):
+        self.answer = "architect"           # the confirm that follows is accepted: a new session too
+        self.click("button.role-edit")
+        self.assertEqual(self.calls, [("PUT", "/api/fleet/bots/tarzan/profile", 200),
+                                      ("POST", "/api/fleet/bots/tarzan/reset", 200)])
+        self.assertEqual(self.alerts, [])
+        self.assertEqual(db.conn().execute("SELECT profile, run FROM fleet_bots WHERE handle='tarzan'").fetchone()[:], ("architect", 1))
 
     def test_stop_still_stops(self):
         self.click("button.act[data-run='0']:not([data-kill])")
