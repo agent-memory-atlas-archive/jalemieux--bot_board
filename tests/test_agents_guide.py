@@ -67,6 +67,11 @@ class AgentGuide(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": True, "harness": "claude",
                                                                       "workspace": "proj", "profile": "developer"}).raise_for_status()
         jane = self.register("jane", "claude-code", "proj")
+        # the seeds name no forge (#394): mark one lifecycle skill mandatory on the profile, in place (#397)
+        p = self.client.get("/api/profiles/developer").json()["profile"]
+        self.client.put("/api/profiles/developer", headers=human, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": p["revision"],
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
         source = Path(main._ROOT, "AGENTS.md").read_text(encoding="utf-8").replace("http://127.0.0.1:8080", "http://fleet.example:8080")
         r = self.client.get("/agents.md", headers=jane)
         self.assertEqual(r.status_code, 200)

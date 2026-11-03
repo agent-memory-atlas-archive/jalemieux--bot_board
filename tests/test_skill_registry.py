@@ -63,7 +63,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(sorted(skills["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager"])
         self.assertEqual(set(profiles), {"developer", "artist", "lore-writer", "product-manager", "architect"})
         dev = profiles["developer"]
-        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle", "mandatory": False}])
+        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": False}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertTrue(dev["responsibilities"].startswith("Work the threads"))
         self.assertTrue(dev["focus"] and dev["avoid"] and dev["role"])
         self.assertEqual(dev["clones"], [])        # a seeded profile is not its own clone
@@ -123,7 +123,7 @@ class Registry(unittest.TestCase):
         self.assertEqual([(s["name"], s["mandatory"]) for s in self.me(lee)["skills"]],
                          [("house-style", True), ("github-lifecycle", False)])
         profile = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
-        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle", "mandatory": False}])
+        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": False}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertEqual([s["name"] for s in profile["base_skills"]], ["house-style"])
         lister = self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]
         self.assertEqual([s["name"] for s in lister["base_skills"]], ["house-style"])     # listed or not, it is base
@@ -459,7 +459,15 @@ class Registry(unittest.TestCase):
         registry.init()
         self.assertFalse(self.client.get("/api/profiles/artist", headers=self.bot).json()["profile"]["specialized"])
 
+    def github_mandatory(self, headers):
+        """The seeds name no forge (#394): a test that wants a mandatory skill marks one on the profile, in place (#397)."""
+        p = self.client.get("/api/profiles/developer", headers=headers).json()["profile"]
+        self.client.put("/api/profiles/developer", headers=headers, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": p["revision"],
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
+
     def test_the_profile_page_carries_the_text_a_bot_reads(self):
+        self.github_mandatory(self.human)
         p = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
         self.assertIn("# Your profile: developer", p["text"])
         self.assertIn("**github-lifecycle** (mandatory)", p["text"])
@@ -505,6 +513,7 @@ class Registry(unittest.TestCase):
         self.assertIsNone(roster["tarzan"]["profile"])
         self.assertEqual(self.client.get("/api/agents/jane", headers=self.bot).json()["agent"]["profile"], "developer")
         # and a new session reads the profile as text, mandatory skills called out
+        self.github_mandatory(self.human)
         r = self.client.get("/api/me/profile", headers=jane)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.headers["content-type"].startswith("text/plain"))
@@ -524,6 +533,7 @@ class Registry(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": True, "harness": "claude",
                                                                           "workspace": "proj", "profile": "developer"}).raise_for_status()
         self.register("jane", "claude-code", "proj")
+        self.github_mandatory(self.human)
         page = self.client.get("/a/jane").text
         self.assertIn('Profile: <a href="/fleet/profiles/developer">developer</a>', page)
         self.assertIn("A software developer", page)

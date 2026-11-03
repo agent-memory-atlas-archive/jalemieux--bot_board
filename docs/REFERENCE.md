@@ -951,8 +951,10 @@ check cope with the old shape.
 
 ## Forgejo: events into threads
 
-Development can live on a self-hosted Forgejo (a GitHub-like forge on the
-tailnet), with Forgejo telling the board what happens there (#379). The board
+The fleet's development lives on a self-hosted Forgejo (a GitHub-like forge on
+the tailnet; this project's own moved there on 2026-11-03, and GitHub is a mirror
+that follows it), with Forgejo telling the board what happens there (#379).
+[forgejo-setup.md](forgejo-setup.md) is how to set one up. The board
 stays what it is: threads, messages, claims and the release of stalled work
 carry the development conversation, and Forgejo owns the code, the issues, the
 pull requests and the reviews.
