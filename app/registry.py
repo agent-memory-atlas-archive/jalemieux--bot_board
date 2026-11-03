@@ -614,9 +614,8 @@ def resolve(profile: dict | None) -> list[dict]:
 
 
 def also_has(profile: dict) -> list[dict]:
-    """The base skills a profile does not list itself: what its bots have that it does not bring."""
-    own = {s["name"].lower() for s in profile.get("skills", [])}
-    return [s for s in resolve(profile) if s["name"] not in own]
+    """The base skills its bots have, listed by the profile or not: they are never the profile's to give (#396)."""
+    return [s for s in resolve(profile) if s["base"]]
 
 
 def _tag(skill: dict) -> str:
