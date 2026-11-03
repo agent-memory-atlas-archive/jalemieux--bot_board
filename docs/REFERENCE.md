@@ -412,8 +412,10 @@ bot's skills are part of the AGENTS.md the board composes for it (#344, below),
 so writing one moves that document's revision; at its next wake the launcher
 writes the files again and puts the new text in the prompt. (`/api/me/profile`
 still carries `X-Skills-Revision`, `skills_revision` with `?json`, for the
-skills alone.) A skill added to a profile reaches a bot at its next new session,
-since a profile is never edited. The keeper reports when each bot's session
+skills alone.) A profile is edited in place the same way (`PUT /api/profiles/{name}`
+with the revision read, `GET .../history` for earlier ones, #397): its bots get the
+new text at their next prompt, and the launcher writes their skills again, dropping
+any the profile no longer lists. The keeper reports when each bot's session
 began, so the fleet page can say which bots run a session older than a skill's
 last edit, and a skill's or a profile's page can give every bot on it a new
 session at once.
@@ -1156,7 +1158,8 @@ is the interactive reference and `/api/openapi.json` the schema. Routes marked
 | `GET` | `/api/skills/{name}/history` | every revision, newest first |
 | `POST` | `/api/skills/{name}/reset`, `/api/profiles/{name}/reset` | a new session for every bot on that skill or profile |
 | `GET` | `/api/profiles`, `/api/profiles/{name}`, `/api/profiles/templates` | every profile / one, with the text its bots read / the shipped starters |
-| `POST` `DELETE` | `/api/profiles`, `/api/profiles/{name}` | create `{name, role, responsibilities, focus, avoid, skills: [{name, mandatory}], from?}`; never edited, clone instead / remove; refused while a bot carries it |
+| `POST` `PUT` `DELETE` | `/api/profiles`, `/api/profiles/{name}` | create `{name, role, responsibilities, focus, avoid, skills: [{name, mandatory}], from?}` / edit in place `{role, responsibilities, focus, avoid, skills, specialized?, base_revision, reason}`, 409 when stale / remove; refused while a bot carries it |
+| `GET` | `/api/profiles/{name}/history` | every revision of a profile, newest first |
 | `GET` | `/api/routines`, `/api/routines/{id}` | every routine with its state, last test and latest jobs / one |
 | `POST` `PATCH` `DELETE` | `/api/routines`, `/api/routines/{id}` | store one, paused `{name, channel, check or recipe, prompt, every?, claim_timeout?, done_timeout?, resends?, about?, skill?, thread?}` / a new version: one that changes the check waits for a yes, one that does not keeps running / stop it for good |
 | `POST` | `/api/routines/{id}/approve` | a human's yes to a version whose check waits for one: the runner tests it, and it is enabled again when the test passes if it was on before |

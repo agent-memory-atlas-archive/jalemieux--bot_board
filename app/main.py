@@ -411,7 +411,11 @@ API_MAP = {
         "GET /api/profiles/templates": "the shipped starters a new profile can begin from",
         "GET /api/profiles/{name}": "one profile, with the text a bot of it reads; base_skills: what its bots also have",
         "POST /api/profiles": "humans and admin bots create a profile {name, role, responsibilities, focus, avoid,"
-                              " skills: [{name, mandatory}], from?}; profiles are never edited: clone instead",
+                              " skills: [{name, mandatory}], from?}",
+        "PUT /api/profiles/{name}": "edit a profile in place {role, responsibilities, focus, avoid, skills, specialized?,"
+                                    " base_revision, reason}: humans and admin bots; 409 when base_revision is stale;"
+                                    " its bots get the new text at their next prompt, no new session",
+        "GET /api/profiles/{name}/history": "every revision of a profile, newest first",
         "DELETE /api/profiles/{name}": "remove a profile; refused while a bot carries it; the name stays taken",
         "GET /api/routines": "every routine (recurring work, run by bin/routines) with its state (paused, enabled,"
                              " failed), last test and latest jobs; GET /api/routines/{id} for one",
@@ -1227,6 +1231,18 @@ class ProfileIn(BaseModel):
         return data
 
 
+class ProfileUpdateIn(BaseModel):
+    role: str = Field(max_length=4000, description="One line: what this bot is.")
+    responsibilities: str = Field(default="", max_length=4000)
+    focus: str = Field(default="", max_length=4000)
+    avoid: str = Field(default="", max_length=4000)
+    skills: list[SkillRef] = Field(default_factory=list, max_length=50)
+    specialized: bool | None = Field(default=None, description="Left out: unchanged. Refused while a bot that carries"
+                                     " the profile is bound to no channel.")
+    base_revision: int = Field(ge=1, description="The revision you read.")
+    reason: str = Field(default="", max_length=500)
+
+
 def _registry_call(fn, *args):
     try:
         return fn(*args)
@@ -1321,6 +1337,12 @@ def profile_templates(_: dict | None = Depends(optional_agent)) -> dict:
     return {"templates": registry.templates()}
 
 
+@app.get("/api/profiles/{name}/history", tags=["profiles"])
+def profile_history(name: str, _: dict | None = Depends(optional_agent)) -> dict:
+    """Every revision of a profile, newest first: what it said, who changed it and why."""
+    return {"name": name.lower(), "revisions": _registry_call(registry.profile_history, name)}
+
+
 @app.get("/api/profiles/{name}", tags=["profiles"])
 def profile_get(name: str, request: Request, _: dict | None = Depends(optional_agent)) -> dict:
     profile = _registry_call(registry.get_profile, name)
@@ -1330,12 +1352,24 @@ def profile_get(name: str, request: Request, _: dict | None = Depends(optional_a
 
 @app.post("/api/profiles", tags=["profiles"], status_code=201)
 def profile_create(body: ProfileIn, agent: dict = Depends(current_agent)) -> dict:
-    """A new profile, from scratch, a template or an existing one. A profile is never
-    edited: to change one, create another from it and add new bots with that."""
+    """A new profile, from scratch, a template or an existing one. Clone is this with
+    `from`; to change a profile its bots carry, PUT it instead."""
     _registry_call(registry.require_writer, agent)
     data = body.model_dump()
     data["from"] = data.pop("origin")
     return {"profile": _registry_call(registry.create_profile, data, agent)}
+
+
+@app.put("/api/profiles/{name}", tags=["profiles"])
+def profile_put(name: str, body: ProfileUpdateIn, agent: dict = Depends(current_agent)) -> dict:
+    """Edit a profile in place (#397): humans and admin bots, with the revision they read;
+    409 when it is stale. Every bot that carries it reads the new text at its next prompt,
+    the way it reads a changed skill: the AGENTS.md composed for it moves, and the launcher
+    hands it over and writes the skills again, dropping any the list no longer names. No
+    new session; POST /api/profiles/{name}/reset is that, when a human wants one."""
+    _registry_call(registry.require_writer, agent)
+    data = body.model_dump()
+    return {"profile": _registry_call(registry.update_profile, name, data, body.base_revision, body.reason, agent)}
 
 
 @app.delete("/api/profiles/{name}", tags=["profiles"])
@@ -2328,7 +2362,8 @@ def page_profile_new(request: Request, _: dict | None = Depends(page_gate)) -> s
 
 @app.get("/fleet/profiles/{name}", response_class=HTMLResponse, include_in_schema=False)
 def page_profile(name: str, request: Request, _: dict | None = Depends(page_gate)) -> HTMLResponse:
-    """A profile's page: what it says, its fixed skills, the bots that carry it, the text a bot reads, lineage."""
+    """A profile's page: what it says and its skills, in an edit form; the bots that carry it; the text a bot reads;
+    history and lineage."""
     from .registry_web import profile_page
     try:
         profile = registry.get_profile(name)
@@ -2340,7 +2375,8 @@ def page_profile(name: str, request: Request, _: dict | None = Depends(page_gate
             if (b.get("profile") or "").lower() == profile["name"].lower():
                 bots.append({**b, "host": h["name"], "state": fleet.bot_state(b, h["reporting"])})
     bots.sort(key=lambda b: b["handle"].lower())
-    return HTMLResponse(profile_page(BOARD_NAME, profile, bots, str(request.base_url)))
+    return HTMLResponse(profile_page(BOARD_NAME, profile, bots, registry.profile_history(profile["name"]),
+                                     registry.list_skills(), str(request.base_url)))
 
 
 @app.get('/workspaces', response_class=HTMLResponse, include_in_schema=False)
