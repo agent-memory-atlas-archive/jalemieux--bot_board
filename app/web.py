@@ -742,6 +742,26 @@ aside.thread .msg:hover{background:var(--bg)}
 aside.thread .msg .av{width:28px;height:28px;font-size:9px}
 aside.thread .root{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:6px}
 aside.thread .count{padding:4px 16px 8px;font:11.5px var(--mono);color:var(--dim)}
+/* @board messages folded into one strip (#403): a viewer's choice, per browser */
+.fold{margin:4px 16px 4px 42px;width:calc(100% - 58px);display:flex;gap:10px;align-items:center;padding:5px 10px;border:1px dashed var(--line);
+border-radius:8px;color:var(--dim);font:12.5px var(--sans);cursor:pointer;background:var(--bg);text-align:left}
+.fold .what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fold:hover{border-color:var(--accent);color:var(--accent)}
+.fold b{font-weight:600;color:var(--ink)}
+.fold .last{margin-left:auto;font:11px var(--mono);white-space:nowrap}
+.fold .caret{font-size:11px}
+.fold[aria-expanded=true] .caret{transform:rotate(90deg);display:inline-block}
+.folded{display:none}.folded.open{display:block}
+aside.thread header .menu{position:relative;display:inline-block}
+aside.thread header .tools #tdisplay{font:12px var(--mono)}
+.pop{position:absolute;right:0;top:28px;width:260px;background:var(--panel);border:1px solid var(--line);border-radius:9px;
+padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:5;font:13px var(--sans);text-align:left}
+.pop[hidden]{display:none}
+.pop h4,.topnav .links .pref h4{margin:0 0 6px;font:11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.pop label,.topnav .links .pref label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;color:var(--ink)}
+.pop .note,.topnav .links .pref .note{font:11px var(--mono);color:var(--dim);margin-top:8px}
+.topnav .links .pref{display:none;border-top:1px solid var(--line);margin-top:4px;padding:8px 9px 4px;font:13px var(--sans)}
+.topnav .links.open .pref{display:block}
 
 /* compose: one box under the stream, one under the thread; the human signs in once per browser */
 .compose{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 22px 12px;position:relative}
@@ -820,7 +840,7 @@ var S = {
   unread: {}, seen: load('bb.seen', {}), open: load('bb.open', {}),
   cur: null, thread: null, cursor: INIT.stats.cursor,
   roots: [], newSince: 0, olderBefore: null, ctrl: null,
-  view: null, umsgs: {}, umore: {}
+  view: null, umsgs: {}, umore: {}, tmsgs: null
 };
 INIT.agents.forEach(function(a){ S.agents[a.handle] = a; });
 
@@ -1044,6 +1064,76 @@ function pickupHtml(worker){
     '"><span aria-hidden="true">👀</span> Picked up by <a href="/a/' +
     esc(worker) + '">@' + esc(worker) + '</a>' + (down ? ' · ' + esc(down) : '') + '</span>';
 }
+// ---------------------------------------------------------------- @board messages (#403)
+// What the board itself posts into a thread (Forgejo events, sweeper notes, nudges) is useful to the
+// worker and noise to a reader. A viewer chooses, per browser: 'visible' (the default) or 'fold',
+// where consecutive @board messages fold into one strip that opens in place. A @board message that
+// mentions the viewer or waits on them (meta.needs) is never folded. Search and /t/<id> links are unaffected.
+// fold:begin
+var BOARD_PREFS = ['visible', 'fold'];
+function boardKind(m){
+  var meta = m.meta || {}, ev = meta.event || '', action = meta.action || '';
+  if (meta.kind !== 'forgejo') return 'note';
+  if (ev === 'pull_request') return action === 'closed' ? (/\bmerged\b/.test(m.body || '') ? 'merge' : 'PR closed') : 'PR';
+  if (ev === 'pull_request_sync') return 'push';
+  if (/label/.test(ev)) return 'labels';
+  if (/comment/.test(ev)) return 'comment';
+  if (/review/.test(ev)) return 'review';
+  if (ev === 'issues') return 'issue';
+  return 'event';
+}
+var KIND_PLURAL = {PR: 'PRs', push: 'pushes', labels: 'labels', comment: 'comments', review: 'reviews', issue: 'issues',
+                   merge: 'merges', note: 'notes', event: 'events', 'PR closed': 'PRs closed'};
+function foldable(m, me){
+  if (m.author !== 'board' || !m.reply_to) return false;     // the root is the thread: always a card
+  if (me && (m.mentions || []).indexOf(me) >= 0) return false;
+  if (me && m.meta && m.meta.needs === me) return false;
+  return true;
+}
+// Splits a thread's replies into segments: {msg: m} for a card, {fold: [m, ...]} for a run of @board messages.
+function foldRuns(messages, pref, me){
+  var out = [], i = 0;
+  while (i < messages.length) {
+    if (pref !== 'fold' || !foldable(messages[i], me)) { out.push({msg: messages[i]}); i++; continue; }
+    var run = [];
+    while (i < messages.length && foldable(messages[i], me)) { run.push(messages[i]); i++; }
+    out.push({fold: run});
+  }
+  return out;
+}
+function foldSummary(run){
+  var counts = {}, order = [];
+  run.forEach(function(m){ var k = boardKind(m); if (!counts[k]) { counts[k] = 0; order.push(k); } counts[k]++; });
+  return order.map(function(k){ return counts[k] + ' ' + (counts[k] === 1 ? k : KIND_PLURAL[k] || k); }).join(', ');
+}
+// fold:end
+function foldHtml(run, open){
+  return '<button type="button" class="fold" data-fold aria-expanded="' + (open ? 'true' : 'false') + '"><span class="caret" aria-hidden="true">▸</span>' +
+    '<b>' + run.length + ' from @board</b><span class="what">' + esc(foldSummary(run)) + '</span>' +
+    '<span class="last" title="' + esc(run[run.length - 1].created_at) + '">last ' + esc(when(run[run.length - 1].created_at)) + '</span></button>' +
+    '<div class="folded' + (open ? ' open' : '') + '">' + run.map(function(m){ return messageHtml(m, true); }).join('') + '</div>';
+}
+function boardPref(){ var v = load('bb.boardMsgs', 'visible'); return BOARD_PREFS.indexOf(v) >= 0 ? v : 'visible'; }
+function setBoardPref(v){
+  if (BOARD_PREFS.indexOf(v) < 0) v = 'visible';
+  save('bb.boardMsgs', v); syncBoardPref();
+  if (S.thread && S.tmsgs) renderThreadList();
+}
+function syncBoardPref(){
+  var v = boardPref();
+  document.querySelectorAll('input[data-pref=boardmsgs]').forEach(function(r){ r.checked = r.value === v; });
+}
+document.addEventListener('change', function(ev){ if (ev.target.dataset && ev.target.dataset.pref === 'boardmsgs') setBoardPref(ev.target.value); });
+document.addEventListener('click', function(ev){
+  var f = ev.target.closest('[data-fold]');
+  if (f) { var open = f.getAttribute('aria-expanded') !== 'true'; f.setAttribute('aria-expanded', open ? 'true' : 'false'); f.nextElementSibling.classList.toggle('open', open); return; }
+  var g = ev.target.closest('#tdisplay');
+  var pop = $('#tdisplaypop');
+  if (g) { pop.hidden = !pop.hidden; g.setAttribute('aria-expanded', pop.hidden ? 'false' : 'true'); return; }
+  if (pop && !pop.hidden && !ev.target.closest('#tdisplaypop')) { pop.hidden = true; $('#tdisplay').setAttribute('aria-expanded', 'false'); }
+});
+syncBoardPref();
+
 function messageHtml(m, inThread){
   var foot = m.tags.map(function(t){ return '<span class="tag">#' + esc(t) + '</span>'; }).join('');
   var previews = '';
@@ -1248,9 +1338,8 @@ async function openThread(id, push){
     var hideBtn = $('#thide'); hideBtn.hidden = !ME; hideBtn.textContent = d.hidden ? 'bring back' : 'hide'; hideBtn.dataset.hidden = d.hidden ? '1' : '';
     $('#tboard').href = '/t/' + d.thread_id;
     document.title = 'thread #' + d.thread_id + ' · ' + (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
-    plist.innerHTML = messageHtml(root, true) +
-      '<div class="count" id="tcount">' + (d.messages.length - 1) + (d.messages.length === 2 ? ' reply' : ' replies') + '</div>' +
-      d.messages.slice(1).map(function(m){ return messageHtml(m, true); }).join('');
+    S.tmsgs = d.messages;
+    renderThreadList();
     app.classList.remove('thread-closed'); showCompose();
     document.querySelectorAll('.msg.focus').forEach(function(x){ x.classList.remove('focus'); });
     document.querySelectorAll('.replies.open').forEach(function(x){ x.classList.remove('open'); });
@@ -1258,8 +1347,40 @@ async function openThread(id, push){
     plist.scrollTop = plist.scrollHeight;
   } catch (e) { alert('Could not load thread #' + id + ': ' + e.message); }
 }
+// The thread panel's list: the root, the count, then the replies, with @board runs folded when the viewer asked (#403).
+function renderThreadList(){
+  var ms = S.tmsgs || []; if (!ms.length) return;
+  var me = ME ? ME.handle : null, replies = ms.slice(1);
+  plist.innerHTML = messageHtml(ms[0], true) +
+    '<div class="count" id="tcount">' + replies.length + (replies.length === 1 ? ' reply' : ' replies') + '</div>' +
+    foldRuns(replies, boardPref(), me).map(function(seg){ return seg.fold ? foldHtml(seg.fold, false) : messageHtml(seg.msg, true); }).join('');
+  plist.scrollTop = plist.scrollHeight;
+}
+// A reply arriving in the open thread: a card, or the next message of an open or new @board strip.
+function appendToThread(m){
+  if ($('#t' + m.id)) return;
+  if (S.tmsgs) S.tmsgs.push(m);
+  var me = ME ? ME.handle : null;
+  if (boardPref() === 'fold' && foldable(m, me)) {
+    var last = plist.lastElementChild, strip = last && last.classList.contains('folded') ? last.previousElementSibling : null;
+    if (strip) {
+      last.appendChild(el(messageHtml(m, true)));
+      var run = [], ms = S.tmsgs || [m];     // the strip holds the trailing @board run of the thread
+      for (var i = ms.length - 1; i >= 0 && foldable(ms[i], me); i--) run.unshift(ms[i]);
+      strip.querySelector('b').textContent = run.length + ' from @board';
+      strip.querySelector('.what').textContent = foldSummary(run);
+      strip.querySelector('.last').textContent = 'last ' + when(m.created_at);
+    } else {
+      plist.insertAdjacentHTML('beforeend', foldHtml([m], false));
+    }
+  } else {
+    plist.appendChild(el(messageHtml(m, true)));
+  }
+  var tc = $('#tcount'); if (tc) { var n = plist.querySelectorAll('.msg').length - 1; tc.textContent = n + (n === 1 ? ' reply' : ' replies'); }
+  plist.scrollTop = plist.scrollHeight;
+}
 function closeThread(){
-  S.thread = null; app.classList.add('thread-closed');
+  S.thread = null; S.tmsgs = null; app.classList.add('thread-closed');
   document.querySelectorAll('.msg.focus').forEach(function(x){ x.classList.remove('focus'); });
   document.querySelectorAll('.replies.open').forEach(function(x){ x.classList.remove('open'); });
   if (S.cur) history.replaceState({}, '', '/c/' + S.cur.slug);
@@ -1272,11 +1393,7 @@ setInterval(function(){
   if (!id || !$('#thide').dataset.hidden || !last) return;
   fetch('/api/threads/' + id + '?hide_events=true&since=' + last.dataset.id).then(function(r){ return r.json(); }).then(function(d){
     if (S.thread !== id) return;
-    (d.messages || []).forEach(function(m){
-      if (!$('#t' + m.id)) plist.appendChild(el(messageHtml(m, true)));
-    });
-    var n = plist.querySelectorAll('.msg').length - 1, tc = $('#tcount');
-    if (d.messages && d.messages.length) { if (tc) tc.textContent = n + (n === 1 ? ' reply' : ' replies'); plist.scrollTop = plist.scrollHeight; }
+    (d.messages || []).forEach(appendToThread);
   }).catch(function(){});
 }, 5000);
 $('#thide').addEventListener('click', function(){
@@ -1617,11 +1734,7 @@ function onMessage(m){
         if (root.replies.authors.indexOf(m.author) < 0) root.replies.authors.push(m.author);
         var old = $('#m' + root.id); if (old) old.replaceWith(el(messageHtml(root, false)));
       }
-      if (S.thread === m.thread_id) {
-        plist.appendChild(el(messageHtml(m, true)));
-        var tc = $('#tcount'); if (tc) { var n = plist.querySelectorAll('.msg').length - 1; tc.textContent = n + (n === 1 ? ' reply' : ' replies'); }
-        plist.scrollTop = plist.scrollHeight;
-      }
+      if (S.thread === m.thread_id) appendToThread(m);
     }
     if (atBottom) stream.scrollTop = stream.scrollHeight;
     if (document.visibilityState === 'visible') markSeen(); else S.unread[m.channel] = (S.unread[m.channel] || 0) + 1;
@@ -1740,6 +1853,12 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
   <nav class="links" id="navlinks" aria-label="reference">
 {util_links()}
+    <div class="pref" id="navpref">
+          <h4>Messages from @board</h4>
+          <label><input type="radio" name="boardmsgs-nav" value="visible" data-pref="boardmsgs"> Visible, like any message</label>
+          <label><input type="radio" name="boardmsgs-nav" value="fold" data-pref="boardmsgs"> Folded into one strip</label>
+          <div class="note">Yours only, in this browser. A message that mentions you or waits on you is always shown in full.</div>
+    </div>
   </nav>
   <div class="me">
     {admin_segment()}
@@ -1779,6 +1898,13 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <div class="grip" id="tgrip" title="drag to resize"></div>
   <header><h2>Thread</h2><span class="in" id="tin"></span>
     <span class="tools">
+      <span class="menu"><button type="button" id="tdisplay" aria-expanded="false" aria-controls="tdisplaypop" title="how messages from @board are shown">display ▾</button>
+        <div class="pop" id="tdisplaypop" hidden>
+          <h4>Messages from @board</h4>
+          <label><input type="radio" name="boardmsgs-thread" value="visible" data-pref="boardmsgs"> Visible, like any message</label>
+          <label><input type="radio" name="boardmsgs-thread" value="fold" data-pref="boardmsgs"> Folded into one strip</label>
+          <div class="note">Yours only, in this browser. A message that mentions you or waits on you is always shown in full.</div>
+        </div></span>
       <a id="tboard" href="/" title="open in the board">open in board</a>
       <button type="button" id="thide" hidden title="hide this thread from the channel, for everyone"></button>
       <button type="button" id="twide" title="expand thread to full width">⤢</button>
