@@ -158,7 +158,9 @@ class Routines(unittest.TestCase):
         on = self.call('POST', enable, {'approved_by': yes['id']}, auth=self.bot)
         self.assertEqual((on['state'], on['approved_by']), ('enabled', yes['id']))
         v2 = self.call('PATCH', f"/api/routines/{r['id']}", {'every': 300}, auth=self.bot)
-        self.assertEqual((v2['state'], v2['version'], v2['every'], v2['check']), ('paused', 2, 300, CHECK))
+        self.assertEqual((v2['state'], v2['version'], v2['every'], v2['check']), ('enabled', 2, 300, CHECK))  # the check is the approved one: it runs on (#380)
+        v3 = self.call('PATCH', f"/api/routines/{r['id']}", {'check': CHECK + 'exit 0\n'}, auth=self.bot)
+        self.assertEqual((v3['state'], v3['version'], v3['waiting']['changed']), ('paused', 3, 'check (1 line)'))
         self.call('POST', enable, {'approved_by': yes['id']}, auth=self.bot, expected=422)   # a yes approves one version
         yes2 = self.post('ok', ask['id'])
         self.assertEqual(self.call('POST', enable, {'approved_by': yes2['id']}, auth=self.bot)['state'], 'enabled')
@@ -208,7 +210,7 @@ class Routines(unittest.TestCase):
         self.assertEqual((got['state'], got['problem'], got['upgrade']['from'], got['upgrade']['to']), ('enabled', '', rv - 1, rv))
         self.assertIn('-# older writer', got['upgrade']['diff'])
         bell = [a['text'] for a in self.call('GET', '/api/status')['attention']]
-        self.assertIn(f'2 routine upgrade(s) to recipe version {rv} wait for your yes', bell)
+        self.assertIn(f'3 routine changes wait for your yes: r2 v1, r1 (recipe v{rv}), r2 (recipe v{rv})', bell)  # r2 was never approved
 
         shown = {str(i): 1 for i in ids}
         self.make_admin()
@@ -222,6 +224,101 @@ class Routines(unittest.TestCase):
         self.assertNotIn('upgrade', up)
         self.assertEqual(up['check'], routines.cli.recipe_check(up['recipe']))
         self.assertNotIn('upgrade', self.call('GET', f"/api/routines/{ids[1]}"), 'a new version is written by this release')
+
+    def thread_bodies(self, tid):
+        return [(m['author'], m['body'], m['meta']) for m in self.call('GET', f'/api/threads/{tid}')['messages']]
+
+    def test_a_bots_version_waits_for_one_click_which_tests_it_and_switches_it_back_on(self):
+        # #380: the board asks the human, the human approves on /routines, the runner tests, the board enables
+        self.make_admin()
+        ask = self.post('Every new issue on bot_board should be triaged')
+        r = self.add(auth=self.bot, thread=ask['id'])
+        self.assertEqual((r['state'], r['waiting']['changed'], r['waiting']['resume'], r['waiting']['by']), ('paused', 'new', True, 'ada'))  # new: on once approved
+        (asked,) = [m for m in self.thread_bodies(ask['id']) if m[0] == 'board']
+        self.assertIn('@jac version 1 of routine `triage` (new) waits for your yes', asked[1])
+        self.assertEqual((asked[2]['needs'], asked[2]['routine']), ('jac', r['id']))
+        inbox = self.call('GET', '/api/status')
+        self.assertEqual([(m['where'], m['text']) for m in inbox['waiting'] if m['href'] == f"/t/{ask['id']}"],
+                         [('@board', 'approve version 1 of routine triage on /routines#approvals')])
+        bell = [a for a in self.call('GET', '/api/status')['attention'] if a['href'] == '/routines#approvals']
+        self.assertEqual(bell[0]['text'], '1 routine change waits for your yes: triage v1')
+
+        path = f"/api/routines/{r['id']}"
+        self.call('POST', path + '/approve', auth=self.bot, expected=403)       # a bot cannot say yes to itself
+        self.call('POST', path + '/enable', auth=self.bot, expected=422)        # nor switch it on without one
+        on = self.call('POST', path + '/enable')                                # the human's Enable is a yes
+        self.assertEqual((on['state'], 'waiting' in on), ('enabled', False))
+        self.assertTrue(on['approved_by'])
+        said = self.thread_bodies(ask['id'])[-1]
+        self.assertEqual((said[0], said[1], said[2]['resolved']), ('board', 'Version 1 approved by jac. Enabled.', True))
+        self.assertFalse(any(m['href'] == f"/t/{ask['id']}" for m in self.call('GET', '/api/status')['waiting']))
+        self.assertEqual([a for a in self.call('GET', '/api/status')['attention'] if a['href'] == '/routines#approvals'], [])
+
+        # a new check pauses it and asks again; Approve tests it, and the passing test switches it back on
+        v2 = self.call('PATCH', path, {'check': CHECK + '# v2\n'}, auth=self.bot)
+        self.assertEqual((v2['state'], v2['waiting']['changed'], v2['waiting']['resume']), ('paused', 'check (1 line)', True))
+        self.assertIn('+# v2', v2['waiting']['diff'])
+        self.assertIn('and it is enabled again', self.thread_bodies(ask['id'])[-1][1])
+        self.call('POST', path + '/test', auth=self.bot, expected=422)          # a bot's test of a waiting version needs the yes
+        ok = self.call('POST', path + '/approve')
+        self.assertEqual((ok['state'], ok['approving'], ok['test_pending'], 'waiting' in ok), ('paused', True, True, False))
+        self.call('POST', path + '/approve', expected=422)                      # once
+        self.assertIn('The runner tests it now, then it is enabled again.', self.thread_bodies(ask['id'])[-1][1])
+        self.call('POST', path + '/report', {'test': {'for': 1, 'version': 2, 'ok': True, 'work': False}}, auth=self.runner)
+        got = self.call('GET', path)
+        self.assertEqual((got['state'], got['approving'], got['test_pending']), ('enabled', False, False))
+        self.assertEqual(self.thread_bodies(ask['id'])[-1][1], 'Test of version 2 ok, no work right now. Enabled again.')
+        self.call('POST', path + '/test', auth=self.bot)                        # approved: no yes needed any more
+
+        # a test that fails leaves it paused and says so
+        v3 = self.call('PATCH', path, {'check': CHECK + '# v3\n'}, auth=self.bot)
+        self.call('POST', path + '/approve')
+        n = self.call('GET', path)['test_asked']
+        self.call('POST', path + '/report', {'test': {'for': n, 'version': 3, 'ok': False, 'error': 'exit 1'}}, auth=self.runner)
+        got = self.call('GET', path)
+        self.assertEqual((got['state'], got['approving'], 'waiting' in got), ('paused', False, False))
+        self.assertEqual(self.thread_bodies(ask['id'])[-1][1], 'Test of version 3 failed: exit 1 It stays paused; a fix is a new version.')
+        self.assertEqual(self.call('POST', path + '/enable')['state'], 'enabled')
+
+        # a routine that was paused stays paused after its approval
+        self.call('POST', path + '/pause')
+        v4 = self.call('PATCH', path, {'check': CHECK + '# v4\n'}, auth=self.bot)
+        self.assertFalse(v4['waiting']['resume'])
+        self.call('POST', path + '/approve')
+        n = self.call('GET', path)['test_asked']
+        self.call('POST', path + '/report', {'test': {'for': n, 'version': 4, 'ok': True, 'work': True}}, auth=self.runner)
+        self.assertEqual(self.call('GET', path)['state'], 'paused')
+        self.assertEqual(self.thread_bodies(ask['id'])[-1][1], 'Test of version 4 ok, found work. It stays paused until someone enables it on /routines.')
+
+    def test_a_change_that_leaves_the_check_alone_keeps_running_and_asks_nobody(self):
+        self.make_admin()
+        ask = self.post('triage please')
+        r = self.add(auth=self.bot, thread=ask['id'])
+        path = f"/api/routines/{r['id']}"
+        self.call('POST', path + '/enable')
+        before = db.cursor()
+        v2 = self.call('PATCH', path, {'prompt': 'Triage these, kindly.', 'every': 900, 'name': 'triage2'}, auth=self.bot)
+        self.assertEqual((v2['state'], v2['version'], v2['every'], v2['name'], 'waiting' in v2), ('enabled', 2, 900, 'triage2', False))
+        self.assertEqual(db.cursor(), before, 'nothing to ask: no message')
+        self.call('POST', path + '/test', auth=self.bot)        # no yes to cite, none needed
+        # a human's own version waits too, but the board does not write to them about it
+        v3 = self.call('PATCH', path, {'check': CHECK + '# human\n'})
+        self.assertEqual((v3['state'], v3['waiting']['by']), ('paused', 'jac'))
+        self.assertEqual(db.cursor(), before)
+        # the version that was waiting is still waiting after a prompt change: the check is still the new one
+        v4 = self.call('PATCH', path, {'prompt': 'x'}, auth=self.bot)
+        self.assertEqual((v4['state'], v4['waiting']['changed'], v4['waiting']['resume']), ('paused', 'check (1 line), prompt (2 lines)', True))
+
+    def test_a_board_from_before_approvals_counts_what_ran_as_approved(self):
+        on, off = self.add(name='on'), self.add(name='off')
+        self.call('POST', f"/api/routines/{on['id']}/enable")
+        c = db.conn()
+        for col in ('approved_definition', 'resume', 'approving'):
+            c.execute(f'ALTER TABLE routines DROP COLUMN {col}')
+        c.commit()
+        routines.init()
+        self.assertNotIn('waiting', self.call('GET', f"/api/routines/{on['id']}"))
+        self.assertIn('waiting', self.call('GET', f"/api/routines/{off['id']}"))
 
     def test_delete_stops_it_for_good(self):
         r = self.add()

@@ -411,7 +411,10 @@ API_MAP = {
         "POST /api/routines": "store a routine, paused {name, channel, check (or recipe), prompt, every?,"
                               " claim_timeout?, done_timeout?, resends?, about?, skill?, thread?}; thread: the message"
                               " it was asked for in. Human managers of the admin workspace and admin bots (its bots)",
-        "PATCH /api/routines/{id}": "a new version of a routine (the fields sent), paused again",
+        "PATCH /api/routines/{id}": "a new version of a routine (the fields sent); one that changes the check waits for a"
+                                    " human's yes on /routines, one that does not keeps running",
+        "POST /api/routines/{id}/approve": "a human manager's yes to a waiting version: the runner tests it, and it is"
+                                           " enabled again when the test passes if it was enabled before",
         "POST /api/routines/{id}/{enable|pause|test|run}": "{approved_by?}: an admin bot's enable and test cite a human"
                               " manager's reply in the routine's thread posted after its current version; run: an"
                               " enabled routine checks on the runner's next pass and fires a job if there is work",
@@ -1916,9 +1919,11 @@ async def routine_report(rid: int, body: dict, agent: dict = Depends(current_age
 
 
 @app.post("/api/routines/{rid}/{action}", tags=["routines"])
-async def routine_act(rid: int, action: str = Path(pattern="^(enable|pause|test|run)$"),
+async def routine_act(rid: int, action: str = Path(pattern="^(approve|enable|pause|test|run)$"),
                       body: RoutineActIn = RoutineActIn(), agent: dict = Depends(current_agent)) -> dict:
-    """Enable, pause, test or run a routine. An admin bot's enable and test cite the human's yes.
+    """Approve, enable, pause, test or run a routine. approve: a human manager's yes to a version that
+    waits for one (#380); the runner tests it, and it is enabled again when the test passes if it was
+    enabled before the change. An admin bot's enable and test of a waiting version cite the human's yes.
     run: an enabled routine checks on the runner's next pass, and fires a job if there is work."""
     return await _routine_call(routines.act, rid, action, agent, body.approved_by)
 
