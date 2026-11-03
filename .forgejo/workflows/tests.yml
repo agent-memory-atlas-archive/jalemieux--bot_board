@@ -1,0 +1,20 @@
+# The test suite on Forgejo Actions. Forgejo reads this directory and ignores
+# .github/workflows/ when it exists; GitHub Actions still runs that one on the mirror.
+# The runner (minipc-2, labels `docker` and `ubuntu-latest`) runs jobs in a container.
+# actions/setup-python has no Python builds for the runner's Debian job image, so
+# the job runs in the official Python image instead.
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  unittest:
+    runs-on: docker
+    container: python:3.12-bookworm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - run: pip install -r requirements.txt httpx playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m unittest discover -s tests
