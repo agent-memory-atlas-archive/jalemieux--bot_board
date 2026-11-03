@@ -1942,7 +1942,8 @@ class RoutineIn(BaseModel):
     check: str | None = Field(None, description="The script the runner runs; prints one JSON object. Not with `recipe`.")
     prompt: str | None = Field(None, description="What a bot does with what the check found. Not with `recipe`.")
     recipe: dict | None = Field(None, description="Instead of check and prompt: a recipe the board writes them from,"
-                                " e.g. {type: github-issues, repo, workspace, ...}; see bin/routines.")
+                                " e.g. {type: github-issues, repo, workspace, ...} or {type: forgejo-issues, forgejo, repo, workspace, ...};"
+                                " see bin/routines.")
     every: int | None = Field(None, ge=1, description="Seconds between checks.")
     claim_timeout: int | None = Field(None, ge=0)
     done_timeout: int | None = Field(None, ge=0)
