@@ -63,7 +63,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(sorted(skills["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager"])
         self.assertEqual(set(profiles), {"developer", "artist", "lore-writer", "product-manager", "architect"})
         dev = profiles["developer"]
-        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertTrue(dev["responsibilities"].startswith("Work the threads"))
         self.assertTrue(dev["focus"] and dev["avoid"] and dev["role"])
         self.assertEqual(dev["clones"], [])        # a seeded profile is not its own clone
@@ -115,7 +115,7 @@ class Registry(unittest.TestCase):
     def test_base_comes_after_the_profiles_own_and_a_listing_changes_nothing(self):
         self.make_base()
         jane = self.add_bot("jane", "developer")
-        self.assertEqual([s["name"] for s in self.me(jane)["skills"]], ["github-lifecycle", "house-style"])
+        self.assertEqual([s["name"] for s in self.me(jane)["skills"]], ["github-lifecycle", "forgejo-lifecycle", "house-style"])
         # a profile that lists it, not even as mandatory: once, and still mandatory
         self.client.post("/api/profiles", headers=self.human, json={"name": "lister", "role": "Lists it.", "skills": [
             {"name": "house-style"}, {"name": "github-lifecycle"}]}).raise_for_status()
@@ -123,7 +123,7 @@ class Registry(unittest.TestCase):
         self.assertEqual([(s["name"], s["mandatory"]) for s in self.me(lee)["skills"]],
                          [("house-style", True), ("github-lifecycle", False)])
         profile = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
-        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertEqual([s["name"] for s in profile["base_skills"]], ["house-style"])
         self.assertEqual(self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]["base_skills"], [])
         self.assertIn("Every bot also has", self.client.get("/fleet/profiles/developer").text)
@@ -385,7 +385,8 @@ class Registry(unittest.TestCase):
         self.assertIn("When a skill you have changes, your launcher says so in a prompt", r.text)
         j = self.client.get("/api/me/profile?json", headers=jane).json()
         self.assertEqual(j["profile"]["name"], "developer")
-        self.assertEqual([(s["name"], s["mandatory"], s["revision"]) for s in j["skills"]], [("github-lifecycle", True, 1)])
+        self.assertEqual([(s["name"], s["mandatory"], s["revision"]) for s in j["skills"]],
+                         [("github-lifecycle", True, 1), ("forgejo-lifecycle", False, 1)])
         self.assertNotIn("kind", j["skills"][0])
 
     def test_a_bots_page_shows_its_profile(self):
