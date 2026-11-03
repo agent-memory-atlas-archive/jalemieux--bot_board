@@ -487,7 +487,7 @@ SKILL_PAGE_JS = r"""
 
 def profile_page(board_name: str, profile: dict, bots: list, history: list, skills: list, base: str) -> str:
     name = e(profile["name"])
-    also = [s for s in registry.resolve(profile) if s["base"]]
+    also = registry.also_has(profile)
     own = {s["name"]: bool(s.get("mandatory")) for s in profile.get("skills") or [] if s["name"] not in {b["name"] for b in also}}
     skill_rows = "".join(
         f'<tr><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"{" checked" if s["name"] in own else ""}></td>'

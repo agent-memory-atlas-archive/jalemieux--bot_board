@@ -125,7 +125,8 @@ class Registry(unittest.TestCase):
         profile = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
         self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertEqual([s["name"] for s in profile["base_skills"]], ["house-style"])
-        self.assertEqual(self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]["base_skills"], [])
+        lister = self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]
+        self.assertEqual([s["name"] for s in lister["base_skills"]], ["house-style"])     # listed or not, it is base
         self.assertIn('id="base-skills">Base skills, every bot has them: <a class="chip" href="/fleet/skills/house-style">',
                       self.client.get("/fleet/profiles/developer").text)
         # listed by the profile too, it is still shown as base, and not as one of the profile's own (#396)
