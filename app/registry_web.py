@@ -546,7 +546,10 @@ def profile_page(board_name: str, profile: dict, bots: list, history: list, skil
     danger = (f'<button type="button" class="act del-profile" data-name="{name}"{" disabled" if n else ""}>Delete this profile</button>'
               + (f'<p>Not while {n} bot{"s" * (n != 1)} carr{"y" if n != 1 else "ies"} it. Retire {"them" if n != 1 else "it"} first; the name is never reused.</p>'
                  if n else '<p>No bot carries it. The name stays taken: profiles are never reused under an old name.</p>'))
-    data = _json({"name": profile["name"], "revision": profile["revision"], "bots": [b["handle"] for b in bots]})
+    # a base skill the profile lists has no row here; a save carries it over as it was, not drops it (#426)
+    rowless = {s["name"] for s in skills if s.get("base")}
+    kept = [s for s in profile.get("skills") or [] if s["name"] in rowless]
+    data = _json({"name": profile["name"], "revision": profile["revision"], "bots": [b["handle"] for b in bots], "kept": kept})
     content = f"""
 <style>{FLEET_CSS}{REG_CSS}</style>
 <div class="fleet-page"><div class="reg">
@@ -608,7 +611,8 @@ PROFILE_PAGE_JS = r"""
     ev.preventDefault(); if (!need()) return;
     var f = form.elements, msg = form.querySelector('.status-line'), mand = {};
     form.querySelectorAll('input[name=mandatory]:checked').forEach(function (c) { mand[c.value] = true; });
-    var skills = Array.prototype.map.call(form.querySelectorAll('input[name=skill]:checked'), function (c) { return {name: c.value, mandatory: !!mand[c.value]}; });
+    var skills = Array.prototype.map.call(form.querySelectorAll('input[name=skill]:checked'), function (c) { return {name: c.value, mandatory: !!mand[c.value]}; })
+      .concat(P.kept);
     msg.className = 'status-line'; msg.textContent = 'Saving…';
     call('PUT', '/api/profiles/' + encodeURIComponent(P.name),
          {role: f.role.value.trim(), responsibilities: f.responsibilities.value.trim(), focus: f.focus.value.trim(), avoid: f.avoid.value.trim(),

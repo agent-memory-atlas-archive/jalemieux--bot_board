@@ -66,6 +66,20 @@ class NewProfileBaseSkills(unittest.TestCase):
         self.assertEqual(self.posted[0]["skills"], [{"name": "github-lifecycle", "mandatory": False}])
         self.assertIn("Base skills, every bot has them", self.page.text_content("#base-skills"))
 
+    def test_an_edit_keeps_a_base_skill_the_profile_lists(self):
+        # #426: the edit form has no row for a base skill; saving carries it over instead of dropping it
+        self.client.post("/api/profiles", headers=self.human, json={"name": "lister", "role": "Lists it.", "skills": [
+            {"name": "house-style"}, {"name": "github-lifecycle", "mandatory": True}]}).raise_for_status()
+        self.page.goto("http://board.test/fleet/profiles/lister")
+        self.assertEqual(self.page.locator('#profile-edit input[name=skill][value="house-style"]').count(), 0)
+        self.page.fill("#profile-edit input[name=role]", "Lists it, edited.")
+        self.page.fill("#profile-edit input[name=reason]", "a new role")
+        self.page.click("#profile-edit button[type=submit]")
+        self.page.wait_for_selector("#profile-edit .status-line.ok")
+        profile = self.client.get("/api/profiles/lister", headers=self.human).json()["profile"]
+        self.assertEqual(profile["role"], "Lists it, edited.")
+        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}, {"name": "house-style", "mandatory": False}])
+
 
 if __name__ == "__main__":
     unittest.main()
