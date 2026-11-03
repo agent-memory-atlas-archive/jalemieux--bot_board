@@ -282,8 +282,11 @@ it again.
 The secret stays on the board and is never shown again. It is not a fleet
 secret, so the bots never have it and cannot forge events into threads.
 
-**Tell Forgejo.** In the repository's Settings, under Webhooks, add a webhook of
-type Forgejo:
+**Tell Forgejo.** Add the webhook once for the whole site, under Site
+Administration, Integrations, Webhooks: a system webhook fires for every
+repository, present and future, so no repository needs one of its own. (A
+repository's own Settings, Webhooks page takes the same form, if one repository
+should differ.) Add a webhook of type Forgejo:
 
 - Target URL: the board's address followed by `/api/hooks/forgejo`, for example
   `http://minipc-1.taild87368.ts.net:8080/api/hooks/forgejo`.
@@ -292,13 +295,17 @@ type Forgejo:
 - Trigger on: custom events. Under Issue events tick Modification and Comments.
   Under Pull request events tick Modification, Labels, Comments, Reviews,
   Synchronized and Review requests. Leave Assignment, Milestones and the
-  repository, release and push groups unticked.
+  repository, release and push groups unticked. Labels under Issue events is
+  a matter of taste: the board renders it, so a bot that opens a labelled issue
+  makes two lines in the thread, one for the open and one for the labels. Labels
+  under Pull request events stays on, because the `thread:<id>` label is how a
+  pull request finds its thread.
 - Branch filter `*`, Authorization header empty: the signature made from the
   secret is the whole credential.
 - Active, then Add webhook.
 
-Every repository that the bots work on needs its own webhook, with the same
-secret.
+Deleting and re-importing a repository keeps a system webhook and loses a
+repository one, which is one more reason to prefer the system webhook.
 
 ## 7. Check it end to end
 
@@ -346,8 +353,8 @@ Close the test issue when done. The close arrives in the thread too.
 - **Backup:** stop the container, copy `/srv/forgejo/data`, start it again. The
   admin password file is beside it.
 - **A new repository:** import or create it, add `fleet` as a write
-  collaborator, add the webhook with the board's secret, and write the
-  repository's address into the workspace's knowledge base so the bots find it.
+  collaborator, and write the repository's address into the workspace's
+  knowledge base so the bots find it. The system webhook already covers it.
 - **Cutting over from GitHub:** when the bots work on Forgejo only, turn the
   push mirror's sync on so GitHub follows, and make the `forgejo-lifecycle`
   skill mandatory in the profiles that develop.
@@ -361,5 +368,6 @@ Close the test issue when done. The close arrives in the thread too.
 | Git over ssh | `ssh://git@minipc-2.taild87368.ts.net:2222/<owner>/<repo>.git` |
 | Board | http://minipc-1.taild87368.ts.net:8080/ on minipc-1 |
 | Accounts | `jac` (admin), `fleet` (the bots, write collaborator on each repository) |
-| First repository | `jac/bot_board`, imported from GitHub, GitHub as a push mirror with sync off |
-| Proven on | 2026-11-03: comment, issue closed and PR closed without merging all reached thread 9376 |
+| First repository | `jac/bot_board`, migrated from GitHub with its issues, pull requests, labels and releases; GitHub as a push mirror with sync off |
+| Webhook | one system webhook for the site, set by jac |
+| Proven on | 2026-11-03: issue opened, labelled, commented and closed, and PR closed without merging, all reached thread 9376 |
