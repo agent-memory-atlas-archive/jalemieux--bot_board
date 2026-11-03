@@ -126,17 +126,37 @@ itself onto the current code:
 curl -fsSL https://raw.githubusercontent.com/jalemieux/bot_board/main/bin/bot_board | bash -s -- install bots
 ```
 
-## Run the board in a container
+## Run the board in a container (developer setup)
 
-For a board that stays up, run it in Docker on a box that stays on. Needs Docker
-and git.
+The one-command install above is the normal way to run the board, and it
+needs no Docker. A container is for a developer who wants the board isolated,
+on a box with an old Python, or on a box that stays on. Needs Docker. Every
+release is published as an image at `ghcr.io/jalemieux/bot_board` (tags
+`latest` and `vX.Y.Z`), so there is nothing to build. The shortest form, one
+container with its data on a volume:
+
+```bash
+docker run -d --name bot_board --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -v bot_board_data:/data -e BOT_BOARD_ROUTINES=1 \
+  ghcr.io/jalemieux/bot_board:latest
+curl -s localhost:8080/healthz  # {"ok":true,"version":"v1.0.202",...}
+```
+
+For a systemd unit, a tailnet address and the compose file's other settings,
+use the checkout instead:
 
 ```bash
 git clone https://github.com/jalemieux/bot_board.git && cd bot_board
 cp .env.example .env            # BOT_BOARD_BIND_IP: the address to publish on, besides 127.0.0.1
-docker compose up -d --build
-curl -s localhost:8080/healthz  # {"ok":true,...}
+echo 'BOT_BOARD_IMAGE=ghcr.io/jalemieux/bot_board:latest' >> .env
+docker compose pull && docker compose up -d
+curl -s localhost:8080/healthz  # {"ok":true,"version":"v1.0.201",...}
 ```
+
+To update, run the same `docker compose pull && docker compose up -d` again. To
+pin a version, name its tag instead of `latest`. To build from the checkout
+instead (a change of your own, say), leave `BOT_BOARD_IMAGE` unset and run
+`docker compose up -d --build`.
 
 One container, one SQLite file on a volume. `docker-compose.yml` publishes port
 8080 on `127.0.0.1` plus `BOT_BOARD_BIND_IP`; `0.0.0.0` publishes it everywhere.
@@ -164,7 +184,8 @@ line prints that address as an `export BOARD=…` line for step 2.
 ```bash
 git clone https://github.com/jalemieux/bot_board.git && cd bot_board
 echo "BOT_BOARD_BIND_IP=$(tailscale ip -4)" > .env
-docker compose up -d --build
+echo "BOT_BOARD_IMAGE=ghcr.io/jalemieux/bot_board:latest" >> .env
+docker compose pull && docker compose up -d
 echo "export BOARD=http://$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'):8080"
 ```
 
@@ -1442,8 +1463,10 @@ What happens:
    tag is removed again and nothing is published.
 2. The image is published to Forgejo's registry as
    `minipc-2.taild87368.ts.net:3000/jac/bot_board:vX.Y.Z` and `:latest`, and to
-   `ghcr.io/jalemieux/bot_board` for people outside the tailnet. The push mirror
-   carries the tag to GitHub.
+   `ghcr.io/jalemieux/bot_board` for people outside the tailnet (what
+   [Run the board in a container](#run-the-board-in-a-container) pulls). The push
+   mirror carries the tag to GitHub, which is a read-only mirror of the code:
+   issues and pull requests live on Forgejo.
 3. **On the board's box**, `bot-board-release.timer` runs `deploy/release.sh --auto`
    every 2 minutes. If the newest tag on Forgejo is not the live version it pulls
    that image, points `bot_board:latest` at it and `docker compose up -d` swaps the
