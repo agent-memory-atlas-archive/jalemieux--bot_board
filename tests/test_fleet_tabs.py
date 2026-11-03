@@ -79,6 +79,29 @@ class FleetTabs(unittest.TestCase):
                 self.assertTrue(self.page.is_visible(target), "a folded list opens for the link")
         self.assertEqual(self.errors, [])
 
+    def test_the_harness_picker_stays_in_its_column_with_every_name_whole(self):
+        for width in (1280, 900, 853, 600):
+            with self.subTest(width):
+                self.page.set_viewport_size({"width": width, "height": 800})
+                self.go()
+                self.page.click("button.addbot-btn")
+                self.page.wait_for_selector("form.newbot-top .seg")
+                fits = self.page.evaluate("""() => {
+                    const seg = document.querySelector('form.newbot-top .seg').getBoundingClientRect();
+                    const col = document.querySelector('form.newbot-top fieldset.fld').getBoundingClientRect();
+                    const labels = [...document.querySelectorAll('form.newbot-top .seg label')];
+                    return {inColumn: seg.right <= col.right + 0.5,
+                            whole: labels.every(l => l.getBoundingClientRect().right <= seg.right + 0.5 && l.scrollWidth <= l.clientWidth + 1)};
+                }""")
+                self.assertEqual(fits, {"inColumn": True, "whole": True})
+                self.assertEqual(self.page.evaluate("Math.max(...[...document.querySelectorAll('form.newbot-top .seg input, form.newbot-top .chan-chips input')].map(i => i.getBoundingClientRect().width))"), 0, "a hidden radio lies over nothing")
+                if width == 1280:
+                    self.assertEqual(self.page.evaluate("new Set([...document.querySelectorAll('form.newbot-top .seg label')].map(l => l.getBoundingClientRect().top)).size"), 1, "one row when there is room")
+                for name in ("codex", "copilot", "claude"):
+                    self.page.click(f"form.newbot-top .seg label:has(input[value='{name}'])")
+                    self.assertEqual(self.page.evaluate("document.querySelector('form.newbot-top input[name=harness]:checked').value"), name)
+        self.assertEqual(self.errors, [])
+
     def test_a_bots_row_opens_its_drawer_and_a_second_click_closes_it(self):
         self.go()
         self.assertFalse(self.page.is_visible("#drawer-ann"))

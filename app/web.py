@@ -2750,10 +2750,9 @@ body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .add
 .fleet-page form.newbot-top .fld b{color:var(--ink);font-weight:600;font-size:12.5px}
 .fleet-page form.newbot-top select,.fleet-page form.newbot-top input{background:var(--bg);border:1px solid var(--line);
  color:var(--ink);border-radius:6px;padding:7px 9px;font:13px var(--mono);width:100%}
-.fleet-page .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--bg)}
-.fleet-page .seg label{flex:1;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;border-left:1px solid var(--line);color:var(--ink)}
-.fleet-page .seg label:first-child{border-left:0}
-.fleet-page .seg input,.fleet-page .chan-chips input{position:absolute;opacity:0;width:0;height:0}
+.fleet-page form.newbot-top .seg{display:flex;flex-wrap:wrap;gap:1px;box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--line)}/* form.newbot-top: outranks the role form's .seg in REG_CSS, which comes later. It wraps when the names outgrow the column; the gap draws the dividers on any row */
+.fleet-page form.newbot-top .seg label{flex:1 1 auto;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;background:var(--bg);color:var(--ink)}
+.fleet-page form.newbot-top .seg input,.fleet-page form.newbot-top .chan-chips input{position:absolute;opacity:0;width:0;height:0;padding:0;border:0}
 .fleet-page .seg label:has(input:checked){background:var(--ink);color:var(--panel)}
 .fleet-page .seg label:has(input:focus-visible),.fleet-page .chan-chips label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:-2px}
 .fleet-page .chan-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;align-items:center}
