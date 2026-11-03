@@ -71,12 +71,26 @@ class FleetTabs(unittest.TestCase):
         self.assertEqual(self.tab(), ["tab-roles"])
         for link, pane, target in (("#box-box", "tab-machines", "#box-box"), ("#secrets", "tab-settings", "#secrets"),
                                    ("#fleet-add-machine", "tab-settings", "#fleet-add-machine"),
-                                   ("#fleet-skills", "tab-roles", "#fleet-skills")):
+                                   ("#fleet-skills", "tab-skills", "#fleet-skills")):
             with self.subTest(link):
                 self.go(link)
                 self.page.reload()
                 self.assertEqual(self.tab(), [pane])
                 self.assertTrue(self.page.is_visible(target), "a folded list opens for the link")
+        self.assertEqual(self.errors, [])
+
+    def test_skills_have_their_own_tab_with_the_add_panel_at_the_top(self):
+        self.go()
+        self.page.click("a[href='#tab-roles']")
+        self.page.wait_for_selector("#tab-roles.on")
+        self.assertFalse(self.page.is_visible("#fleet-skills"), "the Roles tab no longer holds the skills")
+        self.page.click("a[href='#tab-skills']")
+        self.page.wait_for_selector("#tab-skills.on")
+        self.assertEqual(self.page.inner_text("a[href='#tab-skills'] b"),
+                         str(self.page.locator("#fleet-skills table.skills tbody tr").count()))
+        self.assertTrue(self.page.is_visible("#fleet-skills table.skills"), "expanded, not folded")
+        self.assertTrue(self.page.is_visible("#addskill summary"), "signed in, the add panel shows")
+        self.assertEqual(self.page.locator("#fleet-all-skills").count(), 0)
         self.assertEqual(self.errors, [])
 
     def test_a_bots_row_opens_its_drawer_and_a_second_click_closes_it(self):
