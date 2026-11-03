@@ -80,6 +80,10 @@ class ReleaseAuto(unittest.TestCase):
         self.assertEqual(live, "v1.0.208", out)
         self.assertNotIn("v1.0.207", (self.fake / "docker.log").read_text())
 
+    def test_nothing_live_the_newest_tag_with_an_image_is_deployed(self):
+        live, out = self.run_auto(["v1.0.207", "v1.0.208"], ["v1.0.207"], "")
+        self.assertEqual(live, "v1.0.207", out)
+
     def test_live_is_newest_nothing_is_pulled(self):
         live, _ = self.run_auto(["v1.0.207", "v1.0.208"], ["v1.0.207", "v1.0.208"], "v1.0.208")
         self.assertEqual(live, "v1.0.208")
