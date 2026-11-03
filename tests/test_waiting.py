@@ -87,9 +87,10 @@ class Waiting(unittest.TestCase):
             'thread': root})
         self.assertEqual(r.status_code, 201, r.text)
         item = next(a for a in self.status()['attention'] if a['where'] == 'routines')
-        self.assertIn('triage (version 1) waits for your yes', item['text'])
-        self.assertEqual(item['href'], f'/t/{root}')
-        db.conn().execute("UPDATE routines SET approved_by=1"); db.conn().commit()   # a human said yes, then paused it
+        self.assertEqual(item['text'], '1 routine change waits for your yes: triage v1')
+        self.assertEqual(item['href'], '/routines#approvals')     # where the yes is given (#380)
+        rid = r.json()['id']
+        self.client.post(f'/api/routines/{rid}/approve', headers=self.jac)       # a human said yes: it waits no more
         self.assertFalse([a for a in self.status()['attention'] if 'waits for your yes' in a['text']])
 
     def test_the_bell_shows_both_tabs(self):

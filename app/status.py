@@ -191,16 +191,16 @@ def _routines(attention: list) -> list:
             attention.append(_item(f"routine {r['name']} failed: {r.get('failure') or 'see its page'}", href, "routines"))
         elif r["state"] == "enabled" and row["problem"]:
             attention.append(_item(f"routine {r['name']}: {row['problem']}", href, "routines"))
-        elif r["state"] == "paused" and not r.get("approved_by") and not row["problem"]:
-            # a version nobody has said yes to: the board asks, so it does not rest on a bot's mention (#223)
-            attention.append(_item(f"routine {r['name']} (version {r['version']}) waits for your yes"
-                                   + (" in its thread" if r.get("thread") else ""),
-                                   f"/t/{r['thread']}" if r.get("thread") else href, "routines"))
         out.append(row)
+    waiting = [r for r in rows if r.get("waiting") and not r.get("problem")]
     ups = [r for r in rows if r.get("upgrade")]
-    if ups:     # one item for all of them: they are approved in one step (#242)
-        attention.append(_item(f"{len(ups)} routine upgrade(s) to recipe version {ups[0]['upgrade']['to']} "
-                               "wait for your yes", "/routines#upgrades", "routines"))
+    if waiting or ups:
+        # versions nobody has said yes to, and drafted recipe upgrades: one item, one page, one click each (#380, #242)
+        n = len(waiting) + len(ups)
+        attention.append(_item(f"{n} routine change{'s' if n != 1 else ''} wait{'' if n != 1 else 's'} for your yes: "
+                               + ", ".join(f"{r['name']} v{r['version']}" for r in waiting)
+                               + (", " if waiting and ups else "") + ", ".join(f"{r['name']} (recipe v{r['upgrade']['to']})" for r in ups),
+                               "/routines#approvals", "routines"))
     stalled = [r["name"] for r in out if r["state"] == "enabled"]
     if stalled and (seen is None or seen > RUNNER_STALE):    # one item: it is the runner that is down
         attention.append(_item(f"{len(stalled)} enabled routine(s) ({', '.join(stalled)}) but the runner "
