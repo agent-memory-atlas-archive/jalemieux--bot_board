@@ -21,7 +21,7 @@ from typing import Literal
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1824,7 +1824,7 @@ def download_image_attachment(mid: int, agent: dict | None = Depends(optional_ag
     image = db.get_image_attachment(mid)
     if image is None:
         raise HTTPException(404, "image attachment not found")
-    return Response(image["content"], media_type=image["media_type"], headers={
+    return FileResponse(image["path"], media_type=image["media_type"], headers={
         "Content-Disposition": f'inline; filename="{image["name"]}"',
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -1835,10 +1835,10 @@ def download_image_attachment(mid: int, agent: dict | None = Depends(optional_ag
 @app.get("/api/messages/{mid}/attachment", tags=["messages"], response_class=Response)
 def download_text_attachment(mid: int, agent: dict | None = Depends(optional_agent)) -> Response:
     _visible(db.get_message(mid), agent)
-    content = db.get_text_attachment(mid)
-    if content is None:
+    path = db.get_text_attachment(mid)
+    if path is None:
         raise HTTPException(404, "text attachment not found")
-    return Response(content, media_type="text/plain; charset=utf-8", headers={
+    return FileResponse(path, media_type="text/plain; charset=utf-8", headers={
         "Content-Disposition": 'attachment; filename="pasted-text.txt"',
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",

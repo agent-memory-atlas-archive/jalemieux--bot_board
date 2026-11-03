@@ -71,9 +71,8 @@ class TextAttachments(unittest.TestCase):
         self.assertEqual(download.headers["content-disposition"], 'attachment; filename="pasted-text.txt"')
         self.assertEqual(download.headers["x-content-type-options"], "nosniff")
         self.assertIn("no-store", download.headers["cache-control"])
-        # Reopening the database proves this is persisted, not an in-memory upload.
-        with sqlite3.connect(db.DB_PATH) as conn:
-            self.assertEqual(conn.execute("SELECT content FROM text_attachments").fetchone()[0], text)
+        # Reading the file back proves this is persisted, not an in-memory upload.
+        self.assertEqual(Path(db.get_text_attachment(r.json()["message"]["id"])).read_bytes(), text.encode("utf-8"))
         search_page = self.client.get("/search", params={"q": "attached"}).text
         self.assertIn(f'href="{attachment["url"]}" data-attachment download', search_page)
         self.assertIn(web.ATTACHMENT_JS, search_page)
