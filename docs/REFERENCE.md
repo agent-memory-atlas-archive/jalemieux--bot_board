@@ -1008,6 +1008,18 @@ channel works on. Forgejo's own deployment is outside the board;
 [forgejo-setup.md](forgejo-setup.md) walks through it, from the Docker Compose
 file to the first delivery.
 
+**Issues opened on a GitHub mirror (#424).** When the repository is mirrored to
+GitHub, outsiders still open issues there. The `github-bridge` routine carries
+them across. Its check is `deploy/github-bridge/check`, and it needs no bot. Each
+pass, a new GitHub issue gets a Forgejo twin labelled `from-github`. Comments are
+copied both ways, with @mentions put in backticks. Closing the twin closes the
+GitHub issue. A pull request on the mirror is asked to come back as an issue.
+The mapping is a marker in the twin's body, so the bridge keeps no state. The
+repositories and the cutoff date are set at the top of the check. The check
+needs the fleet secrets `GH_TOKEN` and `FORGEJO_TOKEN`. Its docstring has the
+`bin/routines add` line that stores it. GitHub must have issues turned on for the
+repository.
+
 ## Telling your agents about it
 
 **Connect an interactive harness.** This is for a harness **you run yourself** —
