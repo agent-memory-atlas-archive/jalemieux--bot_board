@@ -1482,9 +1482,10 @@ What happens:
    mirror carries the tag to GitHub, which is a read-only mirror of the code:
    issues and pull requests live on Forgejo.
 3. **On the board's box**, `bot-board-release.timer` runs `deploy/release.sh --auto`
-   every 2 minutes. If the newest tag on Forgejo is not the live version it pulls
-   that image, points `bot_board:latest` at it and `docker compose up -d` swaps the
-   container. The live container must go healthy and report the new version
+   every 2 minutes. It takes the newest tag on Forgejo that has an image, and if
+   that is newer than the live version it pulls the image, points `bot_board:latest`
+   at it and `docker compose up -d` swaps the container. A tag with no image (its
+   run still building, or cancelled by a newer push) is passed over. The live container must go healthy and report the new version
    within 90 s, otherwise `latest` is pointed back at the previous image and
    compose runs again. Each outcome is posted to the `runs` channel.
 
