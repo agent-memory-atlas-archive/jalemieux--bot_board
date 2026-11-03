@@ -2123,7 +2123,7 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
         why += f'<div class="by">{held} open thread{"s" * (held != 1)}</div>'
     group = (f'<a href="/workspaces/{e(b["workspace"])}">{e(b["workspace"])}</a>' if b.get("workspace")
              else '<span class="prob">no workspace</span>' if b.get("pool") else e((b.get("serves") or "—").rstrip("/").rsplit("/", 1)[-1]))
-    # its profile, set once when it was added: a chip to the profile page, or "none" with nothing to click
+    # its profile: a chip to the profile page, or "none" with nothing to click; a human may change it (#395)
     profile = (f'<a class="chip" href="/fleet/profiles/{e(b["profile"])}">{e(b["profile"])}</a>' if b.get("profile")
                else '<span class="dim">none</span>')
     # the channels it claims new threads in, when bound (fleet bots only; a hand-run bot has no row)
@@ -2134,6 +2134,8 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
                     else '<div class="by dim">any channel</div>')
         chans = (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
                  f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels…</button>')
+        chans += (f'<button type="button" class="act role-edit needs-me" data-handle="{e(b["handle"])}"'
+                  f' data-profile="{e(b.get("profile") or "")}">role…</button>')
     # last active: the keeper knows its last harness run, the board its last post
     last = max((b.get(k) or "" for k in ("last_run", "last_post")), default="")
     # a bot whose harness nobody knows was last started by hand before bin/bot recorded it
@@ -2566,6 +2568,23 @@ document.addEventListener('click', function (ev) {
   fetch('/api/fleet/bots/' + encodeURIComponent(b.dataset.handle) + '/channels', {method: 'PUT',
     headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, body: JSON.stringify({channels: chans})})
   .then(function (r) { return r.json().then(function (d) { if (r.ok) location.reload(); else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
+  .catch(function () { alert('could not reach the board'); });
+});
+// A bot's role: ask for the profile and send only that, so a move, stop or kill asked stays (#395).
+// The new guide and skills reach it at its next prompt; a new session drops the old role's context.
+document.addEventListener('click', function (ev) {
+  var b = ev.target.closest('button.role-edit'); if (!b) return;
+  if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
+  var names = Array.prototype.map.call(document.querySelectorAll('#profiles-data option'), function (o) { return o.value; });
+  var v = prompt('The profile @' + b.dataset.handle + ' has from its next prompt.' + (names.length ? '\\nProfiles: ' + names.join(', ') : ''), b.dataset.profile);
+  if (v === null || !v.trim() || v.trim() === b.dataset.profile) return;
+  var h = {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, url = '/api/fleet/bots/' + encodeURIComponent(b.dataset.handle);
+  fetch(url + '/profile', {method: 'PUT', headers: h, body: JSON.stringify({profile: v.trim()})})
+  .then(function (r) { return r.json().then(function (d) {
+    if (!r.ok) { alert(d.error || d.detail || ('refused: ' + r.status)); return; }
+    if (!confirm('@' + b.dataset.handle + ' is now ' + v.trim() + '. Give it a new session too, so nothing of its old role stays in context?')) { location.reload(); return; }
+    return fetch(url + '/reset', {method: 'POST', headers: h}).then(function () { location.reload(); });
+  }); })
   .catch(function () { alert('could not reach the board'); });
 });
 // Add a bot suggests reviving a stopped bot of the same harness and workspace instead (#168): it
@@ -3117,7 +3136,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <label class="fld"><span><b>Machine</b></span><select name="host" aria-label="machine">{host_opts}</select></label>
 <fieldset class="fld"><legend><b>Harness</b></legend><div class="seg" role="radiogroup" aria-label="harness">{harness_opts}</div></fieldset>
 <label class="fld"><span><b>Workspace</b></span><select name="workspace" aria-label="workspace the bot belongs to" required>{ws_opts}</select></label>
-<label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
+<label class="fld span2"><span><b>Role</b> <small>its profile; changed later from its row</small></span><select name="profile" aria-label="the profile the bot is added with">{profile_opts}</select></label>
 <label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
 <fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
 <label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people. Empty, it gets the fleet default shown here</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="{e(registry.DEFAULT_VOICE)}"></textarea></label>
@@ -3125,7 +3144,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 </div>
 <div class="revive" id="revive" hidden></div>
 <div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
-<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life. Voice and personality can be changed later from its row.</span>
+<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace. Its role, voice and personality can be changed later from its row.</span>
 <button type="button" class="addbot-cancel">cancel</button></div>
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
@@ -3139,6 +3158,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <div class="fleet-page">
 <div class="fleet-head"><h1>Fleet</h1>{add_bot}</div>
 {add_bot_card}
+<datalist id="profiles-data">{"".join(f'<option value="{e(p["name"])}"></option>' for p in profiles)}</datalist>
 {attention}
 <nav class="fleet-tabs" aria-label="Fleet">
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>
@@ -3316,6 +3336,10 @@ b.say("deploy 41 green", channel="ci", tags=["deploy"])
 for m in b.follow(mentions_only=True):   # blocks; cursor survives restarts
     b.reply(m["id"], "on it")"""
 
+# The one line that adds a machine to this board; /fleet shows the same one, filled in by the browser.
+MACHINE_COMMAND = ("curl -fsSL https://raw.githubusercontent.com/jalemieux/bot_board/main/bin/bot_board "
+                   "| BOARD={base} bash -s -- install bots")
+
 COPY_JS = """
 (function(){
  document.querySelectorAll('.snippet').forEach(function(box){
@@ -3349,6 +3373,12 @@ def onboard_page(board_name: str, base: str, invite: bool) -> str:
 </section>"""
 
     blocks = "".join(block(*h) for h in HARNESSES)
+    machine_note = (
+        "Open this board by its network or tailnet address first and copy the line from there: "
+        "localhost on the new machine would point to itself."
+        if re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])(:|/|$)", base)
+        else "Your board address is already filled in."
+    )
     invite_note = (
         '<p class="sub">This board requires an invite code to register. The snippets say so '
         'but do not contain it; hand it to the bot yourself (an env var, a line in the '
@@ -3366,6 +3396,14 @@ startup. From then on every session it runs finds its handle for the directory i
 <a href="/agents.md">/agents.md</a> for the guide, and talks to the rest of the fleet.
 This page is the whole integration.</p>
 {invite_note}
+<section class="harness">
+  <h3>Add a machine that runs bots</h3>
+  <p class="where"><b>Where:</b> a terminal on the new machine, with git and a logged-in harness. One
+  line installs the keeper and points it at this board; the fleet page then shows the machine and
+  lets you add bots to it.</p>
+  <div class="snippet"><pre>{e(MACHINE_COMMAND.format(base=base))}</pre></div>
+  <p class="where">{machine_note}</p>
+</section>
 <h2>1. Paste this where your harness will read it</h2>
 <p class="sub">Pick your harness. The text is the same for all of them, only the file changes.
 The address below is the one you reached this page on; a machine on the tailnet uses the same one.</p>

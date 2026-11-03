@@ -368,7 +368,7 @@ API_MAP = {
                                 " personality?}; the board picks"
                                 " its name -> {handle}",
         "PUT /api/fleet/bots/{handle}": "a human asks for a bot to run on a box, or to stop {host, run, harness,"
-                                        " workspace, profile, voice, personality, kill, threads}; profile is set once, for a new bot;"
+                                        " workspace, profile, voice, personality, kill, threads}; profile gives it a profile, or moves it to another;"
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
@@ -376,6 +376,8 @@ API_MAP = {
                                          " search and at its link, and bots still see it. DELETE brings it back",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
+        "PUT /api/fleet/bots/{handle}/profile": "a human moves a bot to another profile {profile}, leaving the"
+                                                " rest of what was asked for it as it is; its next prompt carries the new guide",
         "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
                                               " clears; in its composed AGENTS.md at its next wake",
         "POST /api/fleet/bots/{handle}/move": "a human moves a pool bot to another box {to, start?}; the keepers of"
@@ -866,8 +868,9 @@ class FleetWantIn(BaseModel):
     threads: str | None = Field(default=None, max_length=8, description="With run false, what to do with the bot's"
                                 " open threads: keep (default), handoff (release them once its keeper reports it"
                                 " stopped) or retire (hand off, and drop it from the stopped list).")
-    profile: str | None = Field(default=None, max_length=64, description="For a new bot: the profile it is added"
-                                " with (GET /api/profiles). Set once; a bot that has one cannot be given another.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with"
+                                " (GET /api/profiles), or another for a bot that has one: it keeps its handle, token,"
+                                " channels and voice, and its next prompt carries the new guide and skills.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of its workspace the"
                                        " bot claims new threads in. Required with a specialized profile; empty"
                                        " means any channel. Changed later with PUT /api/fleet/bots/{handle}/channels.")
@@ -958,6 +961,23 @@ def fleet_channels(handle: str, body: FleetChannelsIn, agent: dict = Depends(cur
     return {"ok": True, "channels": db.bot_channels(handle)}
 
 
+class FleetProfileIn(BaseModel):
+    profile: str = Field(min_length=1, max_length=64, description="The profile the bot has from its next prompt (GET /api/profiles).")
+
+
+@app.put("/api/fleet/bots/{handle}/profile", tags=["fleet"])
+def fleet_profile(handle: str, body: FleetProfileIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human moves a fleet bot to another profile (#395). It keeps its handle, token, box,
+    channels and voice, and whatever else was asked for it; its channels are checked against
+    the new profile. Its next prompt carries the new guide and skills."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human gives a bot a profile")
+    why = fleet.set_profile(handle, body.profile.strip().lower())
+    if why:
+        raise HTTPException(409, why)
+    return {"ok": True, "profile": body.profile.strip().lower()}
+
+
 class FleetVoiceIn(BaseModel):
     voice: str = Field(max_length=MAX_VOICE, description="How the bot writes to people; empty clears.")
     personality: str = Field(max_length=MAX_VOICE, description="Who the bot is, expression only; empty clears.")
@@ -980,7 +1000,8 @@ class FleetNewIn(BaseModel):
     host: str = Field(description="The box to start it on.", max_length=64)
     harness: str = Field(description="claude, codex, opencode or copilot.", max_length=32)
     workspace: str = Field(max_length=64, description="The workspace the new bot belongs to.")
-    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with, for life.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with;"
+                                   " changed later with PUT /api/fleet/bots/{handle}.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of the workspace it"
                                        " claims new threads in; required with a specialized profile.")
     voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people.")

@@ -488,7 +488,7 @@ SKILL_PAGE_JS = r"""
 def profile_page(board_name: str, profile: dict, bots: list, history: list, skills: list, base: str) -> str:
     name = e(profile["name"])
     also = registry.also_has(profile)
-    own = {s["name"]: bool(s.get("mandatory")) for s in profile.get("skills") or []}
+    own = {s["name"]: bool(s.get("mandatory")) for s in profile.get("skills") or [] if s["name"] not in {b["name"] for b in also}}
     skill_rows = "".join(
         f'<tr><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"{" checked" if s["name"] in own else ""}></td>'
         f'<td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a><div class="by desc">{e(s["description"])}</div></td>'
@@ -500,9 +500,9 @@ def profile_page(board_name: str, profile: dict, bots: list, history: list, skil
                    f'<tbody>{skill_rows}</tbody></table>' if skill_rows else
                    '<p class="sub">The registry has no profile skill yet; its bots have the guide and their workspace\'s knowledge base.</p>')
     if also:
-        skills_html += ('<p class="sub">Every bot also has '
+        skills_html += ('<p class="sub" id="base-skills">Base skills, every bot has them: '
                         + ", ".join(f'<a class="chip" href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a>' for s in also)
-                        + ": not this profile's, set on the skill itself.</p>")
+                        + ". Not this profile's: set on the skill itself.</p>")
     bot_rows = ""
     for b in bots:
         st = b.get("state") or {}
@@ -660,10 +660,15 @@ def profile_new_page(board_name: str, templates: list, profiles: list, skills: l
     chips = "".join(f'<button type="button" data-key="{e(s["key"])}" aria-pressed="{"true" if s["key"] == chosen else "false"}">'
                     f'{e(s["label"])}{" <small>template</small>" if s["kind"] == "template" else ""}</button>'
                     for s in starters)
+    # a base skill reaches every bot whatever its profile (#347): shown ticked and fixed, never sent
+    skills = sorted(skills, key=lambda s: not s.get("base"))
     skill_rows = "".join(
-        f'<tr><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"></td>'
-        f'<td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a><div class="by desc">{e(s["description"])}</div></td>'
-        f'<td data-label="mandatory"><label><input type="checkbox" name="mandatory" value="{e(s["name"])}" aria-label="{e(s["name"])} mandatory"> read before any work</label></td></tr>'
+        f'<tr{" class=dim" if s.get("base") else ""}><td><input type="checkbox" name="skill" value="{e(s["name"])}" aria-label="include {e(s["name"])}"'
+        f'{" checked disabled" if s.get("base") else ""}></td>'
+        f'<td class="who"><a href="/fleet/skills/{e(s["name"])}">{e(s["name"])}</a><div class="by desc">'
+        f'{"base: every bot has it. " if s.get("base") else ""}{e(s["description"])}</div></td>'
+        f'<td data-label="mandatory"><label><input type="checkbox" name="mandatory" value="{e(s["name"])}" aria-label="{e(s["name"])} mandatory"'
+        f'{" checked disabled" if s.get("base") else ""}> read before any work</label></td></tr>'
         for s in skills)
     skills_html = (f'<table class="bots pick"><thead><tr><th><span class="sr-only">Include</span></th><th>Skill</th><th>Mandatory</th></tr></thead>'
                    f'<tbody>{skill_rows}</tbody></table>' if skills else
@@ -675,7 +680,7 @@ def profile_new_page(board_name: str, templates: list, profiles: list, skills: l
 <div class="fleet-page"><div class="reg">
 <p class="crumbs"><a href="/fleet">Fleet</a> › <a href="/fleet#fleet-profiles">Profiles</a> › new profile</p>
 <div class="reg-head"><h1 style="font-family:var(--sans)">Create a profile</h1></div>
-<p class="sub">A profile is a role and the skills that go with it. A bot keeps its profile for life; the profile itself is edited on its page, and a different role is a new profile.</p>
+<p class="sub">A profile is a role and the skills that go with it. A human can move a bot to another profile from its row; the profile itself is edited on its page, and a different role is a new profile.</p>
 <div class="two"><div>
 <div class="card"><h2>Start from</h2><div class="starters" id="starters">{chips}</div>
 <p class="sub" style="margin:8px 0 0">Three templates ship with the board. Any existing profile can be picked too, which is what Clone does. Switching replaces the fields below; nothing is saved until Create.</p></div>
@@ -715,8 +720,8 @@ NEW_PROFILE_JS = r"""
     ['role', 'responsibilities', 'focus', 'avoid'].forEach(function (k) { form.elements[k].value = s.data[k] || ''; });
     form.elements.specialized.checked = !!s.data.specialized;
     var picked = {}; (s.data.skills || []).forEach(function (x) { picked[x.name] = !!x.mandatory; });
-    form.querySelectorAll('input[name=skill]').forEach(function (c) { c.checked = c.value in picked; });
-    form.querySelectorAll('input[name=mandatory]').forEach(function (c) { c.checked = !!picked[c.value]; });
+    form.querySelectorAll('input[name=skill]:not(:disabled)').forEach(function (c) { c.checked = c.value in picked; });
+    form.querySelectorAll('input[name=mandatory]:not(:disabled)').forEach(function (c) { c.checked = !!picked[c.value]; });
     var st = document.getElementById('starting-text');
     st.textContent = s.kind === 'blank' ? 'A blank form. Nothing is recorded as lineage.'
       : s.kind === 'template' ? 'The ' + s.label + ' template that ships with the board. The profile records the template\'s name as what it started from.'
@@ -725,7 +730,7 @@ NEW_PROFILE_JS = r"""
   }
   function skills() {
     var mand = {}; form.querySelectorAll('input[name=mandatory]:checked').forEach(function (c) { mand[c.value] = true; });
-    return Array.prototype.map.call(form.querySelectorAll('input[name=skill]:checked'), function (c) { return {name: c.value, mandatory: !!mand[c.value]}; });
+    return Array.prototype.map.call(form.querySelectorAll('input[name=skill]:checked:not(:disabled)'), function (c) { return {name: c.value, mandatory: !!mand[c.value]}; });
   }
   function render() {
     var f = form.elements, name = f.name.value.trim() || '<name>';
@@ -735,10 +740,10 @@ NEW_PROFILE_JS = r"""
       if (f[p[0]].value.trim()) lines.push('## ' + p[1], '', f[p[0]].value.trim(), '');
     });
     lines.push('## Skills', '');
-    var sk = skills();
+    var sk = skills().concat(Array.prototype.map.call(form.querySelectorAll('input[name=skill]:disabled'), function (c) { return {name: c.value, base: true}; }));
     if (!sk.length) lines.push('This profile brings no skills; the guide and your workspace\'s knowledge base are what you have.');
     else { lines.push('Each skill is a SKILL.md you read with `GET /api/skills/<name>`. Read the mandatory ones now, before any work; the others when a thread calls for what they describe.', '');
-      sk.forEach(function (s) { lines.push('- **' + s.name + '**' + (s.mandatory ? ' (mandatory)' : '')); }); }
+      sk.forEach(function (s) { lines.push('- **' + s.name + '**' + (s.base ? ' (mandatory, every bot)' : s.mandatory ? ' (mandatory)' : '')); }); }
     lines.push('', 'Skills change only between sessions: what you read now holds until your next session starts.');
     document.getElementById('preview').textContent = lines.join('\n');
     var n = f.name.value.trim();
