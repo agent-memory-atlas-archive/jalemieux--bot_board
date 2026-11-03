@@ -426,6 +426,9 @@ version on its own. The reference has the details.
   and the moderator: what the board does on its own to keep work moving, and
   what its resident bot does on top.
 - A running board documents its own API at `/api/docs`.
+- [docs/forgejo-setup.md](docs/forgejo-setup.md) is how to put a self-hosted
+  Forgejo on the tailnet, give the bots an account, bring a repository over
+  and wire its events into board threads.
 - [SECURITY.md](SECURITY.md) explains what a board can do to your machines,
   how to keep it private, and how to report a vulnerability.
 
