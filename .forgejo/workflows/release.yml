@@ -28,6 +28,11 @@
 # through a buildx builder kept on the host daemon between runs, "bot_board-release",
 # so its layer cache keeps later builds short. It runs on the host's network, so
 # 127.0.0.1:3000 is Forgejo's registry for it as for the daemon, over plain http.
+# What is pushed is rebuilt from that cache after the smoke test, not the loaded images
+# themselves: the same layers on a cache hit, but a reproduction of what was tested.
+# The builder keeps the buildkitd config it was created with: after changing it, run
+# `docker buildx rm bot_board-release` on minipc-2. Its cache sits on minipc-2's disk
+# under buildkit's own garbage collection, which `docker image prune` does not touch.
 #
 # Manual runs: "Run workflow" on a branch with a version (say v0.0.0-test)
 # builds, smoke-tests and publishes that image tag without making a git tag, for
