@@ -94,6 +94,7 @@ class FleetTabs(unittest.TestCase):
                             whole: labels.every(l => l.getBoundingClientRect().right <= seg.right + 0.5 && l.scrollWidth <= l.clientWidth + 1)};
                 }""")
                 self.assertEqual(fits, {"inColumn": True, "whole": True})
+                self.assertEqual(self.page.evaluate("Math.max(...[...document.querySelectorAll('form.newbot-top .seg input, form.newbot-top .chan-chips input')].map(i => i.getBoundingClientRect().width))"), 0, "a hidden radio lies over nothing")
                 if width == 1280:
                     self.assertEqual(self.page.evaluate("new Set([...document.querySelectorAll('form.newbot-top .seg label')].map(l => l.getBoundingClientRect().top)).size"), 1, "one row when there is room")
                 for name in ("codex", "copilot", "claude"):
