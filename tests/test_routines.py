@@ -277,7 +277,7 @@ class Routines(unittest.TestCase):
         self.call('POST', path + '/report', {'test': {'for': n, 'version': 3, 'ok': False, 'error': 'exit 1'}}, auth=self.runner)
         got = self.call('GET', path)
         self.assertEqual((got['state'], got['approving'], 'waiting' in got), ('paused', False, False))
-        self.assertEqual(self.thread_bodies(ask['id'])[-1][1], 'Test of version 3 failed: exit 1 It stays paused; a fix is a new version.')
+        self.assertEqual(self.thread_bodies(ask['id'])[-1][1], '@ada test of version 3 failed: exit 1 It stays paused; a fix is a new version.')  # wakes the bot that stored it
         self.assertEqual(self.call('POST', path + '/enable')['state'], 'enabled')
 
         # a routine that was paused stays paused after its approval

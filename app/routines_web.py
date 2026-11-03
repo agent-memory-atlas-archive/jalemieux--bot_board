@@ -283,7 +283,8 @@ function detail(r) {
     var path = '/api/routines/' + encodeURIComponent(r.id);
     add(sec, r.state === 'enabled' ? act('Run now', 'POST', path + '/run', null, load) : null,
       r.state === 'enabled' ? act('Pause', 'POST', path + '/pause', null, load) : null,
-      r.state !== 'enabled' && !r.problem ? act('Enable', 'POST', path + '/enable', null, load) : null,
+      r.state !== 'enabled' && !r.problem && !r.waiting ? act('Enable', 'POST', path + '/enable', null, load) : null,
+      r.waiting && !r.problem && !r.approving ? act('Approve', 'POST', path + '/approve', null, load) : null,   // a yes first; the test switches it on (#380)
       act('Delete', 'DELETE', path, 'Delete the routine ' + (r.name || '#' + r.id) + '? It stops for good.',
           function () { location.hash = ''; load(); }), out);
   }

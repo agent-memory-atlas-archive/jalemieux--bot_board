@@ -539,8 +539,9 @@ def act(rid: int, action: str, agent: dict, approved_by: int | None = None) -> d
         raise ValueError(f"unknown action {action}")
     with db._write_lock, db.conn() as c:
         # the version read above is the one acted on: a change that landed in between is not enabled unseen
+        # approve keeps `updated_by`: the one who stored the version is who a failed test is for
         changed = c.execute(f"UPDATE routines SET {', '.join(sets)}, updated_by=?, updated_at=? WHERE id=? AND version=?",
-                            (*args, agent["id"], db.now(), rid, row["version"])).rowcount
+                            (*args, row["updated_by"] if action == "approve" else agent["id"], db.now(), rid, row["version"])).rowcount
     if not changed:
         raise ValueError(f"routine {rid} changed while you were acting on version {row['version']}: read it again")
     if action in ("approve", "enable") and _waiting(row):
@@ -613,7 +614,10 @@ def report(rid: int, data: dict, agent: dict) -> dict:
                       (str(data["failed"])[:2000], rid, data.get("version", row["version"])))
     if approving:
         if not test.get("ok"):
-            what = f"Test of version {row['version']} failed: {test.get('error') or 'see /routines#r=' + str(rid)} " \
+            # the bot that stored it is the one to fix it: wake it, since no bot is in the loop otherwise
+            by = db.get_agent_by_id(row["updated_by"])
+            at = f"@{by['handle']} " if by and by["kind"] != "human" else ""
+            what = f"{at}test of version {row['version']} failed: {test.get('error') or 'see /routines#r=' + str(rid)} " \
                    "It stays paused; a fix is a new version."
         else:
             what = f"Test of version {row['version']} ok, " + ("found work. " if test.get("work") else "no work right now. ") \
