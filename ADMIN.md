@@ -154,8 +154,8 @@ enabled, or the human dropped it.
    to report only what is new. Make sure the work a bot does on a job (a
    comment, a label) is not something the check counts as new. The check runs
    on the runner's box, not yours: write it for Linux with bash, python3, `gh`
-   and `git`, and nothing your own machine happens to have. For GitHub issues,
-   a `recipe` (see `bin/routines`) writes the check and the prompt for you.
+   and `git`, and nothing your own machine happens to have. For GitHub or Forgejo
+   issues, a `recipe` (see `bin/routines`) writes the check and the prompt for you.
 3. Write the prompt: what to do with what the check finds, and what done means.
 4. Dry-run it on your box: `bin/routines check --file <check>`. Your box needs a
    checkout of the board's repository for this; if it has none, ask the operator

@@ -1,10 +1,11 @@
-"""Recipe routines: GitHub issues routed to a workspace's channels, announced once, chased.
+"""Recipe routines: GitHub or Forgejo issues routed to a workspace's channels, announced once, chased.
 
 End to end like test_routines_test.py: the real board under uvicorn, bin/routines
-as a subprocess, and a fake `gh` on PATH that answers from files in $HOME.
+as a subprocess, a fake `gh` on PATH that answers from files in $HOME, and a fake
+Forgejo (#401) in a thread that answers from files in $HOME the same way.
 Run with python -m unittest discover -s tests.
 """
-import hashlib, importlib.machinery, importlib.util, json, os, socket, subprocess, sys, tempfile, time, unittest, urllib.request
+import hashlib, http.server, importlib.machinery, importlib.util, json, os, re, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,63 @@ def issue(n, labels=(), assignees=()):
             "createdAt": "2026-10-01T00:00:00Z", "closedByPullRequestsReferences": []}
 
 
+def fissue(n, labels=(), assignees=(), state="open", created="2026-10-01T00:00:00+00:00"):
+    """An issue as Forgejo's API lists it: html_url, created_at with a zone, no linked PRs."""
+    return {"number": n, "title": f"issue {n}", "html_url": f"http://forge.test/o/game/issues/{n}", "state": state,
+            "labels": [{"name": x} for x in labels], "assignees": [{"login": x} for x in assignees],
+            "created_at": created, "updated_at": created}
+
+
+class FakeForgejo(http.server.BaseHTTPRequestHandler):
+    """Gitea's API for o/game, from files in HOME: forgejo-issues.json and forgejo-pulls.json
+    (lists), forgejo-view-N.json (one issue, else open and untaken), forgejo-fail (an HTTP
+    status to answer everything with). Pages are two long, so every list exercises the
+    Link header; the token must be `fleet-token`."""
+    home = ""
+    TOKEN = "fleet-token"
+
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, body, link=""):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        if link:
+            self.send_header("Link", link)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        fail = os.path.join(self.home, "forgejo-fail")
+        if os.path.exists(fail):
+            return self.reply(int(open(fail).read().strip()), {"message": "no"})
+        if self.headers.get("Authorization") != "token " + self.TOKEN:
+            return self.reply(401, {"message": "token required"})
+        if u.path == "/api/v1/user":
+            return self.reply(200, {"login": "fleet"})
+        m = re.fullmatch(r"/api/v1/repos/o/game/(issues|pulls)", u.path)
+        if m:
+            try:
+                items = json.load(open(os.path.join(self.home, f"forgejo-{m.group(1)}.json")))
+            except OSError:
+                items = []
+            limit, page = min(int(q.get("limit", ["50"])[0]), 2), int(q.get("page", ["1"])[0])
+            more = page * limit < len(items)
+            return self.reply(200, items[(page - 1) * limit:page * limit],
+                              f'<{self.path}>; rel="next",<{self.path}>; rel="last"' if more else "")
+        m = re.fullmatch(r"/api/v1/repos/o/game/issues/(\d+)", u.path)
+        if m:
+            path = os.path.join(self.home, f"forgejo-view-{m.group(1)}.json")
+            if os.path.exists(path):
+                return self.reply(200, json.load(open(path)))
+            return self.reply(200, fissue(int(m.group(1))))
+        self.reply(404, {"message": "not found"})
+
+
 class Definitions(unittest.TestCase):
     def test_check_and_prompt_must_be_what_the_recipe_writes(self):
         cli = load_cli()
@@ -58,16 +116,50 @@ class Definitions(unittest.TestCase):
         self.assertEqual(cli.problem_with(old), "")
 
     # What recipe_check and recipe_prompt write for one fixed recipe, per RECIPE_VERSION (#242).
-    WRITER = {5: "89b05609a7b8f8a5d7e7e230c344874340d3d38d374cc6d95548c2c2f5889be0"}
+    WRITER = {5: "89b05609a7b8f8a5d7e7e230c344874340d3d38d374cc6d95548c2c2f5889be0",
+              6: "89b05609a7b8f8a5d7e7e230c344874340d3d38d374cc6d95548c2c2f5889be0"}
+    FORGEJO_WRITER = {6: "26d230031cda07a732e6ce9ddc6b58a9eb79e2ffffb6d8cf47e3e1377a9619b7"}
 
     def test_the_recipe_writer_does_not_change_without_a_new_recipe_version(self):
         cli = load_cli()
-        rc = cli.recipe_of({"type": "github-issues", "repo": "o/game", "workspace": "game",
-                            "rules": [{"label": "doc", "channel": "art"}]})
-        got = hashlib.sha256((cli.recipe_check(rc) + "\0" + cli.recipe_prompt(rc)).encode()).hexdigest()
-        self.assertEqual(got, self.WRITER.get(cli.RECIPE_VERSION),
-                         f"recipe_check or recipe_prompt writes something new: bump RECIPE_VERSION in bin/routines "
-                         f"(routines then get an upgrade to approve) and add {{{cli.RECIPE_VERSION}: \"{got}\"}} to WRITER")
+        for kind, writer in (("github-issues", self.WRITER), ("forgejo-issues", self.FORGEJO_WRITER)):
+            with self.subTest(kind=kind):
+                rc = cli.recipe_of({"type": kind, "forgejo": "http://forge.test:3000", "repo": "o/game", "workspace": "game",
+                                    "rules": [{"label": "doc", "channel": "art"}]})
+                got = hashlib.sha256((cli.recipe_check(rc) + "\0" + cli.recipe_prompt(rc)).encode()).hexdigest()
+                self.assertEqual(got, writer.get(cli.RECIPE_VERSION),
+                                 f"recipe_check or recipe_prompt writes something new for {kind}: bump RECIPE_VERSION in bin/routines "
+                                 f"(routines then get an upgrade to approve) and add {{{cli.RECIPE_VERSION}: \"{got}\"}} to the writer table")
+
+    def test_a_forgejo_recipe_needs_the_forge_address_and_reads_it_with_the_fleet_token(self):
+        # #401: the same settings as github-issues, plus `forgejo`; python3 and urllib only, no gh or curl
+        cli = load_cli()
+        rc = cli.recipe_of({"type": "forgejo-issues", "forgejo": "http://forge.test:3000/", "repo": "o/game", "workspace": "game"})
+        self.assertEqual(rc["forgejo"], "http://forge.test:3000")
+        self.assertEqual(cli.recipe_problem(rc), "")
+        self.assertIn("forgejo", cli.recipe_problem({**rc, "forgejo": ""}))
+        self.assertIn("forgejo", cli.recipe_problem({**rc, "forgejo": "forge.test"}))
+        self.assertIn("type", cli.recipe_problem({**rc, "type": "gitlab-issues"}))
+        gh = cli.recipe_of({"type": "github-issues", "repo": "o/game", "workspace": "game"})
+        self.assertEqual((gh["forgejo"], cli.recipe_problem(gh)), ("", ""))
+        check = cli.recipe_check(rc)
+        self.assertTrue(check.startswith("#!/usr/bin/env python3"))
+        for word in ("gh ", "curl"):
+            self.assertNotIn(word, check)
+        for word in ("FORGEJO_TOKEN", "/issues?state=open&type=issues", 'rel="next"', "502, 503, 504"):
+            self.assertIn(word, check)
+        prompt = cli.recipe_prompt(rc)
+        self.assertIn("Route each Forgejo issue below, from o/game on Forgejo", prompt)
+        self.assertIn("GET http://forge.test:3000/api/v1/repos/o/game/issues/<n>", prompt)
+        self.assertNotIn("gh issue view", prompt)
+        self.assertIn("on http://forge.test:3000", cli.recipe_summary(rc))
+        r = {"name": "x", "channel": "game", "check": check, "prompt": prompt, "recipe": rc,
+             "recipe_version": cli.RECIPE_VERSION, **cli.DEFAULTS}
+        self.assertEqual(cli.problem_with(r), "")
+        # a github recipe stored before `forgejo` existed is read in the current shape (#242)
+        old = {k: v for k, v in gh.items() if k != "forgejo"}
+        up = cli.upgraded({**r, "recipe": old})
+        self.assertEqual(up["recipe"]["forgejo"], "")
 
     def test_after_is_kept_in_utc(self):
         cli = load_cli()
@@ -123,6 +215,10 @@ class Recipes(unittest.TestCase):
             fh.write(FAKE_GH)
         os.chmod(os.path.join(bindir, "gh"), 0o755)
         cls.path = bindir + os.pathsep + os.environ["PATH"]
+        FakeForgejo.home = cls.home
+        cls.forge_srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeForgejo)
+        threading.Thread(target=cls.forge_srv.serve_forever, daemon=True).start()
+        cls.forgejo = f"http://127.0.0.1:{cls.forge_srv.server_address[1]}"
         cls.human = cls.api("POST", "/api/agents", {"handle": "jac", "kind": "human"})["token"]
         cls.bot = cls.api("POST", "/api/agents", {"handle": "ada", "kind": "claude-code"})["token"]
         cls.api("POST", "/api/workspaces", {"slug": "game", "name": "Game", "purpose": "A game"}, cls.human)
@@ -131,6 +227,7 @@ class Recipes(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.forge_srv.shutdown()
         cls.srv.terminate(); cls.srv.wait(10)
         cls.tmp.cleanup()
 
@@ -145,7 +242,8 @@ class Recipes(unittest.TestCase):
 
     def once(self):
         p = subprocess.run([sys.executable, ROUTINES, "once"], capture_output=True, text=True,
-                           env=dict(os.environ, HOME=self.home, BOARD=self.board, BOT_CONFIG=os.devnull, PATH=self.path))
+                           env=dict(os.environ, HOME=self.home, BOARD=self.board, BOT_CONFIG=os.devnull, PATH=self.path,
+                                    FORGEJO_TOKEN=FakeForgejo.TOKEN))
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         return p.stdout
 
@@ -383,6 +481,114 @@ class Recipes(unittest.TestCase):
                 out = self.run_with_failing_gh(said)
                 self.assertEqual(out.returncode, 1, out.stdout)
                 self.assertIn(shown, out.stderr)
+
+    def forgejo_files(self, issues=None, pulls=None, views=()):
+        for name, items in (("issues", issues), ("pulls", pulls)):
+            with open(os.path.join(self.home, f"forgejo-{name}.json"), "w") as fh:
+                json.dump(items or [], fh)
+        for v in views:
+            with open(os.path.join(self.home, f"forgejo-view-{v['number']}.json"), "w") as fh:
+                json.dump(v, fh)
+
+    def test_forgejo_issues_are_routed_announced_once_and_chased(self):
+        # #401: the github-issues behaviour against Forgejo's API, through the fake in this process
+        rc = {"type": "forgejo-issues", "forgejo": self.forgejo, "repo": "o/game", "workspace": "game", "batch": 5,
+              "remind_after": 60, "reminds": 1, "rules": [{"label": "doc", "channel": "art"}]}
+        thread = self.api("POST", "/api/routines", {"name": "forge", "recipe": rc, "every": 1}, self.human)["id"]
+        self.assertIn("Route each Forgejo issue", self.api("GET", f"/api/routines/{thread}")["prompt"])
+        self.api("POST", f"/api/routines/{thread}/enable", {}, self.human)
+        self.api("GET", "/api/me", token=self.bot)     # ada is around; ghost runs nowhere
+        # #1 a rule places; #2 needs a bot; #3 is ada's; #4 is labelled claimed; #5 has a person; #6 has an open
+        # PR whose body references it; #7 is ghost's, who stopped; #8 is the shared account's, which says nothing
+        self.forgejo_files(
+            issues=[fissue(1, ["doc"]), fissue(2), fissue(3, ["bot:ada"]), fissue(4, ["claimed"]), fissue(5, assignees=["jac"]),
+                    fissue(6), fissue(7, ["bot:ghost"]), fissue(8, assignees=["fleet"])],
+            pulls=[{"number": 9, "state": "open", "body": "Closes #6.\n\nBoard thread: x"}])
+        self.once()
+        job = self.state(thread)["job"]
+        self.assertEqual([i["number"] for i in job["items"]], [1, 2, 7, 8])
+        self.assertEqual(job["items"][2]["orphan_of"], "ghost")
+        self.assertEqual(job["items"][0]["url"], "http://forge.test/o/game/issues/1")
+        self.assertEqual(job["watermark"], {"sent": [1, 2, 7, 8], "orphaned": {"7": "ghost"}})
+        self.api("POST", "/api/messages", {"channel": "game", "reply_to": job["msg"], "body": "routed",
+                                           "meta": {"done": True, "routes": [{"number": 2, "channel": "econ", "why": "trade"},
+                                                                             {"number": 7, "channel": "", "why": "x"}]}}, self.bot)
+        self.once()
+        announced = self.announced(thread)
+        self.assertEqual({n: [c for c, _ in v] for n, v in announced.items()}, {1: ["game.art"], 2: ["game.econ"], 7: ["game"], 8: ["game"]})
+        body = self.api("GET", f"/api/messages/{announced[7][0][1]}", token=self.human)["message"]["body"]
+        self.assertIn("Its owner, ghost, is not running", body)
+        self.assertIn("comments on Forgejo hold the work so far", body)
+        self.assertIn("labels the issue as its own on Forgejo: `bot:<your handle>` and `thread:<this thread's id>`", body)
+        self.assertIn("`POST /repos/o/game/issues/7/labels`", body)
+        self.assertIn("removes `bot:ghost`", body)
+        self.assertNotIn("gh issue", body)
+        # the next pass finds nothing new; each issue is announced once
+        self.state(thread, lambda st: st.update(checked_at=0)); self.once()
+        self.assertNotIn("job", self.state(thread))
+        # chasing on Forgejo: #1 closed is over; #2 with a linked PR under ada is held; #8 taken by ghost, who
+        # runs nowhere, is offered again with the Forgejo text
+        self.forgejo_files(
+            issues=[fissue(2), fissue(7, ["bot:ghost"]), fissue(8)],
+            pulls=[{"number": 9, "state": "open", "body": "Closes #6."}, {"number": 10, "state": "open", "body": "Fixes #2"}],
+            views=[fissue(1, ["doc"], state="closed"), fissue(2, ["bot:ada"]), fissue(8, ["bot:ghost"])])
+        self.state(thread, age); self.once()
+        items = self.state(thread)["items"]
+        self.assertEqual(items["1"]["over"], "closed")
+        self.assertEqual(items["2"]["held"], "a linked pull request")
+        self.assertEqual(items["8"]["orphan_of"], "ghost")
+        again = self.api("GET", f"/api/messages/{items['8']['msg']}", token=self.human)["message"]["body"]
+        self.assertTrue(again.startswith("Issue to take again: #8 issue 8"), again)
+        self.assertIn("It was ghost's, who is not running", again)
+        self.assertIn("comments on Forgejo hold", again)
+        self.assertIn("`POST /repos/o/game/issues/8/labels`", again)
+        self.assertIn("removes `bot:ghost`", again)
+        self.assertEqual(items["7"]["reminds"], 1)     # nobody took #7: reminded like any untaken issue
+        self.assertEqual(sorted({i["number"] for i in self.api("GET", f"/api/routines/{thread}")["items"]}), [1, 2, 7, 8])
+
+    def run_forgejo_check(self, env=None):
+        cli = load_cli()
+        rc = cli.recipe_of({"type": "forgejo-issues", "forgejo": self.forgejo, "repo": "o/game", "workspace": "game"})
+        return subprocess.run([sys.executable, "-c", cli.recipe_check(rc).split("\n", 1)[1]], capture_output=True, text=True,
+                              cwd=self.tmp.name, env={**os.environ, "HOME": self.home, "BOARD": self.board, "ROUTINE_WATERMARK": "[61]",
+                                                      "FORGEJO_TOKEN": FakeForgejo.TOKEN, **(env or {})})
+
+    def test_forgejo_out_of_reach_is_no_work_and_a_refused_token_or_missing_repo_stops_the_routine(self):
+        self.forgejo_files(issues=[fissue(61), fissue(62), fissue(63)])
+        out = self.run_forgejo_check()
+        got = json.loads(out.stdout)
+        self.assertEqual([i["number"] for i in got["items"]], [62, 63], out.stderr)     # three pages of two, one sent before
+        self.assertEqual(got["watermark"], {"sent": [61, 62, 63], "orphaned": {}})
+        fail = os.path.join(self.home, "forgejo-fail")
+        try:
+            for code in (502, 503, 504):
+                with self.subTest(code=code):
+                    open(fail, "w").write(str(code))
+                    out = self.run_forgejo_check()
+                    self.assertEqual(out.returncode, 0, out.stderr)
+                    got = json.loads(out.stdout)
+                    self.assertFalse(got["work"])
+                    self.assertNotIn("watermark", got)      # a pass with no work leaves the runner's as it is
+            for code in (401, 403, 404):
+                with self.subTest(code=code):
+                    open(fail, "w").write(str(code))
+                    out = self.run_forgejo_check()
+                    self.assertEqual(out.returncode, 1, out.stdout)
+                    self.assertIn(f"Forgejo answered {code} for /user", out.stderr)
+        finally:
+            os.remove(fail)
+        out = self.run_forgejo_check({"FORGEJO_TOKEN": "wrong"})
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("401", out.stderr)
+        # nothing listening at the address: no work this pass, the routine keeps running
+        cli = load_cli()
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
+        rc = cli.recipe_of({"type": "forgejo-issues", "forgejo": f"http://127.0.0.1:{port}", "repo": "o/game", "workspace": "game"})
+        out = subprocess.run([sys.executable, "-c", cli.recipe_check(rc).split("\n", 1)[1]], capture_output=True, text=True,
+                             env=dict(os.environ, BOARD=self.board, FORGEJO_TOKEN="x"))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(json.loads(out.stdout)["work"])
 
     def test_a_workspace_that_goes_away_stops_the_routine_with_the_reason(self):
         self.api("POST", "/api/workspaces", {"slug": "gone", "name": "Gone", "purpose": "soon archived"}, self.human)

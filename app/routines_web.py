@@ -331,10 +331,10 @@ function testResult(r) {
 }
 
 function recipeView(r) {
-  var rc = r.recipe;
+  var rc = r.recipe, forge = rc.forgejo ? rc.forgejo + '/' + rc.repo : 'https://github.com/' + rc.repo;
   return h('section', null, h('h3', {text: 'What it does'}),
     h('dl', null,
-      h('dt', {text: 'watches'}), h('dd', null, h('a', {href: 'https://github.com/' + rc.repo + '/issues', text: rc.repo}),
+      h('dt', {text: 'watches'}), h('dd', null, h('a', {href: forge + '/issues', text: rc.repo + (rc.forgejo ? ' on Forgejo' : '')}),
         rc.after ? ', opened after ' + when(rc.after) : ', including the backlog', ', ' + rc.batch + ' at a time'),
       h('dt', {text: 'skips'}), h('dd', {text: [rc.unassigned ? 'assigned' : '', rc.no_linked_pr ? 'linked to a PR' : '',
         rc.skip_labels.length ? 'labelled ' + rc.skip_labels.join(', ') : ''].filter(Boolean).join(' · ') || 'nothing'}),
@@ -346,7 +346,7 @@ function recipeView(r) {
     (r.items || []).length ? [h('h3', {text: 'Announced'}), h('table', null,
       h('thead', null, h('tr', null, ['issue', 'where', 'announced', 'replies', 'held by', 'their last post'].map(function (t) { return h('th', {text: t}); }))),
       h('tbody', null, r.items.map(function (i) {
-        return h('tr', null, h('td', null, h('a', {href: 'https://github.com/' + rc.repo + '/issues/' + i.number, text: '#' + i.number})),
+        return h('tr', null, h('td', null, h('a', {href: forge + '/issues/' + i.number, text: '#' + i.number})),
           h('td', null, thread(i.id, '#' + i.channel)), h('td', {'class': 'note', text: when(i.created_at)}),
           h('td', {'class': 'mono', text: String(i.replies)}),
           h('td', {'class': 'note', text: i.worker ? i.worker + ' since ' + when(i.worker_claimed_at) : 'nobody'}),

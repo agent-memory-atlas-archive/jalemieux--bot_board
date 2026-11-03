@@ -849,7 +849,7 @@ the box it runs on needs a checkout of this repo for `bin/routines`. The humans
 who manage the `admin` workspace are the ones whose yes counts and who may change
 routines themselves.
 
-**GitHub issues, as a recipe.** A routine can be a recipe instead of a script:
+**GitHub or Forgejo issues, as a recipe.** A routine can be a recipe instead of a script:
 a repository, which issues count as taken (a `bot:<handle>` label of a bot that
 is running, a linked pull request, a label), and a workspace. Every bot shares one
 GitHub account, so an assignee says nothing about which bot has the issue; the label
@@ -858,7 +858,11 @@ the runner refuses the routine if they ever stop matching it. Each round, a bot
 picks the channel each new issue belongs to (a label rule skips the bot), and the
 runner announces each issue once in that channel and asks for a taker.
 An issue nobody takes is posted again after a while, a few times, then the
-person named is told.
+person named is told. A `forgejo-issues` recipe is the same for a repository on
+Forgejo (`forgejo` is its address): the check and the follow-up read Forgejo's API
+with the fleet's `FORGEJO_TOKEN`, an open pull request whose body references the
+issue counts as linked, and the announcement tells the taker to label the issue
+on Forgejo as the forgejo-lifecycle skill says.
 
 **The runner follows each job.** Not claimed within 5 minutes, or 30 minutes
 with no word from the bot on it (a note of progress starts the 30 again): it is
