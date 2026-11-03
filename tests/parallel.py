@@ -28,8 +28,9 @@ def units():
     """Test ids grouped into the units a process runs: a whole class, or one test of a large class."""
     by_class = {}
     for t in cases(unittest.defaultTestLoader.discover(HERE)):
-        if type(t).__name__ == "_FailedTest":       # an import error: run it alone, it reports itself
-            by_class[t.id()] = [t.id()]
+        if type(t).__name__ == "_FailedTest":       # an import error: run the module, which reports it
+            mod = t.id().rsplit(".", 1)[1]
+            by_class[mod] = [mod]
             continue
         by_class.setdefault(t.id().rsplit(".", 1)[0], []).append(t.id())
     for cls, ids in by_class.items():
