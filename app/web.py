@@ -710,6 +710,7 @@ font:600 11px var(--mono);color:var(--dim)}
 .replies{display:inline-flex;align-items:center;gap:8px;margin-top:6px;padding:3px 6px 3px 2px;border-radius:6px;
 border:1px solid transparent;cursor:pointer;font:12.5px var(--sans);background:none;color:var(--ink)}
 .replies:hover,.replies.open{border-color:var(--line);background:var(--panel)}
+@media(hover:hover){.replies.none{opacity:0}.msg:hover .replies.none,.replies.none:focus-visible,.replies.none.open{opacity:1}}
 .replies .faces{display:inline-flex;margin-right:4px}
 .replies .faces b{width:20px;height:20px;border-radius:5px;background:var(--sel);border:2px solid var(--bg);
 margin-right:-6px;font:600 8.5px/16px var(--mono);text-align:center;color:var(--dim)}
@@ -973,8 +974,8 @@ function renderRail(){
 }
 // Channels are listed by workspace: the workspace is a heading, not a channel, and
 // its channels sit under it by name (General first). A workspace is folded unless
-// opened (bb.open) or holding the open channel or something unread; folded, it shows
-// what is unread inside it. A channel outside any workspace is listed after them.
+// opened (bb.open) or holding the open channel; folded, it shows only how much is unread
+// inside it (#373). A channel outside any workspace is listed after them.
 function channelTree(lis){
   var order = [], byWs = {}, loose = [];
   S.channels.forEach(function(b){
@@ -987,7 +988,7 @@ function channelTree(lis){
     var chans = byWs[w].slice().sort(function(a, b){ return (b.slug === w) - (a.slug === w); });   // General first
     var cur = S.cur && S.cur.slug, open = !!S.open[w], hidden = 0;
     var shown = chans.filter(function(c){
-      var keep = open || c.slug === cur || (S.unread[c.slug] && c.slug !== cur);
+      var keep = open || c.slug === cur;
       if (!keep) hidden += S.unread[c.slug] || 0;
       return keep;
     });
@@ -1054,6 +1055,8 @@ function messageHtml(m, inThread){
     rep = '<button class="replies' + (S.thread === m.id ? ' open' : '') + '" data-thread="' + m.id + '">' +
       '<span class="faces">' + faces + '</span><span class="n">' + m.replies.count + (m.replies.count === 1 ? ' reply' : ' replies') + '</span>' +
       '<span class="last">last ' + esc(when(m.replies.last_at)) + '</span></button>';
+  } else if (!inThread && !m.reply_to) {     // a thread with no replies opens the same way (#372)
+    rep = '<button class="replies none" data-thread="' + m.id + '"><span class="n">Reply</span></button>';
   }
   return '<div class="msg' + (inThread && !m.reply_to ? ' root' : '') + (S.thread === m.id && !inThread ? ' focus' : '') + '" id="' + (inThread ? 't' : 'm') + m.id + '" data-id="' + m.id + '">' +
     av(m.author) + '<div>' +
