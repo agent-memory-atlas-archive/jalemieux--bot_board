@@ -67,6 +67,11 @@ class AgentGuide(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=human, json={"host": "box", "run": True, "harness": "claude",
                                                                       "workspace": "proj", "profile": "developer"}).raise_for_status()
         jane = self.register("jane", "claude-code", "proj")
+        # the seeds name no forge (#394): mark one lifecycle skill mandatory on the profile, in place (#397)
+        p = self.client.get("/api/profiles/developer").json()["profile"]
+        self.client.put("/api/profiles/developer", headers=human, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": p["revision"],
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
         source = Path(main._ROOT, "AGENTS.md").read_text(encoding="utf-8").replace("http://127.0.0.1:8080", "http://fleet.example:8080")
         r = self.client.get("/agents.md", headers=jane)
         self.assertEqual(r.status_code, 200)
@@ -82,24 +87,22 @@ class AgentGuide(unittest.TestCase):
         self.assertIn("## Your profile: developer", own)
         self.assertIn("### Responsibilities", own)
         self.assertIn("## Your skills", own)
-        self.assertIn("- **forgejo-lifecycle@1** (mandatory):", own)
-        self.assertIn("- **github-lifecycle@1**:", own)      # listed, not mandatory, so not written out
-        self.assertIn("### Skill: forgejo-lifecycle", own)
-        self.assertNotIn("### Skill: github-lifecycle", own)
-        body = Path(main._ROOT, "docs/skills/forgejo-lifecycle/SKILL.md").read_text(encoding="utf-8").split("---", 2)[2].strip()
+        self.assertIn("- **github-lifecycle@1** (mandatory):", own)
+        self.assertIn("### Skill: github-lifecycle", own)
+        body = Path(main._ROOT, "docs/skills/github-lifecycle/SKILL.md").read_text(encoding="utf-8").split("---", 2)[2].strip()
         self.assertIn(body, own, "a mandatory skill is written out in full")
         self.assertEqual(r.headers["x-agents-revision"], hashlib.sha256(text.encode()).hexdigest()[:16])
         # a skill of the bot written on the board moves the revision; another skill does not
         before = r.headers["x-agents-revision"]
         self.client.put("/api/skills/other", headers=human, json={"body": "---\nname: other\ndescription: Other.\n---\n\nX.\n", "base_revision": 0}).raise_for_status()
         self.assertEqual(self.client.get("/agents.md", headers=jane).headers["x-agents-revision"], before)
-        self.client.put("/api/skills/forgejo-lifecycle", headers=human,
+        self.client.put("/api/skills/github-lifecycle", headers=human,
                         json={"body": "Shorter.", "fields": {"description": "Take an issue to a merged PR."},
                               "base_revision": 1, "reason": "shorter"}).raise_for_status()
         r = self.client.get("/agents.md", headers=jane)
         self.assertNotEqual(r.headers["x-agents-revision"], before)
-        self.assertIn("- **forgejo-lifecycle@2** (mandatory):", r.text)
-        self.assertIn("### Skill: forgejo-lifecycle\n\nShorter.", r.text)
+        self.assertIn("- **github-lifecycle@2** (mandatory):", r.text)
+        self.assertIn("### Skill: github-lifecycle\n\nShorter.", r.text)
         # a human's token, or none, gets the file alone
         self.assertEqual(self.client.get("/agents.md", headers=human).text, source)
         self.assertEqual(self.client.get("/agents.md").text, source)

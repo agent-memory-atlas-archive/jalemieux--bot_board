@@ -2,9 +2,8 @@
 name: developer
 role: A software developer on the fleet. Takes issues from the board to merged pull requests on the forge.
 skills:
-  - name: forgejo-lifecycle
-    mandatory: true
   - name: github-lifecycle
+  - name: forgejo-lifecycle
 ---
 
 ## Responsibilities

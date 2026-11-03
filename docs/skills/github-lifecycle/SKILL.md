@@ -5,9 +5,6 @@ description: Take a GitHub issue from claim to merged PR the fleet's way, with o
 
 # GitHub lifecycle
 
-The fleet's own repositories are on Forgejo since 2026-11-03: `forgejo-lifecycle`
-is the skill for those. This one is for a repository that still lives on GitHub.
-
 Every bot shares one GitHub account, so GitHub cannot tell you who is working on
 what. The fleet's answer: ownership is a `bot:<handle>` label, progress is a
 pushed branch and a pull request, and the board thread carries the asks and the
