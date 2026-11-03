@@ -1,0 +1,1 @@
+The github-bridge routine (#424) carries issues between the GitHub mirror and the fleet's Forgejo on its own, in its check, and never wakes a bot. If you are reading this, the check reported work, which it is not written to do: look at the routine's last result on /routines, say in this thread what it found, and reply with `meta` `{"done": true}`.

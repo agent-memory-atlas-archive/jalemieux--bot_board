@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""The check of the github-bridge routine (#424): issues opened on the GitHub mirror reach the
+fleet's Forgejo, and the fleet's answers go back. It costs no bot: it does the whole job itself
+and always reports no work.
+
+GitHub is a read-only mirror of the code, but it is where outsiders arrive. Each pass:
+  1. An open GitHub issue opened after SINCE with no Forgejo twin gets one: same title, the
+     body quoted, the `from-github` label, the GitHub link and a marker. The GitHub issue is
+     told, once, that it is tracked and that replies will be posted there.
+  2. Comments are carried both ways, each with a marker naming the comment it copies, so
+     nothing is copied twice and a copy is never copied back. @mentions are put in backticks:
+     a handle on one forge is somebody else on the other.
+  3. A Forgejo twin that closed closes its GitHub issue, with one comment saying so; an issue
+     reopened on GitHub after that stays open, and its comments still reach the twin.
+  4. An open pull request on GitHub is told, once, that code moves on the forge and is asked
+     for an issue with a description or a patch.
+The mapping is the marker in the Forgejo twin's body (`<!-- bridge github:<repo>#<n> -->`):
+no database, and a pass that stopped half way finds the twin it made on the next one.
+
+Store it as a routine (an admin bot or the admin workspace's human; ADMIN.md, routines):
+  bin/routines add --name github-bridge --channel <general channel> --every 5m \
+    --check deploy/github-bridge/check --prompt deploy/github-bridge/prompt.md
+Env: GH_TOKEN (a GitHub token that may comment on and close the mirror's issues) and
+FORGEJO_TOKEN, both fleet secrets the runner gives its checks. For tests: GITHUB_API,
+BRIDGE_GITHUB, BRIDGE_FORGEJO, BRIDGE_FORGE_REPO, BRIDGE_SINCE stand in for the settings below.
+Either side out of reach, or answering 502 to 504, is no work this pass; any other error
+(a refused token, issues turned off on GitHub) fails the routine, which pauses it and says why.
+"""
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+GITHUB = os.environ.get("BRIDGE_GITHUB") or "jalemieux/bot_board"                        # the mirror
+FORGEJO = (os.environ.get("BRIDGE_FORGEJO") or "http://minipc-2.taild87368.ts.net:3000").rstrip("/")
+FORGE_REPO = os.environ.get("BRIDGE_FORGE_REPO") or "jac/bot_board"                      # where work lives
+SINCE = os.environ.get("BRIDGE_SINCE") or "2026-11-03T22:00:00Z"   # older GitHub issues were migrated, not bridged
+GITHUB_API = (os.environ.get("GITHUB_API") or "https://api.github.com").rstrip("/")
+LABEL = "from-github"
+FORGE_SEEN = f"the fleet's forge ({FORGE_REPO})"
+
+
+def call(base, auth, method, path, body=None):
+    req = urllib.request.Request(base + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Authorization": auth, "Content-Type": "application/json",
+                                          "Accept": "application/vnd.github+json", "User-Agent": "bot_board-bridge"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r), r.headers.get("Link") or ""
+
+
+def pages(base, auth, path):
+    out, page = [], 1
+    while True:
+        got, link = call(base, auth, "GET", f"{path}{'&' if '?' in path else '?'}per_page=50&limit=50&page={page}")
+        out += got
+        if 'rel="next"' not in link or page >= 50:
+            return out
+        page += 1
+
+
+def gh(method, path, body=None):
+    return call(GITHUB_API, "Bearer " + os.environ.get("GH_TOKEN", ""), method, path, body)[0]
+
+
+def fj(method, path, body=None):
+    return call(FORGEJO + "/api/v1", "token " + os.environ.get("FORGEJO_TOKEN", ""), method, path, body)[0]
+
+
+def gh_pages(path):
+    return pages(GITHUB_API, "Bearer " + os.environ.get("GH_TOKEN", ""), path)
+
+
+def fj_pages(path):
+    return pages(FORGEJO + "/api/v1", "token " + os.environ.get("FORGEJO_TOKEN", ""), path)
+
+
+def mark(what):
+    return f"<!-- bridge {what} -->"
+
+
+def marks(texts, kind):
+    """Every `kind:<value>` the bridge's markers in these texts name."""
+    return {m for t in texts for m in re.findall(rf"<!-- bridge {kind}:(\S+) -->", t or "")}
+
+
+def defuse(text):
+    """@mentions in backticks: a handle on one forge is somebody else on the other."""
+    return re.sub(r"(?<![\w`@/.])@([A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9_.-]+)?)", r"`@\1`", text or "")
+
+
+def quoted(text):
+    return "\n".join("> " + line for line in (defuse(text).strip() or "(no description)").splitlines())
+
+
+def label_id():
+    for lab in fj_pages(f"/repos/{FORGE_REPO}/labels"):
+        if lab["name"] == LABEL:
+            return lab["id"]
+    return fj("POST", f"/repos/{FORGE_REPO}/labels", {"name": LABEL, "color": "#5319e7",
+                                                       "description": "opened on the GitHub mirror; the bridge carries replies back"})["id"]
+
+
+def bridge():
+    did = []
+    twins = {}      # GitHub issue number -> its Forgejo twin
+    for t in fj_pages(f"/repos/{FORGE_REPO}/issues?state=all&type=issues&labels={LABEL}"):
+        for ref in marks([t.get("body")], "github"):
+            repo, _, n = ref.rpartition("#")
+            if repo == GITHUB and n.isdigit():
+                twins[int(n)] = t
+    lab = None
+    for i in gh_pages(f"/repos/{GITHUB}/issues?state=open&sort=created&direction=asc"):
+        n = i["number"]
+        if "pull_request" in i:     # GitHub lists pull requests as issues too
+            continue
+        gcomments = gh_pages(f"/repos/{GITHUB}/issues/{n}/comments")
+        twin = twins.get(n)
+        if not twin:
+            if i["created_at"] < SINCE:
+                continue
+            lab = lab or label_id()
+            twin = fj("POST", f"/repos/{FORGE_REPO}/issues", {
+                "title": i["title"], "labels": [lab],
+                "body": f"Opened on GitHub by `{i['user']['login']}`: {i['html_url']}\n\n{quoted(i.get('body'))}\n\n"
+                        f"Replies here are posted back to the GitHub issue, and closing this closes it.\n\n"
+                        f"{mark(f'github:{GITHUB}#{n}')}"})
+            did.append(f"GitHub #{n} -> Forgejo #{twin['number']}")
+        if not marks([c["body"] for c in gcomments], "tracked"):
+            gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
+                f"Thanks. This project's issues and pull requests live on {FORGE_SEEN}, which is private to its "
+                f"maintainers; this issue is tracked there as #{twin['number']}. Replies will be posted here, and this "
+                "issue closes when that one does.\n\n" + mark(f"tracked:{twin['number']}")})
+        fcomments = fj_pages(f"/repos/{FORGE_REPO}/issues/{twin['number']}/comments")
+        copied_out = marks([c["body"] for c in gcomments], "from-forgejo")
+        copied_in = marks([c["body"] for c in fcomments], "from-github")
+        for c in fcomments:
+            if "<!-- bridge " not in (c.get("body") or "") and str(c["id"]) not in copied_out:
+                gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
+                    f"**{c['user']['login']}** on the forge:\n\n{defuse(c['body'])}\n\n" + mark(f"from-forgejo:{c['id']}")})
+                did.append(f"Forgejo #{twin['number']} comment {c['id']} -> GitHub #{n}")
+        for c in gcomments:
+            if "<!-- bridge " not in (c.get("body") or "") and str(c["id"]) not in copied_in:
+                fj("POST", f"/repos/{FORGE_REPO}/issues/{twin['number']}/comments", {"body":
+                    f"`{c['user']['login']}` on GitHub ({c['html_url']}):\n\n{quoted(c['body'])}\n\n" + mark(f"from-github:{c['id']}")})
+                did.append(f"GitHub #{n} comment {c['id']} -> Forgejo #{twin['number']}")
+        if twin.get("state") == "closed" and not marks([c["body"] for c in gcomments], "closed"):   # reopened by hand: left open
+            gh("POST", f"/repos/{GITHUB}/issues/{n}/comments", {"body":
+                f"Closed on the forge (#{twin['number']}).\n\n" + mark(f"closed:{twin['number']}")})
+            gh("PATCH", f"/repos/{GITHUB}/issues/{n}", {"state": "closed", "state_reason": "completed"})
+            did.append(f"GitHub #{n} closed with Forgejo #{twin['number']}")
+    for p in gh_pages(f"/repos/{GITHUB}/pulls?state=open"):
+        if p["created_at"] < SINCE:
+            continue
+        if not marks([c["body"] for c in gh_pages(f"/repos/{GITHUB}/issues/{p['number']}/comments")], "pull"):
+            gh("POST", f"/repos/{GITHUB}/issues/{p['number']}/comments", {"body":
+                f"Thanks. This repository is a read-only mirror: code changes are made on {FORGE_SEEN}, so this pull "
+                "request cannot be merged here. Please open an issue that describes the change, and attach the patch "
+                "(`git format-patch`) if you have one; it reaches the maintainers from there.\n\n" + mark(f"pull:{p['number']}")})
+            did.append(f"GitHub PR #{p['number']} told to open an issue")
+    return did
+
+
+def main():
+    try:
+        did = bridge()
+    except urllib.error.HTTPError as e:
+        if e.code in (502, 503, 504):
+            print(json.dumps({"work": False, "note": f"{e.url.split('/')[2]} answered {e.code}, retrying next pass"}))
+            return
+        sys.exit(f"{e.url} answered {e.code}: {e.read()[:300].decode(errors='replace')}")
+    except OSError as e:
+        print(json.dumps({"work": False, "note": f"unreachable ({e}), retrying next pass"}))
+        return
+    print(json.dumps({"work": False, "note": "; ".join(did) or "nothing to carry"}))
+
+
+if __name__ == "__main__":
+    main()
