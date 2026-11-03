@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import db
 from . import fleet as fleet_mod
+from . import registry
 from . import versions as versions_mod
 
 MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
@@ -2037,15 +2038,17 @@ def _drawer(b: dict, host: str, acts: str, danger: str, question: str, k: str) -
 
 def _voice_block(b: dict) -> str:
     """A fleet bot's voice and personality in its drawer, with an Edit that turns them into fields
-    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing."""
+    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing.
+    An empty one shows the fleet default the bot reads instead (#381)."""
     if not b.get("want") or b["status"] == "moved" or b.get("deleted"):
         return ""
     h, voice, personality = e(b["handle"]), b.get("voice") or "", b.get("personality") or ""
-    shown = lambda text: e(text) if text else '<span class="dim">none set</span>'
+    defaults = {"voice": registry.DEFAULT_VOICE, "personality": registry.DEFAULT_PERSONALITY}
+    shown = lambda text, which: e(text) if text else f'<span class="dim">fleet default, until set:</span> {e(defaults[which])}'
     return (f'<div class="d-voice" data-handle="{h}" data-voice="{e(voice)}" data-personality="{e(personality)}">'
             '<h4>Voice and personality <button type="button" class="act voice-edit">Edit</button></h4><div class="d-voice-two">'
-            f'<div class="quote"><b>Voice</b><span>{shown(voice)}</span></div>'
-            f'<div class="quote"><b>Personality</b><span>{shown(personality)}</span></div></div>'
+            f'<div class="quote"><b>Voice</b><span>{shown(voice, "voice")}</span></div>'
+            f'<div class="quote"><b>Personality</b><span>{shown(personality, "personality")}</span></div></div>'
             f'<p class="dim">Reaches @{h} at its next wake. A long session may keep some of its old tone; '
             'a <b>new session</b> starts clean.</p></div>')
 
@@ -2747,10 +2750,9 @@ body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .add
 .fleet-page form.newbot-top .fld b{color:var(--ink);font-weight:600;font-size:12.5px}
 .fleet-page form.newbot-top select,.fleet-page form.newbot-top input{background:var(--bg);border:1px solid var(--line);
  color:var(--ink);border-radius:6px;padding:7px 9px;font:13px var(--mono);width:100%}
-.fleet-page .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--bg)}
-.fleet-page .seg label{flex:1;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;border-left:1px solid var(--line);color:var(--ink)}
-.fleet-page .seg label:first-child{border-left:0}
-.fleet-page .seg input,.fleet-page .chan-chips input{position:absolute;opacity:0;width:0;height:0}
+.fleet-page form.newbot-top .seg{display:flex;flex-wrap:wrap;gap:1px;box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--line)}/* form.newbot-top: outranks the role form's .seg in REG_CSS, which comes later. It wraps when the names outgrow the column; the gap draws the dividers on any row */
+.fleet-page form.newbot-top .seg label{flex:1 1 auto;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;background:var(--bg);color:var(--ink)}
+.fleet-page form.newbot-top .seg input,.fleet-page form.newbot-top .chan-chips input{position:absolute;opacity:0;width:0;height:0;padding:0;border:0}
 .fleet-page .seg label:has(input:checked){background:var(--ink);color:var(--panel)}
 .fleet-page .seg label:has(input:focus-visible),.fleet-page .chan-chips label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:-2px}
 .fleet-page .chan-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;align-items:center}
@@ -2952,8 +2954,8 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
 <label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
 <fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
-<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people, a line or two</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
-<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
+<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people. Empty, it gets the fleet default shown here</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="{e(registry.DEFAULT_VOICE)}"></textarea></label>
+<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win. Empty, it gets the fleet default shown here</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="{e(registry.DEFAULT_PERSONALITY)}"></textarea></label>
 </div>
 <div class="revive" id="revive" hidden></div>
 <div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
@@ -3021,7 +3023,7 @@ subscription's usage limits.</p>
 <script>{FLEET_JS}{registry_web.REG_SECTION_JS}</script>""")
 
 
-def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
+def agent_page(board_name, agent, recent, profile=None, voice=("", "", False, False)) -> str:
     stream = "".join(message_html(m) for m in recent) or \
         '<div class="empty">This agent has not said anything yet.</div>'
     prof = ""
@@ -3030,8 +3032,10 @@ def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
                            for s in profile.get("skills", []))
         prof = (f'<h2>Profile: <a href="/fleet/profiles/{e(profile["name"])}">{e(profile["name"])}</a></h2>'
                 f'<p class="sub">{e(profile.get("role") or "")}</p>' + (f'<p class="stats">skills: {skills}</p>' if skills else ""))
-    voice_html = "".join(f'<h2>{title}</h2><p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
-                         for title, text in zip(("Voice", "Personality"), voice) if text)     # #348
+    # #348: what the bot reads; the fleet default when a human set none of its own (#381)
+    voice_html = "".join(f'<h2>{title}{" <small>(fleet default)</small>" if default else ""}</h2>'
+                         f'<p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
+                         for title, text, default in zip(("Voice", "Personality"), voice[:2], voice[2:]) if text)
     # a human deletes a bot from its page too (#280); humans, keepers and runners are not deleted here
     delete = "" if agent["kind"] in db.UNSCOPED_KINDS else f"""<p><button type="button" id="delete-bot">delete @{e(agent['handle'])}</button></p>
 <script>document.getElementById('delete-bot').addEventListener('click', function () {{

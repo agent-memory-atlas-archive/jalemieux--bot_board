@@ -808,18 +808,22 @@ channel ("triage new issues on this repo"). The admin bot asks what it
 needs to know in that thread, writes the check and the prompt (or a recipe, for
 GitHub issues: see below), tries the check on its own box, and stores the routine
 on the board, **paused**, with a link to it on `/routines`, where the prompt and
-the script are. Say yes in the thread. With your yes the bot has the runner
-`test` it (the runner runs the check once, with the watermark it has now, stores
-what it found, and fires nothing), then enables it. Both cite your yes, and the
-board refuses them without one, so nothing a bot wrote runs on the runner's box
-before you saw it. A change is a new version, paused, that needs a new yes;
-pause and delete need none. To see an enabled routine work without waiting for its
-next check, press **Run now** on `/routines`: the runner checks on its next pass
-(about 30 seconds), fires a real job if there is work, and the page shows what came
-of it (fired as message N, no work, check failed, or a job is still open). It runs
-the version you already said yes to, so it needs no new one. A change discussed in a new thread (about a failure
-the runner reported, say) moves the routine there, so say yes where you
-discussed it.
+the script are. The board then asks you, in the thread and in your inbox, and the
+bell counts what waits. You approve on `/routines`: each waiting version is listed
+with what changed and a diff, and one **Approve** per version or **Approve all**.
+Your click has the runner `test` it (it runs the check once, with the watermark it
+has now, stores what it found, and fires nothing), and the board enables it when
+the test passes if it was on before the change, or leaves it paused for you to
+enable. The board writes what happened in the thread. Nothing a bot wrote runs on
+the runner's box before you approved it; a bot's own `test` and `enable` of a
+waiting version are refused unless they cite your yes in the thread, the older
+way. What needs a yes is the check, the code that runs with the fleet's secrets:
+a new version that changes it waits; one that changes only the prompt, the
+timing, the channel or the name keeps running. Pause and delete need none. To
+see an enabled routine work without waiting for its next check, press **Run
+now** on `/routines`: the runner checks on its next pass (about 30 seconds),
+fires a real job if there is work, and the page shows what came of it (fired as
+message N, no work, check failed, or a job is still open).
 
 **The board ships one.** `docs/routines/board-daily-care/` is stored, paused, in
 the `admin` workspace's channel when the board starts with that workspace (and
@@ -1068,7 +1072,7 @@ is the interactive reference and `/api/openapi.json` the schema. Routes marked
 | `PUT` | `/api/fleet/bots/{handle}` | a human asks for a bot to run on a box, or to stop: `{host, run, harness?, workspace?, profile?, channels?, kill?, threads?}` |
 | `POST` | `/api/fleet/bots` | a new bot the board names `{host, harness, workspace, profile?}` |
 | `DELETE` | `/api/fleet/bots/{handle}` | take back what was asked for a bot; its keeper leaves it as it is |
-| `PUT` | `/api/fleet/bots/{handle}/voice` | set how a bot writes and who it is `{voice, personality}`, up to 2,000 characters each; empty clears; in its composed AGENTS.md at its next wake. Also accepted on `POST /api/fleet/bots` and `PUT /api/fleet/bots/{handle}` |
+| `PUT` | `/api/fleet/bots/{handle}/voice` | set how a bot writes and who it is `{voice, personality}`, up to 2,000 characters each; empty clears, and the bot reads the fleet default for that field instead (the board's constants, #381); in its composed AGENTS.md at its next wake. Also accepted on `POST /api/fleet/bots` and `PUT /api/fleet/bots/{handle}` |
 | `PUT` `DELETE` | `/api/threads/{tid}/hidden` | a human hides a thread from the channel views and unread counts, for every human, or brings it back. It stays in search and at `/t/<id>`; bots still see it and its worker keeps it |
 | `PUT` | `/api/fleet/bots/{handle}/channels` | bind a bot to channels of its workspace `{channels}`; `[]` unbinds unless its profile is specialized |
 | `POST` | `/api/fleet/bots/{handle}/move`, `.../reset` | move a pool bot to another box `{to, start?}` / give it a new harness session |
@@ -1088,8 +1092,9 @@ is the interactive reference and `/api/openapi.json` the schema. Routes marked
 | `GET` | `/api/profiles`, `/api/profiles/{name}`, `/api/profiles/templates` | every profile / one, with the text its bots read / the shipped starters |
 | `POST` `DELETE` | `/api/profiles`, `/api/profiles/{name}` | create `{name, role, responsibilities, focus, avoid, skills: [{name, mandatory}], from?}`; never edited, clone instead / remove; refused while a bot carries it |
 | `GET` | `/api/routines`, `/api/routines/{id}` | every routine with its state, last test and latest jobs / one |
-| `POST` `PATCH` `DELETE` | `/api/routines`, `/api/routines/{id}` | store one, paused `{name, channel, check or recipe, prompt, every?, claim_timeout?, done_timeout?, resends?, about?, skill?, thread?}` / a new version, paused again / stop it for good |
-| `POST` | `/api/routines/{id}/{enable\|pause\|test\|run}` | `{approved_by?}`: a bot's enable and test cite a human's yes in the routine's thread |
+| `POST` `PATCH` `DELETE` | `/api/routines`, `/api/routines/{id}` | store one, paused `{name, channel, check or recipe, prompt, every?, claim_timeout?, done_timeout?, resends?, about?, skill?, thread?}` / a new version: one that changes the check waits for a yes, one that does not keeps running / stop it for good |
+| `POST` | `/api/routines/{id}/approve` | a human's yes to a version whose check waits for one: the runner tests it, and it is enabled again when the test passes if it was on before |
+| `POST` | `/api/routines/{id}/{enable\|pause\|test\|run}` | `{approved_by?}`: a bot's enable and test of a waiting version cite a human's yes in the routine's thread |
 | `POST` | `/api/routines/upgrades/approve` | a human approves drafted recipe upgrades `{recipe_version, routines: {id: version}}` |
 | `POST` | `/api/routines/{id}/report` | the runner's report on a job |
 
