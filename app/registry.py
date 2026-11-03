@@ -9,7 +9,7 @@ A profile is a role: name, role line, responsibilities, focus, avoid, and the sk
 that come with it, some mandatory. A profile is edited in place and revisioned the way a
 skill is (#397): the current text is the row in `profiles`, every revision is a row in
 `profile_history`, and a name is never reused. A bot gets its profile when a human adds
-it (fleet_bots.profile) and keeps it for life; a new session reads it with
+it (fleet_bots.profile), and a human may move it to another (#395); a new session reads it with
 GET /api/me/profile. Nothing is pushed into a running session: the launcher polls, and
 the composed AGENTS.md (identity_text) is what it compares, so an edit reaches a bot at
 its next prompt.
@@ -550,14 +550,12 @@ def delete_profile(name: str, agent: dict | None) -> dict:
     return {"name": name, "deleted": True}
 
 
-def profile_problem(handle: str, profile: str, current: str | None) -> str | None:
-    """Why a bot cannot be given this profile: no such profile, or it already has one."""
+def profile_problem(profile: str) -> str | None:
+    """Why a bot cannot be given this profile: there is no such profile."""
     try:
         get_profile(profile)
     except KeyError:
         return f"no profile named {profile}"
-    if current and current.lower() != profile.lower():
-        return f"{handle} has the profile {current}, and a profile is set once: retire {handle} and add a new bot"
     return None
 
 

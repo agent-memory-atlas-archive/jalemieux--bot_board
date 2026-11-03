@@ -475,7 +475,7 @@ class Registry(unittest.TestCase):
 
     # ---- a bot's profile
 
-    def test_a_bot_gets_its_profile_when_added_and_cannot_be_given_another(self):
+    def test_a_bot_gets_its_profile_when_added_and_a_human_can_move_it_to_another(self):
         r = self.client.put("/api/fleet/bots/jane", headers=self.human,
                             json={"host": "box", "run": True, "harness": "claude", "workspace": "proj", "profile": "nobody"})
         self.assertEqual(r.status_code, 409, r.text)
@@ -493,12 +493,38 @@ class Registry(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": False}).raise_for_status()
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": True}).raise_for_status()
         self.assertEqual(self.profiles()["developer"]["bots"], ["jane"])
-        # another profile: refused, and nothing changes
+        # another profile (#395): a specialized one still needs channels, and nothing changes
         r = self.client.put("/api/fleet/bots/jane", headers=self.human,
                             json={"host": "box", "run": True, "profile": "artist"})
         self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("set once", r.json()["error"])
+        self.assertIn("specialized", r.json()["error"])
         self.assertEqual(self.profiles()["developer"]["bots"], ["jane"])
+        # a general one moves her, and back
+        jane = self.register("jane", "claude-code", "proj")
+        before = self.client.get("/agents.md", headers=jane)
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": True, "profile": "architect"}).raise_for_status()
+        self.assertEqual(self.profiles()["architect"]["bots"], ["jane"])
+        self.assertEqual(self.profiles()["developer"]["bots"], [])
+        # her guide moves, so her launcher gives the session the new one and rewrites her skills
+        after = self.client.get("/agents.md", headers=jane)
+        self.assertNotEqual(after.headers["X-Agents-Revision"], before.headers["X-Agents-Revision"])
+        self.assertIn("# Your profile: architect", after.text)
+        self.assertEqual(self.client.get("/api/me/profile?json", headers=jane).json()["profile"]["name"], "architect")
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": True, "profile": "developer"}).raise_for_status()
+        # the profile-only call changes the profile and leaves the rest of what was asked as it is
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": False, "threads": "handoff"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/jane/profile", headers=jane, json={"profile": "architect"}).status_code, 403)
+        r = self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "nobody"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "architect"}).raise_for_status()
+        row = db.conn().execute("SELECT profile, run, threads FROM fleet_bots WHERE handle='jane'").fetchone()
+        self.assertEqual(tuple(row), ("architect", 0, "handoff"))
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "developer"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/nobody/profile", headers=self.human,
+                                         json={"profile": "developer"}).status_code, 409)
         # the same profile again is fine
         self.assertEqual(self.client.put("/api/fleet/bots/jane", headers=self.human,
                                          json={"host": "box", "run": True, "profile": "developer"}).status_code, 200)
@@ -507,7 +533,6 @@ class Registry(unittest.TestCase):
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("jane", r.json()["error"])
         # the roster says what each bot is
-        jane = self.register("jane", "claude-code", "proj")
         roster = {a["handle"]: a for a in self.client.get("/api/agents", headers=self.human).json()["agents"]}
         self.assertEqual(roster["jane"]["profile"], "developer")
         self.assertIsNone(roster["tarzan"]["profile"])

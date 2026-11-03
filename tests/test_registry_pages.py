@@ -131,7 +131,11 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('<select name="profile"', page)
         self.assertIn('<option value="">none</option>', page)
         self.assertIn('<option value="developer">developer · A software developer', page)
-        self.assertIn("keeps its role for life", page)
+        self.assertIn("Its role, voice and personality can be changed later from its row.", page)
+        # and offers to move it to another profile (#395)
+        self.assertIn('class="act role-edit needs-me" data-handle="jane"', page)
+        self.assertIn('<datalist id="profiles-data"><option value="', page)
+        self.assertIn('<option value="developer"></option>', page)
         self.assertIn("f.elements.profile.value", page)
 
     def test_skill_page_edits_previews_and_lists_history_and_users(self):
