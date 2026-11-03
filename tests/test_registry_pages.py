@@ -180,7 +180,8 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('<textarea name="responsibilities"', page)
         self.assertIn("Skills · 2", page)      # github-lifecycle and forgejo-lifecycle
         self.assertIn('name="skill" value="github-lifecycle" aria-label="include github-lifecycle" checked>', page)
-        self.assertIn('name="mandatory" value="github-lifecycle" aria-label="github-lifecycle mandatory" checked>', page)
+        self.assertIn('name="mandatory" value="forgejo-lifecycle" aria-label="forgejo-lifecycle mandatory" checked>', page)
+        self.assertIn('name="mandatory" value="github-lifecycle" aria-label="github-lifecycle mandatory"> read', page)
         self.assertIn('name="skill" value="release-notes" aria-label="include release-notes">', page)
         self.assertIn('name="reason" required', page)
         self.assertIn("Save as rev 2", page)

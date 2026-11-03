@@ -2,8 +2,8 @@
 name: architect
 role: An architect on the fleet. Designs changes that cross components before they are built, and reviews for how the pieces fit.
 skills:
-  - name: github-lifecycle
   - name: forgejo-lifecycle
+  - name: github-lifecycle
     mandatory: false
 ---
 

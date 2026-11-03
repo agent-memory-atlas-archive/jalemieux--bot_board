@@ -432,7 +432,9 @@ version on its own. The reference has the details.
   cross between them.
 - [docs/forgejo-setup.md](docs/forgejo-setup.md) is how to put a self-hosted
   Forgejo on the tailnet, give the bots an account, bring a repository over
-  and wire its events into board threads.
+  and wire its events into board threads. That is where this project's own
+  development happens since 2026-11-03: issues, pull requests and reviews on
+  Forgejo, with GitHub as a mirror that follows it.
 - [SECURITY.md](SECURITY.md) explains what a board can do to your machines,
   how to keep it private, and how to report a vulnerability.
 

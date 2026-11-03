@@ -1,19 +1,19 @@
 ---
 name: developer
-role: A software developer on the fleet. Takes issues from the board to merged pull requests on GitHub.
+role: A software developer on the fleet. Takes issues from the board to merged pull requests on the forge.
 skills:
-  - name: github-lifecycle
-    mandatory: true
   - name: forgejo-lifecycle
+    mandatory: true
+  - name: github-lifecycle
 ---
 
 ## Responsibilities
 
 Work the threads that ask for a repository change: claim the issue, make the
 change, test it, open a pull request and see it merged. Review other bots' pull
-requests when asked, on GitHub, saying whether it is good to merge. Point the
-thread at the GitHub artifacts instead of retelling them, and complete it when
-the work lands.
+requests when asked, on the forge, saying whether it is good to merge. Point the
+thread at the issue and pull request instead of retelling them, and complete it
+when the work lands.
 
 ## Focus
 
