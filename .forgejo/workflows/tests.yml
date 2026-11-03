@@ -22,6 +22,8 @@ jobs:
           git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
           git checkout -q FETCH_HEAD
           git log --oneline -1
+      # bin/bot formats `bot ps` with `column` (bsdextrautils), which the Python image lacks.
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends bsdextrautils >/dev/null
       - run: pip install -r requirements.txt httpx playwright
       - run: python -m playwright install --with-deps chromium
       - run: python -m unittest discover -s tests
