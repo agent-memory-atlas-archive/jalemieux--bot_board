@@ -1,0 +1,150 @@
+# Release on Forgejo Actions (#410): on every push to main, build the board image
+# from the pushed commit, smoke-test it, and publish it under the commit's release
+# tag to Forgejo's registry and, when a token is set, to ghcr.io.
+#
+# Who makes the tag. Today the board's own box (minipc-1, deploy/release.sh on a
+# timer) still builds, tags and deploys; in --auto mode it skips a commit that is
+# already tagged, so this workflow must not tag first. It waits for the box's tag on
+# the commit and publishes under it. When the box stops building (#411), the
+# "version" step changes to compute and push the next tag itself.
+#
+# Registries. The job's docker CLI drives the host's Docker daemon (the runner
+# automounts the socket), so Forgejo's registry is reached as 127.0.0.1:3000 from
+# the daemon's point of view, which Docker treats as insecure without any config.
+# Others pull the same image as minipc-2.taild87368.ts.net:3000/jac/bot_board.
+# ghcr.io gets the same image for people outside the tailnet; the secret
+# GHCR_TOKEN is a GitHub token with write:packages (jac sets it on the repo).
+name: release
+on:
+  push:
+    branches: [main]
+jobs:
+  release:
+    runs-on: docker
+    container: docker:cli
+    timeout-minutes: 20
+    env:
+      REGISTRY: 127.0.0.1:3000
+      IMAGE: jac/bot_board
+      PUBLIC_REGISTRY: minipc-2.taild87368.ts.net:3000
+      GHCR_IMAGE: ghcr.io/jalemieux/bot_board
+      GHCR_USER: jalemieux
+      JOB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      TAG_WAIT_SECONDS: "420"
+    steps:
+      - run: apk add -q git curl bash
+
+      - name: check out the pushed commit
+        run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+
+      - name: version, from the release tag on this commit
+        id: version
+        shell: bash
+        run: |
+          if git log -1 --format=%B | grep -qiF '[skip release]'; then
+            echo "commit says [skip release]; nothing to publish"
+            echo "version=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Annotated tags list twice in ls-remote; the ^{} line carries the commit.
+          tag_on_commit() {
+            git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              | awk -v sha="$GITHUB_SHA" '$1 == sha { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+          }
+          deadline=$(( $(date +%s) + TAG_WAIT_SECONDS ))
+          until ver="$(tag_on_commit)" && [ -n "$ver" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "no release tag on $GITHUB_SHA after ${TAG_WAIT_SECONDS}s. The board's box tags a"
+              echo "commit when it releases it (deploy/release.sh); if it did not, see its journal:"
+              echo "  journalctl -u bot-board-release   (on minipc-1)"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "release tag on this commit: $ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: build
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          docker build -q \
+            --build-arg "BOT_BOARD_VERSION=$VER" \
+            --build-arg "BOT_BOARD_COMMIT=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$REGISTRY/$IMAGE:$VER" . >/dev/null
+          docker image inspect "$REGISTRY/$IMAGE:$VER" --format 'built {{.Id}} ({{.Size}} bytes)'
+
+      - name: smoke test
+        if: steps.version.outputs.version != ''
+        shell: bash
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          # The container runs under the host daemon, outside this job's network, so the
+          # checks run inside it; the image has python.
+          name="bot_board_smoke_$GITHUB_RUN_ID"
+          docker run -d --rm --name "$name" "$REGISTRY/$IMAGE:$VER" >/dev/null
+          probe() { docker exec "$name" python -c "import json,urllib.request;print(json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)).get('version',''))" 2>/dev/null; }
+          ok=0
+          for i in $(seq 1 30); do
+            got="$(probe || true)"
+            [ "$got" = "$VER" ] && { ok=1; break; }
+            sleep 1
+          done
+          if [ $ok = 1 ]; then
+            docker exec "$name" python -c "import urllib.request;[urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=3) for p in ('/','/agents.md')]" || ok=0
+          fi
+          if [ $ok != 1 ]; then
+            echo "smoke test failed: expected version $VER, got '${got:-no answer}'"
+            docker logs "$name" 2>&1 | tail -40 || true
+            docker stop -t 2 "$name" >/dev/null || true
+            docker rmi "$REGISTRY/$IMAGE:$VER" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "smoke test passed: /healthz reports $VER, / and /agents.md answer"
+          docker stop -t 2 "$name" >/dev/null
+
+      - name: publish to Forgejo's registry
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          echo "$JOB_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$REGISTRY/$IMAGE:$VER" "$REGISTRY/$IMAGE:latest"
+          docker push -q "$REGISTRY/$IMAGE:$VER"
+          docker push -q "$REGISTRY/$IMAGE:latest"
+          docker logout "$REGISTRY" >/dev/null
+          echo "published $PUBLIC_REGISTRY/$IMAGE:$VER and :latest"
+
+      - name: publish to ghcr.io
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$GHCR_TOKEN" ]; then
+            echo "GHCR_TOKEN is not set on this repository; skipping ghcr.io"
+            exit 0
+          fi
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          docker tag "$REGISTRY/$IMAGE:$VER" "$GHCR_IMAGE:$VER"
+          docker tag "$REGISTRY/$IMAGE:$VER" "$GHCR_IMAGE:latest"
+          docker push -q "$GHCR_IMAGE:$VER"
+          docker push -q "$GHCR_IMAGE:latest"
+          docker logout ghcr.io >/dev/null
+          echo "published $GHCR_IMAGE:$VER and :latest"
+
+      - name: clean up the host daemon
+        if: always() && steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          docker rmi -f "$REGISTRY/$IMAGE:$VER" "$REGISTRY/$IMAGE:latest" \
+            "$GHCR_IMAGE:$VER" "$GHCR_IMAGE:latest" >/dev/null 2>&1 || true
+          docker image prune -f >/dev/null 2>&1 || true
