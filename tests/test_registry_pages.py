@@ -84,7 +84,7 @@ class RegistryPages(unittest.TestCase):
         self.balanced(page)
         for first, then in (("tab-bots", "fleet-bots"), ("fleet-bots", "tab-machines"), ("tab-machines", "fleet-machines"),
                             ("fleet-machines", "fleet-versions"), ("fleet-versions", "tab-roles"), ("tab-roles", "fleet-profiles"),
-                            ("fleet-profiles", "fleet-skills"), ("fleet-skills", "tab-settings"), ("tab-settings", "secrets")):
+                            ("fleet-profiles", "tab-skills"), ("tab-skills", "fleet-skills"), ("fleet-skills", "tab-settings"), ("tab-settings", "secrets")):
             self.assertLess(page.index(f'id="{first}"'), page.index(f'id="{then}"'))
         # skills: the seeded ones (github-lifecycle, forgejo-lifecycle, board-guide, board-review, board-care) and ours,
         # with kind, revision and who uses it

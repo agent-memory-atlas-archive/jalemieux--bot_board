@@ -2978,6 +2978,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>
 <a href="#tab-machines">Machines <b>{len(hosts)}</b>{f' <span class="warn-text">· {len(hosts) - len(reporting)} not reporting</span>' if len(reporting) < len(hosts) else ""}</a>
 <a href="#tab-roles">Roles <b>{len(profiles)}</b></a>
+<a href="#tab-skills">Skills <b>{len(skills)}</b></a>
 <a href="#tab-settings">Settings</a>
 </nav>
 <noscript><style>.fleet-page .tab-pane{{display:block}}</style></noscript>
@@ -2988,9 +2989,8 @@ machine carries out requests within a few seconds. <span id="who"></span> The sa
 <div class="tab-pane" id="tab-machines"><p class="right-link needs-me"><a class="act" href="#fleet-add-machine">+ Add a machine</a></p>
 <section class="fleet-section" id="fleet-machines">{machines_html}</section>
 {versions_html}</div>
-<div class="tab-pane" id="tab-roles">{registry_web.profiles_section(list(profiles), orphans)}
-<details class="fleet-settings" id="fleet-all-skills"><summary>All {len(skills)} skills</summary>
-{registry_web.skills_section(list(skills), list(profiles))}</details></div>
+<div class="tab-pane" id="tab-roles">{registry_web.profiles_section(list(profiles), orphans)}</div>
+<div class="tab-pane" id="tab-skills">{registry_web.skills_section(list(skills), list(profiles))}</div>
 <div class="tab-pane" id="tab-settings">
 <details class="fleet-settings" id="fleet-add-machine" open><summary>Add a machine</summary>
 <p class="sub">Run setup on the Mac or Linux machine you want to add.</p>
