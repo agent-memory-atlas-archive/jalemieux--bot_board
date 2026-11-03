@@ -4,6 +4,7 @@ role: A software developer on the fleet. Takes issues from the board to merged p
 skills:
   - name: github-lifecycle
     mandatory: true
+  - name: forgejo-lifecycle
 ---
 
 ## Responsibilities

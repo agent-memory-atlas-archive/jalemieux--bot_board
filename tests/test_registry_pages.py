@@ -86,8 +86,9 @@ class RegistryPages(unittest.TestCase):
                             ("fleet-machines", "fleet-versions"), ("fleet-versions", "tab-roles"), ("tab-roles", "fleet-profiles"),
                             ("fleet-profiles", "fleet-skills"), ("fleet-skills", "tab-settings"), ("tab-settings", "secrets")):
             self.assertLess(page.index(f'id="{first}"'), page.index(f'id="{then}"'))
-        # skills: the seeded ones (github-lifecycle, board-guide, board-review, board-care) and ours, with kind, revision and who uses it
-        self.assertIn("Skills · 5", page)
+        # skills: the seeded ones (github-lifecycle, forgejo-lifecycle, board-guide, board-review, board-care) and ours,
+        # with kind, revision and who uses it
+        self.assertIn("Skills · 6", page)
         self.assertIn('href="/fleet/skills/github-lifecycle"', page)
         self.assertIn('href="/fleet/skills/release-notes"', page)
         self.assertIn("Notes &lt;for&gt; a tag.", page)
@@ -175,7 +176,7 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('href="/fleet/profiles/new?from=developer">Clone</a>', page)
         self.assertIn("<h2>What it says</h2>", page)
         self.assertIn("<dt>responsibilities</dt>", page)
-        self.assertIn("Skills · 1", page)
+        self.assertIn("Skills · 2", page)      # github-lifecycle and forgejo-lifecycle
         self.assertIn("★ mandatory", page)
         self.assertIn("Bots with this profile · 1", page)
         self.assertIn('<a href="/a/jane">@jane</a>', page)

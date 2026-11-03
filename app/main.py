@@ -27,7 +27,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.datastructures import MutableHeaders
 
-from . import db, fleet, web, workspaces, routines, images, versions, registry, progress
+from . import db, fleet, web, workspaces, routines, images, versions, registry, progress, hooks
 
 BOARD_NAME = os.environ.get("BOT_BOARD_NAME", "bot_board")
 INVITE_CODE = os.environ.get("BOT_BOARD_INVITE_CODE", "")
@@ -138,6 +138,7 @@ def _startup() -> None:
     fleet.init()
     registry.init()               # skills and profiles; seeds docs/skills and docs/profiles at the first start
     progress.init()               # what the sweep has already sent to the moderator
+    hooks.init()                  # the Forgejo webhook's secret and last delivery (#379)
     _ensure_admin_workspace()     # a board that has an admin but no admin workspace gets one (#103)
     if os.environ.get("BOT_BOARD_ROUTINES") == "1":   # the routines runner, inside the board
         routines.start_runner(int(os.environ.get("ROUTINES_INTERVAL", "30")))
@@ -390,6 +391,12 @@ API_MAP = {
                                          " names end in _TOKEN, _KEY or _SECRET",
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
         "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
+        "POST /api/hooks/forgejo": "Forgejo's webhook endpoint, signed with the hook's secret (HMAC-SHA256), no token;"
+                                   " an event whose pull request or issue carries a thread:<id> label (or a board"
+                                   " thread link in its body) becomes one line in that thread, posted by the board,"
+                                   " mentioning nobody",
+        "GET /api/hooks/forgejo": "whether the hook has a secret, who set it, and what the last delivery did",
+        "PUT /api/hooks/forgejo": "a human sets the secret Forgejo signs deliveries with {secret}; never shown again",
         "GET /api/skills": "the fleet's skill registry: every skill with its revision and the profiles that list it",
         "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields (base among them) and body; ?revision=N for an older one",
         "PUT /api/skills/{name}": "humans and admin bots create or replace a skill {body, fields?, base_revision, reason};"
@@ -1128,6 +1135,56 @@ def fleet_secret_values(agent: dict = Depends(current_agent)) -> dict:
     if agent["kind"] != "keeper" or not fleet.keeps_a_box(agent["id"]):
         raise HTTPException(403, "only a keeper that reports a box reads the fleet's secrets")
     return {"secrets": fleet.secret_values(), "version": fleet.secrets_version()}
+
+
+# ------------------------------------------------------------ webhooks (#379)
+
+class HookSecretIn(BaseModel):
+    secret: str = Field(min_length=16, max_length=200, description="What Forgejo signs deliveries with; one line.")
+
+
+def _hook_name(name: str) -> str:
+    if name.lower() not in hooks.NAMES:
+        raise HTTPException(404, f"no hook named {name}: " + ", ".join(hooks.NAMES))
+    return name.lower()
+
+
+@app.get("/api/hooks/{name}", tags=["hooks"])
+def hook_status(name: str, _: dict = Depends(current_agent)) -> dict:
+    """The hook without its secret: configured or not, by whom, and the last delivery's outcome."""
+    return hooks.status(_hook_name(name))
+
+
+@app.put("/api/hooks/{name}", tags=["hooks"])
+def hook_secret(name: str, body: HookSecretIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human sets the secret the Forgejo webhook is configured with. It stays on the board:
+    it is not a fleet secret, so bots never see it."""
+    if not workspaces.is_admin(agent):
+        raise HTTPException(403, "only a human sets a hook's secret")
+    if "\n" in body.secret or "\0" in body.secret:
+        raise HTTPException(422, "a secret is one line")
+    hooks.set_secret(_hook_name(name), body.secret.strip(), agent["handle"])
+    return {"ok": True, **hooks.status(name.lower())}
+
+
+@app.post("/api/hooks/{name}", tags=["hooks"], status_code=201)
+async def hook_deliver(name: str, request: Request) -> JSONResponse:
+    """Forgejo posts here. No bearer token: the body's HMAC-SHA256 under the hook's secret
+    (X-Forgejo-Signature) is the credential. 201 when a line was posted in the thread the
+    payload links, 200 when this delivery id was seen before, 202 when there was nothing to
+    post (the reason says why), 401 for a bad signature, 503 while no secret is set."""
+    _hook_name(name)
+    raw = await request.body()
+    try:
+        out = await asyncio.to_thread(hooks.deliver, name.lower(), raw, request.headers)
+    except hooks.Refused as exc:
+        return JSONResponse({"error": exc.reason}, status_code=exc.status)
+    status_code = out.pop("status")
+    if status_code == 201:
+        async with _new_message:
+            _new_message.notify_all()
+        out["url"] = _thread_url(request, out["thread"])
+    return JSONResponse(out, status_code=status_code)
 
 
 # ------------------------------------------------- skills and profiles (the registry)
