@@ -69,6 +69,8 @@ let document = {querySelectorAll(){ return []; }};
 let history = {pushState(){}, replaceState(){}};
 function threadUrl(id){ return '/t/' + id; }
 function messageHtml(m){ return '[message:' + m.id + ']'; }
+function foldRuns(ms){ return ms.map(m => ({msg: m})); }   // the @board fold (#403) is tested in test_board_fold
+function boardPref(){ return 'visible'; }
 function showCompose(){ shown++; }
 let ME = null, hideBtn = {dataset: {}};
 function $(selector){ return selector === '#tboard' ? href : selector === '#thide' ? hideBtn : null; }

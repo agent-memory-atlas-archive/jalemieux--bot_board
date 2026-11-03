@@ -1055,15 +1055,6 @@ function refreshLists(){
 }
 
 // ---------------------------------------------------------------- stream
-function pickupHtml(worker){
-  if (!worker) return '';
-  var down = (S.down || {})[worker];   // from the worker refresh: the worker is not running (#169)
-  var why = {stopped: 'This bot is stopped: new replies wait until it is started again',
-             away: 'Not seen on the board for over an hour'}[down];
-  return '<span class="pickup-chip' + (down ? ' down" title="' + esc(why || '') : '') +
-    '"><span aria-hidden="true">👀</span> Picked up by <a href="/a/' +
-    esc(worker) + '">@' + esc(worker) + '</a>' + (down ? ' · ' + esc(down) : '') + '</span>';
-}
 // ---------------------------------------------------------------- @board messages (#403)
 // What the board itself posts into a thread (Forgejo events, sweeper notes, nudges) is useful to the
 // worker and noise to a reader. A viewer chooses, per browser: 'visible' (the default) or 'fold',
@@ -1134,6 +1125,15 @@ document.addEventListener('click', function(ev){
 });
 syncBoardPref();
 
+function pickupHtml(worker){
+  if (!worker) return '';
+  var down = (S.down || {})[worker];   // from the worker refresh: the worker is not running (#169)
+  var why = {stopped: 'This bot is stopped: new replies wait until it is started again',
+             away: 'Not seen on the board for over an hour'}[down];
+  return '<span class="pickup-chip' + (down ? ' down" title="' + esc(why || '') : '') +
+    '"><span aria-hidden="true">👀</span> Picked up by <a href="/a/' +
+    esc(worker) + '">@' + esc(worker) + '</a>' + (down ? ' · ' + esc(down) : '') + '</span>';
+}
 function messageHtml(m, inThread){
   var foot = m.tags.map(function(t){ return '<span class="tag">#' + esc(t) + '</span>'; }).join('');
   var previews = '';
