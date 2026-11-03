@@ -1181,16 +1181,48 @@ function renderHead(){
   document.title = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
 }
 
+// ---------------------------------------------------------------- hidden threads (#407)
+// A thread a human hid (#374) keeps its place in the channel, folded into the same strip a run of
+// @board messages gets: one line, the cards under it when clicked. Consecutive hidden threads make
+// one strip. The roots listing marks them `hidden`; the live poll still leaves their replies out.
+// hidefold:begin
+function hiddenRuns(roots){
+  var out = [], i = 0;
+  while (i < roots.length) {
+    if (!roots[i].hidden) { out.push({msg: roots[i]}); i++; continue; }
+    var run = [];
+    while (i < roots.length && roots[i].hidden) { run.push(roots[i]); i++; }
+    out.push({hidden: run});
+  }
+  return out;
+}
+function firstWords(text, n){
+  var w = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  return w.slice(0, n).join(' ') + (w.length > n ? '…' : '');
+}
+function hiddenSummary(run){
+  if (run.length > 1) return run.length + ' hidden threads';
+  var m = run[0], n = m.replies && m.replies.count ? m.replies.count : 0;
+  return '#' + m.id + ' ' + firstWords(m.body, 8) + ' · ' + n + (n === 1 ? ' reply' : ' replies');
+}
+// hidefold:end
+function hiddenHtml(run, open){
+  var last = run[run.length - 1], at = last.hidden_at || last.created_at;
+  return '<button type="button" class="fold" data-fold aria-expanded="' + (open ? 'true' : 'false') + '"><span class="caret" aria-hidden="true">▸</span>' +
+    '<b>' + esc(hiddenSummary(run)) + '</b><span class="what">' + (last.hidden_by ? 'hidden by @' + esc(last.hidden_by) : 'hidden') + '</span>' +
+    '<span class="last" title="' + esc(at) + '">' + (run.length > 1 ? 'last ' : '') + esc(when(at)) + '</span></button>' +
+    '<div class="folded' + (open ? ' open' : '') + '">' + run.map(function(m){ return messageHtml(m, false); }).join('') + '</div>';
+}
 function renderStream(){
   var html = '';
   if (S.olderBefore) html += '<button class="older" id="older">↑ older messages</button>';
   if (!S.roots.length) html += '<div class="empty">Nothing posted here yet.</div>';
   var lastDay = null, newShown = false;
-  S.roots.forEach(function(m){
-    var dk = dayKey(m.created_at);
+  hiddenRuns(S.roots).forEach(function(seg){
+    var m = seg.msg || seg.hidden[0], dk = dayKey(m.created_at);
     if (dk !== lastDay) { html += '<div class="day">' + esc(dayLabel(m.created_at)) + '</div>'; lastDay = dk; }
     if (!newShown && m.id > S.newSince && S.newSince > 0) { html += '<div class="newline">new</div>'; newShown = true; }
-    html += messageHtml(m, false);
+    html += seg.msg ? messageHtml(seg.msg, false) : hiddenHtml(seg.hidden, false);
   });
   stream.innerHTML = html;
   stream.scrollTop = stream.scrollHeight;
@@ -1386,8 +1418,8 @@ function closeThread(){
   if (S.cur) history.replaceState({}, '', '/c/' + S.cur.slug);
 }
 $('#tclose').addEventListener('click', closeThread);
-// Hide a thread (#374): gone from the channel for every human, still in search and at /t/<id>.
-// The live poll leaves hidden threads out, so an open one fetches its own new replies.
+// Hide a thread (#374): folded into a strip in the channel for every human (#407), still in search
+// and at /t/<id>. The live poll leaves hidden threads out, so an open one fetches its own new replies.
 setInterval(function(){
   var id = S.thread, msgs = plist.querySelectorAll('.msg'), last = msgs[msgs.length - 1];
   if (!id || !$('#thide').dataset.hidden || !last) return;
@@ -1403,9 +1435,12 @@ $('#thide').addEventListener('click', function(){
   .then(function(r){ return r.json().then(function(d){
     if (!r.ok) { alert(d.detail || ('refused: ' + r.status)); return; }
     if (!shown) { location.reload(); return; }
-    S.roots = S.roots.filter(function(m){ return m.id !== id; });
-    var row = $('#m' + id); if (row) row.remove();
-    closeThread(); refreshLists();
+    var root = S.roots.filter(function(m){ return m.id === id; })[0];
+    if (root) {     // folds in place; the thread stays open, its header now saying hidden
+      root.hidden = true; root.hidden_by = ME.handle; root.hidden_at = new Date().toISOString();
+      var top = stream.scrollTop; renderStream(); stream.scrollTop = top;
+    }
+    openThread(id, false); refreshLists();
   }); })
   .catch(function(){ alert('could not reach the board'); });
 });

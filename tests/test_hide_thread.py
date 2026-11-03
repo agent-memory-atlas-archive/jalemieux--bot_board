@@ -1,5 +1,6 @@
-"""A human hides a thread (#374): gone from the channel views for every human, still in search and at
-its link, unchanged for bots. Run with python -m unittest discover -s tests."""
+"""A human hides a thread (#374): out of the channel views and counts for every human, folded into a
+strip in the channel stream (#407), still in search and at its link, unchanged for bots.
+Run with python -m unittest discover -s tests."""
 import json
 import os
 import sys
@@ -55,7 +56,12 @@ class HideThread(unittest.TestCase):
         self.assertEqual(self.client.put(url, headers=self.human).json(), {"thread_id": self.root, "hidden": True})
         self.client.put(url, headers=self.human).raise_for_status()      # twice is fine
 
-        self.assertEqual(self.listed(roots="true"), [self.keep])
+        # the stream's list of roots keeps it, marked, so the page folds it in place (#407)
+        self.assertEqual(self.listed(roots="true"), [self.keep, self.root])
+        roots = {m["id"]: m for m in self.client.get("/api/messages", params={"channel": "proj", "hide_events": "true", "roots": "true"}).json()["messages"]}
+        self.assertEqual((roots[self.root]["hidden"], roots[self.root]["hidden_by"]), (True, "jac"))
+        self.assertRegex(roots[self.root]["hidden_at"], r"^\d{4}-")
+        self.assertNotIn("hidden", roots[self.keep])
         self.assertEqual(self.listed(since=self.keep), [], "the live poll and the unread view")
         self.assertEqual(self.count(), 0)
         thread = self.client.get(f"/api/threads/{self.root}", params={"hide_events": "true"}).json()
@@ -66,6 +72,7 @@ class HideThread(unittest.TestCase):
 
         self.client.delete(url, headers=self.human).raise_for_status()
         self.assertIn(self.root, self.listed(roots="true"))
+        self.assertNotIn("hidden", {m["id"]: m for m in self.client.get("/api/messages", params={"channel": "proj", "hide_events": "true", "roots": "true"}).json()["messages"]}[self.root])
         self.assertFalse(self.client.get(f"/api/threads/{self.root}").json()["hidden"])
         self.assertEqual(self.count(), 2)
 
@@ -95,9 +102,22 @@ class HideThread(unittest.TestCase):
         page.wait_for_selector("#thide:visible")
         self.assertEqual(page.inner_text("#thide"), "hide")
         page.click("#thide")
-        page.wait_for_selector(f"#m{self.root}", state="detached")
-        self.assertTrue(page.locator(f"#m{self.keep}").count())
+        # folded into a strip in its place (#407): the card is under it, shown by a click; the thread stays open
+        page.wait_for_selector("#stream button.fold")
+        strip = page.locator("#stream button.fold")
+        self.assertIn(f"#{self.root} needle in a hidden thread · 1 reply", strip.inner_text())
+        self.assertIn("hidden by @jac", strip.inner_text())
+        self.assertTrue(page.locator(f"#m{self.keep}").is_visible())
+        self.assertFalse(page.locator(f"#m{self.root}").is_visible())
+        strip.click()
+        self.assertTrue(page.locator(f"#m{self.root}").is_visible())
+        page.wait_for_selector("#thide:visible")
+        self.assertEqual(page.inner_text("#thide"), "bring back")
         self.assertTrue(db.thread_hidden(self.root))
+        # a reload lists it folded the same way, from the server's mark
+        page.goto("http://board.test/#proj")
+        page.wait_for_selector("#stream button.fold")
+        self.assertFalse(page.locator(f"#m{self.root}").is_visible())
 
         page.goto(f"http://board.test/t/{self.root}")
         page.wait_for_selector("#thide:visible")
