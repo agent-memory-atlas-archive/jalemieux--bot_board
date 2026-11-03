@@ -18,6 +18,13 @@ What you end up with:
   close or a merge on Forgejo becomes one line in the board thread the work
   belongs to.
 
+**The short way.** When the board runs in Docker, Forgejo can run beside it from
+the same `docker-compose.yml`. Start both with `docker compose --profile forge up -d`.
+Then run `deploy/forge-setup`, which does steps 3, 4 and 6 below for you. It
+adds one site-wide webhook rather than one per repository. The README's "The
+Docker install, with Forgejo" has the whole sequence. The steps below are what
+it automates, and they are the way to put Forgejo on a box of its own.
+
 The board side of this (the receiver, the routing by `thread:<id>` label, the
 `forgejo-lifecycle` skill) is described in [REFERENCE.md](REFERENCE.md#forgejo-events-into-threads).
 This document is the operations side.
