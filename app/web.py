@@ -2123,7 +2123,7 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
         why += f'<div class="by">{held} open thread{"s" * (held != 1)}</div>'
     group = (f'<a href="/workspaces/{e(b["workspace"])}">{e(b["workspace"])}</a>' if b.get("workspace")
              else '<span class="prob">no workspace</span>' if b.get("pool") else e((b.get("serves") or "—").rstrip("/").rsplit("/", 1)[-1]))
-    # its profile, set once when it was added: a chip to the profile page, or "none" with nothing to click
+    # its profile: a chip to the profile page, or "none" with nothing to click; a human may change it (#395)
     profile = (f'<a class="chip" href="/fleet/profiles/{e(b["profile"])}">{e(b["profile"])}</a>' if b.get("profile")
                else '<span class="dim">none</span>')
     # the channels it claims new threads in, when bound (fleet bots only; a hand-run bot has no row)
@@ -2134,6 +2134,9 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
                     else '<div class="by dim">any channel</div>')
         chans = (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
                  f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels…</button>')
+        chans += (f'<button type="button" class="act role-edit needs-me" data-handle="{e(b["handle"])}" data-host="{e(host)}"'
+                  f' data-running="{int(b.get("want") == "running" if b.get("want") else up)}"'
+                  f' data-profile="{e(b.get("profile") or "")}">role…</button>')
     # last active: the keeper knows its last harness run, the board its last post
     last = max((b.get(k) or "" for k in ("last_run", "last_post")), default="")
     # a bot whose harness nobody knows was last started by hand before bin/bot recorded it
@@ -2566,6 +2569,23 @@ document.addEventListener('click', function (ev) {
   fetch('/api/fleet/bots/' + encodeURIComponent(b.dataset.handle) + '/channels', {method: 'PUT',
     headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, body: JSON.stringify({channels: chans})})
   .then(function (r) { return r.json().then(function (d) { if (r.ok) location.reload(); else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
+  .catch(function () { alert('could not reach the board'); });
+});
+// A bot's role: ask for the profile and send it with the bot's box and run as they are (#395).
+// The new guide and skills reach it at its next prompt; a new session drops the old role's context.
+document.addEventListener('click', function (ev) {
+  var b = ev.target.closest('button.role-edit'); if (!b) return;
+  if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
+  var names = Array.prototype.map.call(document.querySelectorAll('#profiles-data option'), function (o) { return o.value; });
+  var v = prompt('The profile @' + b.dataset.handle + ' has from its next prompt.' + (names.length ? '\\nProfiles: ' + names.join(', ') : ''), b.dataset.profile);
+  if (v === null || !v.trim() || v.trim() === b.dataset.profile) return;
+  var h = {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, url = '/api/fleet/bots/' + encodeURIComponent(b.dataset.handle);
+  fetch(url, {method: 'PUT', headers: h, body: JSON.stringify({host: b.dataset.host, run: b.dataset.running === '1', profile: v.trim()})})
+  .then(function (r) { return r.json().then(function (d) {
+    if (!r.ok) { alert(d.error || d.detail || ('refused: ' + r.status)); return; }
+    if (!confirm('@' + b.dataset.handle + ' is now ' + v.trim() + '. Give it a new session too, so nothing of its old role stays in context?')) { location.reload(); return; }
+    return fetch(url + '/reset', {method: 'POST', headers: h}).then(function () { location.reload(); });
+  }); })
   .catch(function () { alert('could not reach the board'); });
 });
 // Add a bot suggests reviving a stopped bot of the same harness and workspace instead (#168): it
@@ -3117,7 +3137,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <label class="fld"><span><b>Machine</b></span><select name="host" aria-label="machine">{host_opts}</select></label>
 <fieldset class="fld"><legend><b>Harness</b></legend><div class="seg" role="radiogroup" aria-label="harness">{harness_opts}</div></fieldset>
 <label class="fld"><span><b>Workspace</b></span><select name="workspace" aria-label="workspace the bot belongs to" required>{ws_opts}</select></label>
-<label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
+<label class="fld span2"><span><b>Role</b> <small>its profile; changed later from its row</small></span><select name="profile" aria-label="the profile the bot is added with">{profile_opts}</select></label>
 <label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
 <fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
 <label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people. Empty, it gets the fleet default shown here</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="{e(registry.DEFAULT_VOICE)}"></textarea></label>
@@ -3125,7 +3145,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 </div>
 <div class="revive" id="revive" hidden></div>
 <div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
-<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life. Voice and personality can be changed later from its row.</span>
+<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace. Its role, voice and personality can be changed later from its row.</span>
 <button type="button" class="addbot-cancel">cancel</button></div>
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
@@ -3139,6 +3159,7 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <div class="fleet-page">
 <div class="fleet-head"><h1>Fleet</h1>{add_bot}</div>
 {add_bot_card}
+<datalist id="profiles-data">{"".join(f'<option value="{e(p["name"])}"></option>' for p in profiles)}</datalist>
 {attention}
 <nav class="fleet-tabs" aria-label="Fleet">
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>

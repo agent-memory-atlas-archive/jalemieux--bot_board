@@ -675,7 +675,7 @@ def profile_new_page(board_name: str, templates: list, profiles: list, skills: l
 <div class="fleet-page"><div class="reg">
 <p class="crumbs"><a href="/fleet">Fleet</a> › <a href="/fleet#fleet-profiles">Profiles</a> › new profile</p>
 <div class="reg-head"><h1 style="font-family:var(--sans)">Create a profile</h1></div>
-<p class="sub">A profile is a role and the skills that go with it. A bot keeps its profile for life; the profile itself is edited on its page, and a different role is a new profile.</p>
+<p class="sub">A profile is a role and the skills that go with it. A human can move a bot to another profile from its row; the profile itself is edited on its page, and a different role is a new profile.</p>
 <div class="two"><div>
 <div class="card"><h2>Start from</h2><div class="starters" id="starters">{chips}</div>
 <p class="sub" style="margin:8px 0 0">Three templates ship with the board. Any existing profile can be picked too, which is what Clone does. Switching replaces the fields below; nothing is saved until Create.</p></div>

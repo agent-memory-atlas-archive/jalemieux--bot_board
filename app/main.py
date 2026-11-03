@@ -368,7 +368,7 @@ API_MAP = {
                                 " personality?}; the board picks"
                                 " its name -> {handle}",
         "PUT /api/fleet/bots/{handle}": "a human asks for a bot to run on a box, or to stop {host, run, harness,"
-                                        " workspace, profile, voice, personality, kill, threads}; profile is set once, for a new bot;"
+                                        " workspace, profile, voice, personality, kill, threads}; profile gives it a profile, or moves it to another;"
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
@@ -866,8 +866,9 @@ class FleetWantIn(BaseModel):
     threads: str | None = Field(default=None, max_length=8, description="With run false, what to do with the bot's"
                                 " open threads: keep (default), handoff (release them once its keeper reports it"
                                 " stopped) or retire (hand off, and drop it from the stopped list).")
-    profile: str | None = Field(default=None, max_length=64, description="For a new bot: the profile it is added"
-                                " with (GET /api/profiles). Set once; a bot that has one cannot be given another.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with"
+                                " (GET /api/profiles), or another for a bot that has one: it keeps its handle, token,"
+                                " channels and voice, and its next prompt carries the new guide and skills.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of its workspace the"
                                        " bot claims new threads in. Required with a specialized profile; empty"
                                        " means any channel. Changed later with PUT /api/fleet/bots/{handle}/channels.")
@@ -980,7 +981,8 @@ class FleetNewIn(BaseModel):
     host: str = Field(description="The box to start it on.", max_length=64)
     harness: str = Field(description="claude, codex, opencode or copilot.", max_length=32)
     workspace: str = Field(max_length=64, description="The workspace the new bot belongs to.")
-    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with, for life.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with;"
+                                   " changed later with PUT /api/fleet/bots/{handle}.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of the workspace it"
                                        " claims new threads in; required with a specialized profile.")
     voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people.")
