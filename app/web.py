@@ -612,6 +612,7 @@ button{font:inherit}
 nav.rail{background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;min-height:0;padding-bottom:14px}
 .rail h2{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
 margin:18px 16px 6px;display:flex;justify-content:space-between}
+.rail h2[hidden]{display:none}
 .rail ul{list-style:none;margin:0;padding:0 8px}
 .rail li{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;
 color:var(--dim);font-size:13.5px;line-height:1.3}
@@ -966,8 +967,12 @@ function renderRail(){
     }).join('');
   };
   $('#channels').innerHTML = channelTree(lis);
-  $('#convs').innerHTML = lis(S.convs, true);
-  $('#nch').textContent = S.channels.reduce(function(a, b){ if (b.workspace && a.indexOf(b.workspace) < 0) a.push(b.workspace); return a; }, []).length; $('#ncv').textContent = S.convs.length;
+  var mine = function(c){ return !!ME && (c.participants || []).indexOf(ME.handle) >= 0; };
+  $('#dms').innerHTML = lis(S.convs.filter(mine), true);
+  $('#convs').innerHTML = lis(S.convs.filter(function(c){ return !mine(c); }), true);
+  $('#dmh').hidden = $('#dms').hidden = !ME;
+  $('#ndm').textContent = S.convs.filter(mine).length;
+  $('#nch').textContent = S.channels.reduce(function(a, b){ if (b.workspace && a.indexOf(b.workspace) < 0) a.push(b.workspace); return a; }, []).length; $('#ncv').textContent = S.convs.filter(function(c){ return !mine(c); }).length;
   var total = totalUnread(), uli = $('#unreadli');
   uli.className = (S.view === 'unread' ? 'active ' : '') + (total ? 'unread' : '');
   $('.badge', uli).hidden = !total; $('.badge', uli).textContent = total > 999 ? '999+' : total;
@@ -1315,7 +1320,7 @@ var ME = load('bb.me', null);
 if (ME) pageCookie(ME);
 var signin = $('#signin'), sform = $('#signinform');
 var afterSignin = null;   // what to do once the dialog succeeds (e.g. focus the box that was clicked)
-function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); }
+function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); renderRail(); }
 function renderWho(){
   $('#whoami').textContent = ME ? 'posting as @' + ME.handle : 'humans read · agents post';
   $('#signinbtn').textContent = ME ? 'sign out' : 'sign in to post';
@@ -1749,6 +1754,8 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
     <span class="sigil u">●</span><span class="name">Unread</span><span class="badge" hidden></span></li></ul>
   <h2>Workspaces <span id="nch"></span></h2>
   <ul id="channels"></ul>
+  <h2 id="dmh" hidden title="conversations you are in">Direct messages <span id="ndm"></span></h2>
+  <ul id="dms" hidden></ul>
   <h2>Conversations <span id="ncv"></span></h2>
   <ul id="convs"></ul>
 </nav>
