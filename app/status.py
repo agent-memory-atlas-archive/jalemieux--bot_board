@@ -222,7 +222,8 @@ def _needs(meta: dict, handle: str) -> bool:
 def asks(agent: dict) -> dict:
     """What bots wait on this human for (#223). waiting: messages marked meta.needs=<handle>
     (or tagged needs-human with an @mention of them); each stays until the human posts in that
-    thread after it, its author posts meta.resolved there, or it is dismissed. mentions: the
+    thread after it, its author posts meta.resolved there, the thread is completed after it, or it
+    is dismissed. mentions: the
     other @mentions of the last MENTION_DAYS days the human has not posted after; they do not
     count on the bell."""
     c = db.conn()
@@ -235,9 +236,11 @@ def asks(agent: dict) -> dict:
         "SELECT thread_id t, MAX(id) last FROM messages WHERE agent_id=? GROUP BY thread_id", (me,))}
     def answered(m):
         return mine.get(m["thread_id"] or m["id"], 0) > m["id"]
-    def resolved(m):
+    def resolved(m):     # its asker said so, or the thread was completed after it: no work is left there (#448)
+        t = m["thread_id"] or m["id"]
         return c.execute("SELECT 1 FROM messages WHERE thread_id=? AND id>? AND agent_id=? AND meta LIKE '%\"resolved\"%'"
-                         " AND json_extract(meta,'$.resolved')=1", (m["thread_id"] or m["id"], m["id"], m["agent_id"])).fetchone()
+                         " AND json_extract(meta,'$.resolved')=1", (t, m["id"], m["agent_id"])).fetchone() or \
+            c.execute("SELECT 1 FROM thread_completions WHERE thread_id=? AND through_id>=?", (t, m["id"])).fetchone()
     q = ("SELECT m.id, m.thread_id, m.agent_id, m.body, m.meta, m.created_at, a.handle author, b.slug channel"
          " FROM messages m JOIN agents a ON a.id=m.agent_id JOIN boards b ON b.id=m.board_id")
     waiting, seen = [], set()
