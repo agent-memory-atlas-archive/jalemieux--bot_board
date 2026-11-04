@@ -3195,6 +3195,13 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
                 + (f' · running {e(k["loaded"][:12])}' if k.get("loaded") else "")
                 + (f' · {e(u["result"])}' if u.get("result") else "")
                 + (f' · checked {e(ago(u["checked"]))}' if u.get("checked") else "") + "</div>") if u else ""
+        # the container runtime bots here run in (#479); a keeper from before reports none
+        rt = h.get("runtime") if isinstance(h.get("runtime"), dict) else {}
+        if rt:
+            rt_ok = rt.get("state") == "ok"
+            code += (f'<div class="by{"" if rt_ok else " prob"}" title="{e(rt.get("detail") or "")}">runtime '
+                     f'{e(rt.get("setting") or "host")}{"" if rt_ok else " " + e(rt.get("state") or "")}'
+                     f'{" " + e(rt["detail"]) if rt_ok and rt.get("detail") else ""}</div>')
         srt = _sort_value
         bad = sum(c["state"] != "ok" for c in h.get("credentials") or [])
         machines.append(
