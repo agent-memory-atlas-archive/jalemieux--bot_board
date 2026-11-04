@@ -965,6 +965,10 @@ run_harness() {
   # claude and copilot take the id we pick; codex and opencode pick their own, read off
   # their first event so later runs can resume it
   case $HARNESS in claude|copilot) [ -n "$sid" ] || sid=$(python3 -c 'import uuid;print(uuid.uuid4())') ;; esac
+  # Run one harness command on the host, or in a container when BOT_RUNTIME is set.
+  # The host subshell already cd'd into "$dir"; the container binds it at /work and
+  # sets -w /work, so a command that relies on its cwd lands in the checkout either way.
+  harness() { if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" "$@"; else "$@"; fi; }
   # In a subshell: the harness runs in its directory, the launcher stays where it was.
   # Stdin is /dev/null or the prompt too long for an argument, never the caller's: its
   # loop feeds stdin, and a harness that read it would eat the loop's input.
@@ -972,12 +976,13 @@ run_harness() {
     claude)
       if [ ! -s "$sfile" ]; then set -- claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}
       else                       set -- claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}; fi
-      if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" "$@"; else "$@"; fi \
-        >"$STATE/run.out" 2>"$STATE/run.err" ;;
+      harness "$@" >"$STATE/run.out" 2>"$STATE/run.err" ;;
     codex)
+      # No -C: codex runs in its cwd, the checkout on the host and /work in a container.
+      # The tee/python pipe reads codex's stdout on the host in both cases.
       if [ ! -s "$sfile" ]; then
         # Keep reading to EOF: closing the pipe early kills the harness with SIGPIPE.
-        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
+        harness codex exec --json $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -986,10 +991,10 @@ for line in sys.stdin:
     except ValueError: continue
     if d.get("type")=="thread.started" and not seen: print(d["thread_id"]); seen=True' > "$sfile.new"
       # the flags go before "resume": the subcommand takes neither -C nor -s
-      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else harness codex exec --json $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
     opencode)
       if [ ! -s "$sfile" ]; then
-        opencode run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} 2>"$STATE/run.err" \
+        harness opencode run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -997,11 +1002,17 @@ for line in sys.stdin:
     try: d=json.loads(line)
     except ValueError: continue
     if d.get("sessionID") and not seen: print(d["sessionID"]); seen=True' > "$sfile.new"
-      else opencode run --format json --session "$sid" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else harness opencode run --format json --session "$sid" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} >>"$LOG" 2>"$STATE/run.err"; fi ;;
     copilot)
       # -s keeps copilot's stats out of the log
-      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}
-      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}; fi >>"$LOG" 2>"$STATE/run.err" ;;
+      if [ ! -s "$sfile" ]; then set -- -s --session-id "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}
+      else                       set -- -s --resume     "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}; fi
+      # The host path runs run_copilot, whose gh-config fallback (below) lets copilot run as the
+      # fleet's gh without exposing GH_TOKEN to copilot itself. In a container that fallback cannot
+      # apply: there is nothing to mount and no interactive login, so copilot reads its token from
+      # the passed env and a containerised copilot bot needs COPILOT_GITHUB_TOKEN as a fleet secret.
+      if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" copilot "$@"
+      else run_copilot "$@"; fi >>"$LOG" 2>"$STATE/run.err" ;;
   esac <"$input") || rc=$?
   rm -f "$STATE/prompt"
   if [ -s "$sfile.new" ]; then sid=$(cat "$sfile.new"); fi; rm -f "$sfile.new"
