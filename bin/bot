@@ -268,8 +268,9 @@ container_run() {
   for _k in $_FLEET_SET; do run+=(-e "$_k"); done
   if [ "$mode" = box ]; then run+=(-v "bot_board-box-state:/home/bot")
   else                       run+=(-v "$dir:/work" -w /work -v "bot_board-${HANDLE:-bot}-state:/home/bot"); fi
-  # codex keeps its login file; mount it read-only so the container never writes the host's
-  [ "$harness" = codex ] && [ -d "$HOME/.codex" ] && run+=(-v "$HOME/.codex:/home/bot/.codex:ro")
+  # codex keeps its login in ~/.codex/auth.json; mount just that file read-only, so the container
+  # reads the host login but writes its session state to the state volume (#478 mounts it the same)
+  [ "$harness" = codex ] && [ -f "$HOME/.codex/auth.json" ] && run+=(-v "$HOME/.codex/auth.json:/home/bot/.codex/auth.json:ro")
   $BOT_RUNTIME "${run[@]}" "$image" "$@"
 }
 
