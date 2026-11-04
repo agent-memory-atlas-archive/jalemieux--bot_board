@@ -254,6 +254,65 @@ PY
 }
 load_fleet_env
 
+# The container runner (#306, #477). With BOT_RUNTIME set (a per-box setting, #479), a harness
+# runs inside its image instead of on the host, so it cannot read the host home or another bot's
+# token — the dropoff incident's cause. The checkout mounts at /work, the harness's session state
+# lives on a named volume at /home/bot (made writable by the image) so resume works, and the
+# secrets go in by name (already exported by load_fleet_env), never as a file on disk. The
+# container runs as the host uid:gid so a bind-mounted checkout is writable on Linux.
+#   container_run <mode> <harness> <dir> <cmd...>
+#     mode:  bot (checkout + the bot's state volume) | box (neither; a shared box volume, for the
+#            keeper's per-box login checks, #478)
+#     dir:   the bot's checkout (bot mode; ignored in box mode)
+#     cmd:   the command to run in the image, e.g. `claude -p ...` or `claude auth status`
+container_run() {
+  local mode=$1 harness=$2 dir=$3; shift 3
+  local image="${BOT_HARNESS_REGISTRY:-minipc-2.taild87368.ts.net:3000}/jac/bot_board-harness-$harness:latest"
+  local run=(run --rm -i --user "$(id -u):$(id -g)" -e HOME=/home/bot) _k
+  # the board vars are for a bot's harness turn, not a box login check: in box mode (the keeper's)
+  # they would carry whatever the keeper's own environment holds (a keeper token) into the check
+  # container (milo, #485). Box mode gets only fleet.env's secrets.
+  [ "$mode" = bot ] && run+=(-e BOARD -e BOT_HANDLE -e BOARD_TOKEN)
+  # A loopback BOARD is the box's own address to the launcher, but under the default bridge
+  # networking 127.0.0.1 inside the container is the container, so the harness's own curls to the
+  # board would fail while the turn still "succeeds" with nothing posted. Refuse it, naming the
+  # setting (#485 review). The launcher fetched the prompt on the host, so only the harness's own
+  # board calls are at stake. Set BOT_CONTAINER_HOST_NETWORK=1 only when the runtime shares the
+  # host network (a `--network host` runtime): then loopback does reach the host and the refusal
+  # is wrong. Plain bridge networking, which this uses, does not qualify, not even on a one-box setup.
+  if [ "$mode" = bot ] && [ -z "${BOT_CONTAINER_HOST_NETWORK:-}" ]; then case ${BOARD:-} in
+    http://127.*|http://localhost|http://localhost:*|http://localhost/*|"http://[::1]"*)
+      echo "bot: BOARD is ${BOARD:-} — a container reads that as itself, not the host, so the harness could not reach the board. Set BOARD to the box's reachable address (its Tailscale name) in the box config, or BOT_CONTAINER_HOST_NETWORK=1 if the runtime shares the host network, before enabling BOT_RUNTIME." >&2
+      return 1 ;;
+  esac; fi
+  for _k in $_FLEET_SET; do run+=(-e "$_k"); done
+  # opencode takes its per-bot config as content in this var (#324); forward it when set so a
+  # container run uses the same model and config block as the host does.
+  [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] && run+=(-e OPENCODE_CONFIG_CONTENT)
+  # bot mode names the container so `bot kill` can remove a turn that outlives the runtime client
+  # (KILL ends the client, not the container), and so two turns of one bot cannot overlap (#485).
+  if [ "$mode" = box ]; then run+=(-v "bot_board-box-state:/home/bot")
+  else                       run+=(--name "bot_board-${HANDLE:-bot}-run" -v "$dir:/work" -w /work -v "bot_board-${HANDLE:-bot}-state:/home/bot"); fi
+  # codex keeps its login in ~/.codex/auth.json; mount just that file read-only, so the container
+  # reads the host login but writes its session state to the state volume (#478 mounts it the same)
+  [ "$harness" = codex ] && [ -f "$HOME/.codex/auth.json" ] && run+=(-v "$HOME/.codex/auth.json:/home/bot/.codex/auth.json:ro")
+  if [ "$mode" = box ]; then
+    $BOT_RUNTIME "${run[@]}" "$image" "$@"
+  else
+    # Clear a leftover container of this name first: a launcher that died without `bot kill` (a
+    # crash, an OOM, a kill -9) leaves one behind, and then every turn fails with a name conflict.
+    # The launcher is the only owner of the name and turns are serialised, so a live turn never
+    # collides here; removing a leftover is always right (#485 review).
+    $BOT_RUNTIME rm -f "bot_board-${HANDLE:-bot}-run" >/dev/null 2>&1 || true
+    # Refuse an empty /work: on Colima or Docker Desktop only paths under $HOME bind-mount, so a
+    # checkout elsewhere mounts as an empty /work with no error (seth, #485). Fail loud instead of
+    # running the harness on nothing. The check runs then exec's the harness, so no extra container.
+    $BOT_RUNTIME "${run[@]}" "$image" sh -c \
+      'test -n "$(ls -A /work 2>/dev/null)" || { echo "bot: the checkout did not bind-mount into the container (/work is empty); on Colima or Docker Desktop only paths under \$HOME are shared, so move the checkout under \$HOME" >&2; exit 97; }; exec "$@"' \
+      sh "$@"
+  fi
+}
+
 BOARD=${BOARD:-http://127.0.0.1:8080}
 BOT_WAIT=${BOT_WAIT:-60}
 # Headless runs cannot answer permission prompts, so the harness must be told
@@ -461,6 +520,29 @@ case ${1:-} in
       | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || true)
     if [ -n "$bv" ]; then echo "board $BOARD: $bv"; else echo "board $BOARD: unreachable"; fi
     exit 0 ;;
+  run-in-container)
+    # Run a harness in its image, the way a bot run does (#477), callable on its own so the
+    # keeper (Python) runs its per-box login checks and token probe through B's exact runtime,
+    # image and mounts, with no second copy (#478):
+    #   bin/bot run-in-container [--box] <harness> [--handle H --dir D] -- <args...>
+    # --box: no checkout, no state volume; a shared box volume and the codex login mount only.
+    # The secrets come from fleet.env (already loaded above). Needs BOT_RUNTIME set.
+    shift; RC_MODE=box; RC_HARNESS=""; RC_DIR=""
+    while [ $# -gt 0 ]; do case $1 in
+      --box) RC_MODE=box; shift ;;
+      --handle) HANDLE=${2:-}; RC_MODE=bot; shift 2 || usage ;;
+      --dir) RC_DIR=${2:-}; RC_MODE=bot; shift 2 || usage ;;
+      --) shift; break ;;
+      -*) usage ;;
+      *) [ -z "$RC_HARNESS" ] || usage; RC_HARNESS=$1; shift ;;
+    esac; done
+    case $RC_HARNESS in claude|codex|opencode|copilot) ;; *) echo "bot: run-in-container needs a harness (claude, codex, opencode, copilot)" >&2; exit 1 ;; esac
+    [ -n "${BOT_RUNTIME:-}" ] || { echo "bot: run-in-container needs BOT_RUNTIME set (the box's container runtime)" >&2; exit 1; }
+    # bot mode needs a checkout: --handle or --dir alone would build -v ":/work" and the runtime
+    # would answer with an opaque mount error, so say what is missing instead (#485 review).
+    [ "$RC_MODE" != bot ] || [ -n "$RC_DIR" ] || { echo "bot: run-in-container bot mode needs --dir <checkout>" >&2; exit 1; }
+    container_run "$RC_MODE" "$RC_HARNESS" "$RC_DIR" "$RC_HARNESS" "$@"
+    exit $? ;;
   keeper)
     # The box agent (reporting, supervising) installs and runs through the same bot
     # binary as every bot, so a box needs only this one command on its PATH.
@@ -592,6 +674,10 @@ print(d.get("outcome","-")+("" if age is None else " "+ago(age)))' "$d/last.json
     done
     LEFT=$(rest; if alive "$S"; then echo "$P"; fi)
     if [ -n "$LEFT" ]; then kill -KILL $LEFT 2>/dev/null || true; sleep 1; fi
+    # In container mode the launcher's child is the runtime client; KILL ends the client, not the
+    # container, which would keep running the turn and holding the state volume. Remove the named
+    # bot-mode container too (#485 review). Harmless when there is none or BOT_RUNTIME is unset.
+    [ -z "${BOT_RUNTIME:-}" ] || $BOT_RUNTIME rm -f "bot_board-$H-run" >/dev/null 2>&1 || true
     if alive "$S"; then die "could not kill $H (pid $P)"; fi
     rm -f "$S/pid" "$S/stop" "$S/busy" "$S/poll"   # a launcher killed with KILL never cleaned up after itself
     echo "bot: $H killed"
@@ -954,18 +1040,24 @@ run_harness() {
   # claude and copilot take the id we pick; codex and opencode pick their own, read off
   # their first event so later runs can resume it
   case $HARNESS in claude|copilot) [ -n "$sid" ] || sid=$(python3 -c 'import uuid;print(uuid.uuid4())') ;; esac
+  # Run one harness command on the host, or in a container when BOT_RUNTIME is set.
+  # The host subshell already cd'd into "$dir"; the container binds it at /work and
+  # sets -w /work, so a command that relies on its cwd lands in the checkout either way.
+  harness() { if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" "$@"; else "$@"; fi; }
   # In a subshell: the harness runs in its directory, the launcher stays where it was.
   # Stdin is /dev/null or the prompt too long for an argument, never the caller's: its
   # loop feeds stdin, and a harness that read it would eat the loop's input.
   (cd "$dir" && case $HARNESS in
     claude)
-      if [ ! -s "$sfile" ]; then claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}
-      else                       claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}; fi \
-        >"$STATE/run.out" 2>"$STATE/run.err" ;;
+      if [ ! -s "$sfile" ]; then set -- claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}
+      else                       set -- claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}; fi
+      harness "$@" >"$STATE/run.out" 2>"$STATE/run.err" ;;
     codex)
+      # No -C: codex runs in its cwd, the checkout on the host and /work in a container.
+      # The tee/python pipe reads codex's stdout on the host in both cases.
       if [ ! -s "$sfile" ]; then
         # Keep reading to EOF: closing the pipe early kills the harness with SIGPIPE.
-        codex exec --json -C "$dir" $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
+        harness codex exec --json $BOT_CODEX_FLAGS "${codex_arg[@]}" 2>"$STATE/run.err" \
           | tee -a "$LOG" | python3 -c '
 import sys,json
 seen=False
@@ -974,7 +1066,7 @@ for line in sys.stdin:
     except ValueError: continue
     if d.get("type")=="thread.started" and not seen: print(d["thread_id"]); seen=True' > "$sfile.new"
       # the flags go before "resume": the subcommand takes neither -C nor -s
-      else codex exec --json -C "$dir" $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
+      else harness codex exec --json $BOT_CODEX_FLAGS resume "$sid" "${codex_arg[@]}" >>"$LOG" 2>"$STATE/run.err"; fi ;;
     opencode)
       if [ ! -s "$sfile" ]; then
         opencode_run --format json --title "bot $HANDLE" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} 2>"$STATE/run.err" \
@@ -988,8 +1080,14 @@ for line in sys.stdin:
       else opencode_run --format json --session "$sid" $BOT_OPENCODE_FLAGS ${arg[@]+"${arg[@]}"} >>"$LOG" 2>"$STATE/run.err"; fi ;;
     copilot)
       # -s keeps copilot's stats out of the log
-      if [ ! -s "$sfile" ]; then run_copilot -s --session-id "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}
-      else                       run_copilot -s --resume     "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}; fi >>"$LOG" 2>"$STATE/run.err" ;;
+      if [ ! -s "$sfile" ]; then set -- -s --session-id "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}
+      else                       set -- -s --resume     "$sid" $BOT_COPILOT_FLAGS ${copilot_arg[@]+"${copilot_arg[@]}"}; fi
+      # The host path runs run_copilot, whose gh-config fallback (below) lets copilot run as the
+      # fleet's gh without exposing GH_TOKEN to copilot itself. In a container that fallback cannot
+      # apply: there is nothing to mount and no interactive login, so copilot reads its token from
+      # the passed env and a containerised copilot bot needs COPILOT_GITHUB_TOKEN as a fleet secret.
+      if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" copilot "$@"
+      else run_copilot "$@"; fi >>"$LOG" 2>"$STATE/run.err" ;;
   esac <"$input") || rc=$?
   rm -f "$STATE/prompt"
   if [ -s "$sfile.new" ]; then sid=$(cat "$sfile.new"); fi; rm -f "$sfile.new"
@@ -1035,11 +1133,15 @@ run_copilot() {
   (unset GH_TOKEN GITHUB_TOKEN; export GH_CONFIG_DIR="$d"; copilot "$@")
 }
 
-# opencode_run <args of opencode run>: read at each run, so a change needs no restart
+# opencode_run <args of opencode run>: read at each run, so a change needs no restart. The
+# model and config live in the host state dir; this reads them on the host, then dispatches
+# through harness() so the run lands on the host or in the container (#477). The config is
+# passed as content in OPENCODE_CONFIG_CONTENT, which container_run forwards into the image.
 opencode_run() {
   if [ -s "$STATE/opencode-model" ]; then set -- --model "$(cat "$STATE/opencode-model")" "$@"; fi
-  if [ -s "$STATE/opencode.json" ]; then OPENCODE_CONFIG_CONTENT=$(cat "$STATE/opencode.json") opencode run "$@"
-  else opencode run "$@"; fi
+  if [ -s "$STATE/opencode.json" ]; then
+    (export OPENCODE_CONFIG_CONTENT="$(cat "$STATE/opencode.json")"; harness opencode run "$@")
+  else harness opencode run "$@"; fi
 }
 # classify_run <exit> <log offset> <session id> <started>: what the run that just ended
 # was, as one word in OUTCOME and a line of DETAIL that never comes from the model's

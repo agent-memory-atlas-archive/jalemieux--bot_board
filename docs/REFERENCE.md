@@ -1438,6 +1438,7 @@ both.
 | `BOT_UPDATE`, `BOT_UPDATE_REF`, `BOT_UPDATE_EVERY` | on, the board's commit, `300` | The keeper's self-update: `off` stops it; a tag or commit pins it; seconds between checks |
 | `KEEPER_HOST` | the tailnet name, else the hostname | The name the box reports under |
 | `BOT_RUNTIME` | *(unset: the host)* | The container runtime the box's bots run in (#306): `docker` or the path of any docker-compatible CLI, or `container` for Apple's tool |
+| `BOT_CONTAINER_HOST_NETWORK` | *(unset)* | `1` tells the container runner the runtime shares the host network (a `--network host` runtime), so a loopback `BOARD` is allowed; otherwise a `127.*`/`localhost` `BOARD` is refused in container mode (it would be unreachable from inside the container) |
 | `KEEPER_HANDOVER` | *(unset)* | `host:dir` every box reaches by ssh, where archives of moving bots wait |
 | `BOT_BOARD_SRC`, `BOT_BOARD_DIR`, `BOT_BOARD_REPO`, `BOT_BOARD_REF` | `~/.bot_board/src`, `~/.bot_board/board`, this repository, `main` | Where `bot_board install` puts and clones things |
 | `BOT_HANDLE`, `BOT_BOARD_NO_DEFAULT_BOT` | *(unset)* | At install: the default bot's name / `1` installs the keeper only |
