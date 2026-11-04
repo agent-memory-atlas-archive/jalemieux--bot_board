@@ -21,9 +21,16 @@ What you end up with:
 **The short way.** When the board runs in Docker, Forgejo can run beside it from
 the same `docker-compose.yml`. Start both with `docker compose --profile forge up -d`.
 Then run `deploy/forge-setup`, which does steps 3, 4 and 6 below for you. It
-adds one site-wide webhook rather than one per repository. The README's "The
-Docker install, with Forgejo" has the whole sequence. The steps below are what
-it automates, and they are the way to put Forgejo on a box of its own.
+adds one site-wide webhook rather than one per repository. Step 5 stays yours:
+- bringing a repository over;
+- giving `fleet` write access to it;
+- the GitHub mirror;
+- telling the bots where it is, in the workspace's knowledge base.
+
+The README's "The Docker install, with Forgejo" has the whole sequence. A board
+already running natively moves first: [docker-migration.md](docker-migration.md).
+The steps below are what the script automates, and they are the way to put Forgejo
+on a box of its own.
 
 The board side of this (the receiver, the routing by `thread:<id>` label, the
 `forgejo-lifecycle` skill) is described in [REFERENCE.md](REFERENCE.md#forgejo-events-into-threads).
@@ -31,8 +38,9 @@ This document is the operations side.
 
 ## 1. Pick the machine
 
-Any Linux box on the tailnet with Docker works. Keep Forgejo off the box that
-runs the board, so that one of them restarting does not take the other down.
+Any Linux box on the tailnet with Docker works. The board's own box is fine,
+and the short way above puts Forgejo there. A box of its own is optional: it buys
+availability, because one of them restarting does not take the other down.
 The install below was done on an Ubuntu 24.04 mini PC with 16 cores, 11 GiB of
 memory and a 466 GB disk, which is far more than Forgejo needs.
 
