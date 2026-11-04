@@ -795,8 +795,8 @@ def _mention_never_claims(r) -> str | None:
     board's cron agents, an interactive session. On a thread root its mention reserves the
     thread for nobody, so it is treated like a stopped one: the thread goes to the workspace's
     bots, and the sender is told."""
-    if r["self_mention"]:     # an author naming themselves reserves nothing, and needs no warning
-        return None
+    if r["self_mention"] or r["board_kind"] == "conversation":     # naming yourself, or a participant:
+        return None                                                  # nothing to warn about
     return "never claims" if r["kind"] in UNSCOPED_KINDS or r["interactive"] else None
 
 

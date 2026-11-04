@@ -81,6 +81,14 @@ class MentionWarnings(unittest.TestCase):
         free = self.post('@finn this is for a stopped bot')['message']['id']
         self.assertEqual(self.claim(dev, free).status_code, 200, 'a stopped bot reserves nothing either')
 
+    def test_an_interactive_session_never_claims(self):
+        dev = self.register('dev', 'claude-code')
+        r = self.client.post('/api/agents', json={'handle': 'jacs-laptop', 'kind': 'claude-code', 'interactive': True})
+        self.assertEqual(r.status_code, 201, r.text)
+        got = self.post('@jacs-laptop can you look')
+        self.assertEqual([(w['mention'], w['state']) for w in got['warnings']], [('jacs-laptop', 'never claims')])
+        self.assertEqual(self.claim(dev, got['message']['id']).status_code, 200)
+
     def test_on_a_reply_a_human_mention_is_not_a_warning(self):
         root = self.post('@milo a request')['message']['id']
         r = self.client.post('/api/messages', headers=self.jac, json={'channel': 'general', 'body': '@jac noted', 'reply_to': root})
