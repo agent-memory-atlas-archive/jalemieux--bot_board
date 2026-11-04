@@ -73,7 +73,7 @@ container runtime bots here run in, #479; reported on /fleet), KEEPER_HOST,
 KEEPER_HANDOVER (where archives of
 moving bots wait: host:dir, e.g. box-1:.config/bot_board/handover).
 """
-import argparse, fcntl, hashlib, json, os, platform, re, shlex, shutil, socket, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, fcntl, hashlib, json, os, platform, re, shlex, shutil, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -578,6 +578,93 @@ class Handover:
                 pass
 
 
+# Containers (#306). With BOT_RUNTIME set, a harness runs in its image (bin/bot, #477) and the
+# keeper is the only other process that talks to the runtime (#478): it pulls the images and runs
+# the login checks inside them. No container is given the runtime, the host home or this directory.
+HARNESSES = ("claude", "codex", "opencode", "copilot")
+HARNESS_REGISTRY = "minipc-2.taild87368.ts.net:3000"
+CODEX_LOGIN = os.path.expanduser("~/.codex/auth.json")     # mounted read-only into its checks
+
+
+def runtime():
+    """The runtime command (docker, a path to one, or Apple's container), or None for the host path."""
+    v = setting("BOT_RUNTIME").strip()
+    return None if v in ("", "host") else v
+
+
+def harness_image(harness):
+    """The image bin/bot runs this harness in: the same name and registry (#477)."""
+    return f"{setting('BOT_HARNESS_REGISTRY').strip() or HARNESS_REGISTRY}/jac/bot_board-harness-{harness}:latest"
+
+
+def in_image(rt, harness, cmd, env):
+    """argv that runs cmd once in the harness's image, for the box rather than a bot: no checkout and
+    no state volume. Secrets go in by name, as bin/bot passes them (#477), never as a file; codex
+    reads its login, mounted read-only where its home is in the image."""
+    args = [rt, "run", "--rm"]
+    # only the secrets meant for bots, fleet.env's, and the fleet's claude token where the keeper's own
+    # environment sets it: never the rest of the keeper's environment, which may hold its own token
+    for name in sorted((set(read_env(FLEET_ENV)) | ({"CLAUDE_CODE_OAUTH_TOKEN"} & set(env))) & set(env)):
+        if SECRET_NAME.fullmatch(name):
+            args += ["-e", name]
+    if harness == "codex" and os.path.exists(CODEX_LOGIN):
+        args += ["-v", f"{CODEX_LOGIN}:/home/bot/.codex/auth.json:ro"]
+    return args + [harness_image(harness), *cmd]
+
+
+class Images:
+    """The harness images this box's bots run in, kept current by pulling :latest (#478): a harness
+    update is a new image. A pull runs in the background, since a first one is large, and the next
+    run after it uses the new image. The digest each one has goes out with the report."""
+
+    def __init__(self):
+        self.state = {}         # harness -> {image, state, digest, detail, at}
+        self.pulled = 0.0       # when the last round of pulls started
+        self.changed = False    # a pull finished with a new digest: check the logins again now
+        self.lock = threading.Lock()
+
+    def tick(self, harnesses, force=False):
+        rt = runtime()
+        if rt is None:
+            self.state = {}
+            return
+        if not force and time.time() - self.pulled < CHECK_EVERY:
+            return
+        self.pulled = time.time()
+        for h in sorted(set(harnesses) & set(HARNESSES)):
+            with self.lock:
+                if self.state.get(h, {}).get("state") == "pulling":
+                    continue
+                self.state[h] = {**self.state.get(h, {}), "image": harness_image(h), "state": "pulling"}
+            threading.Thread(target=self.pull, args=(rt, h), daemon=True).start()
+
+    def pull(self, rt, harness):
+        image = harness_image(harness)
+        try:
+            r = subprocess.run([rt, "pull", "-q", image], capture_output=True, text=True, timeout=1800,
+                               stdin=subprocess.DEVNULL)
+            d = subprocess.run([rt, "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
+                               capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            digest = d.stdout.strip().rsplit("@", 1)[-1] if d.returncode == 0 else ""
+            said = " ".join((r.stderr or r.stdout).split())[:200]
+            got = ({"state": "ok", "digest": digest, "detail": ""} if r.returncode == 0 else
+                   # a failed pull keeps the image already here, if any: bots keep running on it
+                   {"state": "stale" if digest else "missing", "digest": digest, "detail": f"pull failed: {said}"})
+        except (OSError, subprocess.SubprocessError) as e:
+            got = {"state": "missing", "digest": "", "detail": f"pull failed: {e}"[:200]}
+        with self.lock:
+            old = self.state.get(harness, {}).get("digest")
+            self.state[harness] = {"image": image, **got, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            if got["digest"] != old:
+                self.changed = True
+        if got["digest"] and got["digest"] != old:
+            print(f"keeper: {harness} image is {got['digest'][:19]}", flush=True)
+
+    def report(self):
+        with self.lock:
+            return [{"harness": h, **v} for h, v in sorted(self.state.items())]
+
+
 # What a box needs before it starts a bot. name, kind, the env var a secret is kept in,
 # the command that checks it, and the harnesses whose bots are held while it fails.
 CREDENTIALS = (
@@ -663,10 +750,20 @@ class Credentials:
 
     def check(self, cred, env):
         name, kind, var, cmd, _ = cred
-        if not shutil.which(cmd[0], path=env.get("PATH")):
+        rt = runtime() if name in HARNESSES else None
+        if rt:      # the harness is in its image, not on this box (#478)
+            have = subprocess.run([rt, "image", "inspect", harness_image(name)], capture_output=True,
+                                  timeout=30, stdin=subprocess.DEVNULL) if shutil.which(rt, path=env.get("PATH")) else None
+            if have is None:
+                return "unknown", f"the runtime {rt} is not on the keeper's PATH"
+            if have.returncode:
+                return "missing", f"no {name} image here yet; the keeper pulls {harness_image(name)}"
+            cmd = in_image(rt, name, cmd, env)
+        elif not shutil.which(cmd[0], path=env.get("PATH")):
             return "missing", f"{cmd[0]} is not installed (or not on the keeper's PATH)"
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, stdin=subprocess.DEVNULL)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60 if rt else 30, env=env,
+                               stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as e:
             return "unknown", f"check failed: {e}"[:200]
         output = r.stdout + "\n" + r.stderr
@@ -722,7 +819,9 @@ class Credentials:
         os.makedirs(where, mode=0o700, exist_ok=True)
         result, retry = None, False
         try:
-            r = subprocess.run(TOKEN_PROBE, capture_output=True, text=True, timeout=90, env=env, cwd=where,
+            rt = runtime()      # in the image when bots run in one (#478): the token is tried where it is used
+            r = subprocess.run(in_image(rt, "claude", TOKEN_PROBE, env) if rt else TOKEN_PROBE, capture_output=True,
+                               text=True, timeout=120 if rt else 90, env=env, cwd=where,
                                stdin=subprocess.DEVNULL)
             d = json.loads(r.stdout)
             if d.get("is_error") is False:
@@ -1205,6 +1304,7 @@ def main():
     except OSError:
         die("a keeper is already running on this box for this user")
     hands, problems, creds, want = Hands(host), {}, Credentials(host), []
+    images = Images()
     maintenance, updater = Maintenance(), Updater()
     updater.release = None      # no update until the board says what it runs (#240)
     while True:
@@ -1217,9 +1317,14 @@ def main():
                 updater.state["result"] = f"update check failed: {e}"[:200]
             snap["update"] = updater.state
             snap["keeper"] = {"loaded": updater.loaded, "started": STARTED, "protocol": PROTOCOL}
-            creds.refresh({b["harness"] for b in snap["bots"] + want if b.get("harness")})
+            harnesses = {b["harness"] for b in snap["bots"] + want if b.get("harness")}
+            images.tick(harnesses)
+            if images.changed:      # a new image, or the first: its login check runs in it now
+                images.changed, creds.checked = False, 0
+            creds.refresh(harnesses)
             hands.blocked = creds.blocked()     # bots read fleet.env themselves, before every run
             snap["credentials"] = creds.report(hands.held)
+            snap["harness_images"] = images.report()
             moves = {"handed": dict(hands.handed), "fetched": list(hands.fetched)}
             ask = setting("KEEPER_DEFAULT_BOT")     # set by a fresh `bot install`; dropped once the board starts it
             ask = {"harness": ask, "handle": setting("KEEPER_DEFAULT_HANDLE")} if ask else None
