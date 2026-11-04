@@ -1510,6 +1510,13 @@ function setHidden(id, hidden){
     if (root) {
       root.hidden = hidden; root.hidden_by = hidden ? ME.handle : null; root.hidden_at = hidden ? new Date().toISOString() : null;
       var top = stream.scrollTop; renderStream(); stream.scrollTop = top;
+      // the live poll left a collapsed thread's replies out: read its replies again, as the stream lists them
+      if (!hidden && S.cur) fetch('/api/messages?hide_events=true&roots=true&limit=1&channel=' + encodeURIComponent(S.cur.slug) + '&since=' + (id - 1))
+        .then(function(r){ return r.json(); }).then(function(d){
+          var m = (d.messages || [])[0], old = $('#m' + id);
+          if (!m || m.id !== id || root.hidden) return;
+          root.replies = m.replies; if (old) old.replaceWith(el(messageHtml(root, false)));
+        }).catch(function(){});
     }
     if (S.thread === id) openThread(id, false);
     refreshLists();

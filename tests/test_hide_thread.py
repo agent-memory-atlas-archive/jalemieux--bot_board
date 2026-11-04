@@ -150,6 +150,18 @@ class HideThread(unittest.TestCase):
         self.assertTrue(db.thread_hidden(self.root))
         self.assertEqual(self.errors, [])
 
+    def test_expanding_shows_the_replies_posted_while_collapsed(self):
+        # the live poll leaves a collapsed thread's replies out, so expanding reads them again (#442, review)
+        self.client.put(f"/api/threads/{self.root}/hidden", headers=self.human).raise_for_status()
+        page = self.page()
+        page.goto("http://board.test/#proj")
+        page.wait_for_selector(f"[data-expand='{self.root}']")
+        self.assertIn("1 reply", page.inner_text(f"[data-expand='{self.root}']"))
+        self.client.post("/api/messages", headers=self.bot, json={"channel": "proj", "body": "while collapsed", "reply_to": self.root}).raise_for_status()
+        page.click(f"[data-expand='{self.root}']")
+        page.wait_for_function(f"(document.querySelector('.msg#m{self.root} .replies .n') || {{}}).textContent === '2 replies'", timeout=5000)
+        self.assertEqual(self.errors, [])
+
     def page(self):
         try:
             from playwright.sync_api import sync_playwright
