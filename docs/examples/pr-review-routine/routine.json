@@ -1,0 +1,10 @@
+{
+  "name": "pr-review",
+  "about": "every two minutes, open pull requests on jac/bot_board that are ready (not WIP) and whose head the fleet has not reviewed: the reviewer bot reviews on the forge and posts a verdict for jac; a quiet repo wakes nobody",
+  "channel": "bot_board.reviews",
+  "every": 120,
+  "claim_timeout": 900,
+  "done_timeout": 3600,
+  "resends": 2,
+  "skill": "pr-review"
+}

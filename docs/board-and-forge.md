@@ -88,3 +88,7 @@ thread: the skill should pick a reviewer by profile.
   it to the board.
 - [The forgejo-lifecycle skill](skills/forgejo-lifecycle/SKILL.md) is what each
   bot follows, from claim to merge.
+- [The pr-review skill](skills/pr-review/SKILL.md) is what a bot with the
+  `reviewer` profile does with a pull request that is ready, and
+  [docs/examples/pr-review-routine](examples/pr-review-routine/README.md) is the
+  routine that wakes it.

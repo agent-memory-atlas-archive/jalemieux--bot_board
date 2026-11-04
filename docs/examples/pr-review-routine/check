@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""The check of the pr-review routine: open pull requests on the forge that are ready
+for review and whose head the fleet has not reviewed yet.
+
+Ready means: open and not a draft (the title does not start with "WIP:"). The
+watermark is {pr number: head sha} of what a reviewer last finished with, so a new push
+after a send-back fires again. The runner hands the watermark back only once a bot has
+finished the job that carried it (see REFERENCE.md, Routines), so a job nobody finished
+is found again at the next check. Every bot reviews as the same forge account, so an
+existing review on a head says nothing about whether the reviewer bot saw it.
+
+Env: FORGEJO (the forge's address), REPO (owner/name), FORGEJO_TOKEN (fleet secret),
+ROUTINE_WATERMARK. The forge not answering is not a failure: say so on stderr and
+report no work.
+"""
+import json
+import os
+import sys
+import urllib.request
+
+FORGEJO = (os.environ.get("FORGEJO") or "http://minipc-2.taild87368.ts.net:3000").rstrip("/")
+REPO = os.environ.get("REPO") or "jac/bot_board"
+TOKEN = os.environ.get("FORGEJO_TOKEN") or ""
+
+
+def fj(path):
+    req = urllib.request.Request(f"{FORGEJO}/api/v1{path}", headers={"Authorization": f"token {TOKEN}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def main():
+    try:
+        before = json.loads(os.environ.get("ROUTINE_WATERMARK") or "{}")
+    except ValueError:
+        before = {}
+    if not isinstance(before, dict):
+        before = {}
+    try:
+        pulls = fj(f"/repos/{REPO}/pulls?state=open&limit=50")
+    except (OSError, ValueError) as e:
+        print(f"pr-review: the forge did not answer, trying again later: {e}", file=sys.stderr)
+        print(json.dumps({"work": False}))
+        return
+    now = dict(before)
+    found = []
+    for p in pulls:
+        n, title = str(p["number"]), p.get("title") or ""
+        sha = (p.get("head") or {}).get("sha") or ""
+        if title.startswith("WIP:") or not sha:
+            continue
+        if before.get(n) == sha:
+            continue
+        now[n] = sha
+        found.append(f"PR #{n}: {title} {p.get('html_url', '')} (head {sha[:10]})")
+    # drop closed PRs from the watermark
+    open_numbers = {str(p["number"]) for p in pulls}
+    now = {k: v for k, v in now.items() if k in open_numbers}
+    print(json.dumps({"work": bool(found), "found": found, "watermark": now}))
+
+
+if __name__ == "__main__":
+    main()

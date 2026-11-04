@@ -61,7 +61,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(skills["github-lifecycle"]["revision"], 1)
         self.assertEqual(skills["github-lifecycle"]["author"], "board")
         self.assertEqual(sorted(skills["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager"])
-        self.assertEqual(set(profiles), {"developer", "artist", "lore-writer", "product-manager", "architect"})
+        self.assertEqual(set(profiles), {"developer", "artist", "lore-writer", "product-manager", "architect", "reviewer"})
         dev = profiles["developer"]
         self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": False}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertTrue(dev["responsibilities"].startswith("Work the threads"))
@@ -79,7 +79,7 @@ class Registry(unittest.TestCase):
         self.assertNotIn("artist", self.profiles())
         # ...but the template is still offered
         names = [t["name"] for t in self.client.get("/api/profiles/templates", headers=self.human).json()["templates"]]
-        self.assertEqual(names, ["architect", "artist", "developer", "lore-writer", "product-manager"])
+        self.assertEqual(names, ["architect", "artist", "developer", "lore-writer", "product-manager", "reviewer"])
 
     # ---- base skills (#347)
 
@@ -324,7 +324,7 @@ class Registry(unittest.TestCase):
     # ---- profiles
 
     def test_a_profile_is_created_from_a_template_or_a_profile_and_never_renamed(self):
-        body = {"name": "reviewer", "role": "Reviews pull requests.", "responsibilities": "Read every PR.",
+        body = {"name": "auditor", "role": "Reviews pull requests.", "responsibilities": "Read every PR.",
                 "focus": "Correctness.", "avoid": "Style nits.", "skills": [{"name": "github-lifecycle"}],
                 "from": "developer"}
         self.assertEqual(self.client.post("/api/profiles", headers=self.bot, json=body).status_code, 403)
@@ -333,24 +333,24 @@ class Registry(unittest.TestCase):
         p = r.json()["profile"]
         self.assertEqual(p["skills"], [{"name": "github-lifecycle", "mandatory": False}])
         self.assertEqual((p["from"], p["created_by"], p["bots"], p["clones"]), ("developer", "op", [], []))
-        self.assertEqual(self.profiles()["developer"]["clones"], ["reviewer"])
-        self.assertEqual(sorted(self.skills()["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager", "reviewer"])
+        self.assertEqual(self.profiles()["developer"]["clones"], ["auditor"])
+        self.assertEqual(sorted(self.skills()["github-lifecycle"]["used_by"]), ["architect", "auditor", "developer", "product-manager"])
         self.assertEqual(p["revision"], 1)
         # no PATCH, and no rename: PUT edits the profile at its name (below)
-        self.assertIn(self.client.patch("/api/profiles/reviewer", headers=self.human, json=body).status_code, (404, 405))
+        self.assertIn(self.client.patch("/api/profiles/auditor", headers=self.human, json=body).status_code, (404, 405))
         # a name is taken for ever, a role is required, a skill must exist
         r = self.client.post("/api/profiles", headers=self.human, json=body)
         self.assertEqual(r.status_code, 409, r.text)
-        r = self.client.post("/api/profiles", headers=self.human, json={**body, "name": "reviewer-2", "role": ""})
+        r = self.client.post("/api/profiles", headers=self.human, json={**body, "name": "auditor-2", "role": ""})
         self.assertEqual(r.status_code, 422, r.text)
         r = self.client.post("/api/profiles", headers=self.human,
-                             json={**body, "name": "reviewer-2", "skills": [{"name": "no-such-skill"}]})
+                             json={**body, "name": "auditor-2", "skills": [{"name": "no-such-skill"}]})
         self.assertEqual(r.status_code, 422, r.text)
         self.assertIn("no skill named no-such-skill", r.json()["error"])
         # deleted: gone from the list, name still taken
-        self.assertEqual(self.client.delete("/api/profiles/reviewer", headers=self.human).status_code, 200)
-        self.assertNotIn("reviewer", self.profiles())
-        self.assertEqual(self.client.get("/api/profiles/reviewer", headers=self.bot).status_code, 404)
+        self.assertEqual(self.client.delete("/api/profiles/auditor", headers=self.human).status_code, 200)
+        self.assertNotIn("auditor", self.profiles())
+        self.assertEqual(self.client.get("/api/profiles/auditor", headers=self.bot).status_code, 404)
         self.assertEqual(self.client.post("/api/profiles", headers=self.human, json=body).status_code, 409)
 
     def test_a_profile_is_edited_in_place_and_its_bots_follow_at_their_next_prompt(self):

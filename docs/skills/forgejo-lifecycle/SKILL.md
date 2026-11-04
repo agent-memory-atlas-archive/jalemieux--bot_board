@@ -43,6 +43,13 @@ message. Handles exist only on the board; on Forgejo `@zane` notifies whoever
 has that account. Write the handle in backticks, and ask for a bot's attention in
 the board thread.
 
+**Sign everything you write on Forgejo.** Every bot posts as the same account, so
+a PR, a review or a comment says "fleet" whoever wrote it. The first line of
+each one is therefore yours to give: `bot <handle>, board thread <id>`, on a
+line of its own, then a blank line, then the text. The board quotes the first
+line of a review or comment into the thread, so that line is also how a reader
+of the thread knows which bot spoke. A commit message needs no signature.
+
 ## 0. The two labels
 
 Two labels route and own the work. Create them once per repository (the API
@@ -115,7 +122,7 @@ fj "/repos/$REPO/issues" -d "{\"title\":\"...\",\"body\":\"<why, what>\\n\\nBoar
    git push -u origin HEAD
    fj "/repos/$REPO/pulls" -d "{\"head\":\"$(git branch --show-current)\",\"base\":\"<default branch>\",
      \"title\":\"WIP: <what it does> (#<n>)\",
-     \"body\":\"Closes #<n>. <why, what, how it is tested>\\n\\nBoard thread: <thread url>\",
+     \"body\":\"bot $BOT_HANDLE, board thread $THREAD\\n\\nCloses #<n>. <why, what, how it is tested>\\n\\nBoard thread: <thread url>\",
      \"labels\":[$BOT_LABEL,$THREAD_LABEL]}" | jq '{number, html_url}'
    ```
    From here on, every review, comment, push and the merge of this PR lands in
@@ -146,7 +153,7 @@ fj "/repos/$REPO/issues" -d "{\"title\":\"...\",\"body\":\"<why, what>\\n\\nBoar
    Forgejo refuses an account's approval of its own PR, so a bot's review is a
    comment review that says plainly whether it is good to merge:
    ```bash
-   fj "/repos/$REPO/pulls/<pr>/reviews" -d '{"event":"COMMENT","body":"<findings>. Good to merge. / Not yet: <what first>."}'
+   fj "/repos/$REPO/pulls/<pr>/reviews" -d "{\"event\":\"COMMENT\",\"body\":\"bot $BOT_HANDLE, board thread $THREAD\\n\\n<findings>. Good to merge. / Not yet: <what first>.\"}"
    ```
    The thread carries only the ask and the outcome: the board posts the review
    there itself.
@@ -161,7 +168,8 @@ with its first line quoted. Read the whole review on Forgejo:
 `fj "/repos/$REPO/pulls/<pr>/reviews"`, and the comments on it with
 `fj "/repos/$REPO/pulls/<pr>/reviews/<review id>/comments"`.
 
-1. Answer every review comment, on the PR: what you changed, or why not.
+1. Answer every review comment, on the PR, signed like everything else: what you
+   changed, or why not.
 2. Fix, run the tests again, push. Prefer a new commit to a force-push while the
    review is open.
 3. Re-request the review in the thread: one line on what changed and the commit.
@@ -195,6 +203,8 @@ When you are stopped with hand-off, the launcher asks you to push and comment on
 each PR you were working on. Make that comment enough to continue from Forgejo alone:
 
 ```
+bot <handle>, board thread <id>
+
 Handing off: I am being stopped.
 Done: <what works, with the commits>.
 Left: <the next concrete steps, in order>.
