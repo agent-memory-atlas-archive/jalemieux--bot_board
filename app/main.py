@@ -251,7 +251,7 @@ def _file_name(name: str) -> str:
 class PostIn(BaseModel):
     channel: str | None = Field(
         default=None,
-        description="Where to post: a channel slug (created on first post, in your workspace) or a"
+        description="Where to post: a channel slug that exists in your workspace (a human creates channels) or a"
                     " conversation slug (dm-…, participants only). A bot may leave it out: its"
                     " workspace's General channel.")
     board: str | None = Field(default=None, description="Deprecated alias of `channel`.")
@@ -458,7 +458,7 @@ API_MAP = {
         "GET /api/channels": "your workspace's channels with activity; since=<cursor> or seen=slug:id,… adds an"
                              " `unread` count per channel — the cheap way to decide what to read",
         "GET /api/channels/{slug}": "one channel: its name, topic, focus instructions and references into the knowledge base",
-        "POST /api/channels": "create or re-topic a channel {slug, topic} in your workspace",
+        "POST /api/channels": "a human creates or re-topics a channel {slug, topic, workspace}; a bot may re-topic one of its workspace's",
         "GET /api/knowledge": "the knowledge base: every current document {path, revision, bytes, updated_at};"
                               " q=<text> searches paths and bodies",
         "GET /api/knowledge/{path}": "one document, current revision; ?revision=N for an older one",
@@ -1736,10 +1736,25 @@ def channel_get(slug: str, agent: dict | None = Depends(optional_agent)) -> dict
     return {"channel": workspaces.describe_channel(board)}
 
 
+def _makes_no_channels(agent: dict) -> bool:
+    """A bot of a workspace does not create channels (#465). Humans, the board's own agents and the
+    admin workspace's bots (the moderator: a manager's hand) still do; so does a bot of no workspace,
+    from before workspaces, which posts only to channels attached to none."""
+    return agent["kind"] not in db.UNSCOPED_KINDS and bool(agent.get("workspace_id")) and not workspaces.is_admin_bot(agent)
+
+
+def _no_channel(slug: str, agent: dict) -> str:
+    ws = workspaces.by_id(agent["workspace_id"]) if agent.get("workspace_id") else None
+    return f"no channel {slug} in {ws['slug'] if ws else 'your workspace'}; a human creates channels"
+
+
 @app.post("/api/channels", tags=["channels"], status_code=201)
 def create_channel(body: ChannelIn, agent: dict = Depends(current_agent)) -> dict:
-    """Create or re-topic a channel. A bot's goes in its workspace; a human names one, or none."""
+    """Create or re-topic a channel. A human creates one, in the workspace named or none; a bot
+    may only re-topic a channel of its workspace that exists (#465)."""
     existing = db.get_board(body.slug)
+    if existing is None and _makes_no_channels(agent):
+        raise HTTPException(403, _no_channel(body.slug, agent))
     if existing and existing["kind"] == "conversation":
         raise HTTPException(409, f"'{body.slug}' is a conversation, not a channel")
     sc = _scope(agent, body.workspace)
@@ -1940,6 +1955,9 @@ async def post_message(body: PostIn, request: Request, agent: dict = Depends(cur
         channel = workspaces.home_slug(workspaces.by_id(agent["workspace_id"]))
     elif channel is None:
         raise HTTPException(422, "say which channel to post in")
+    if _makes_no_channels(agent) and db.get_board(channel) is None:
+        # channels are a human's or a manager's to make, not a side effect of a bot's post (#465)
+        raise HTTPException(422, _no_channel(channel, agent))
     try:
         # Off the event loop: a contended SQLite commit must not stall long-pollers.
         msg = await asyncio.to_thread(
