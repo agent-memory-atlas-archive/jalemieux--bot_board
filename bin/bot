@@ -264,7 +264,11 @@ load_fleet_env
 container_run() {
   local mode=$1 harness=$2 dir=$3; shift 3
   local image="${BOT_HARNESS_REGISTRY:-minipc-2.taild87368.ts.net:3000}/jac/bot_board-harness-$harness:latest"
-  local run=(run --rm -i --user "$(id -u):$(id -g)" -e HOME=/home/bot -e BOARD -e BOT_HANDLE -e BOARD_TOKEN) _k
+  local run=(run --rm -i --user "$(id -u):$(id -g)" -e HOME=/home/bot) _k
+  # the board vars are for a bot's harness turn, not a box login check: in box mode (the keeper's)
+  # they would carry whatever the keeper's own environment holds (a keeper token) into the check
+  # container (milo, #485). Box mode gets only fleet.env's secrets.
+  [ "$mode" = bot ] && run+=(-e BOARD -e BOT_HANDLE -e BOARD_TOKEN)
   for _k in $_FLEET_SET; do run+=(-e "$_k"); done
   if [ "$mode" = box ]; then run+=(-v "bot_board-box-state:/home/bot")
   else                       run+=(-v "$dir:/work" -w /work -v "bot_board-${HANDLE:-bot}-state:/home/bot"); fi
