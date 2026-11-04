@@ -1439,8 +1439,10 @@ What the trial on a Mac found (#479):
 - **The check reports the active docker context.** `colima start` makes `colima` the
   current context, and `colima stop` switches back to `default`. On a Mac that also
   has Docker Desktop, `default` is Desktop's socket, so `/fleet` says `ok` with
-  Desktop's version while Colima is stopped. Start Colima at login
-  (`brew services start colima`) so its context stays current.
+  Desktop's version while Colima is stopped. To pin Colima, add
+  `export DOCKER_CONTEXT=colima` to `~/.config/bot_board/config`. The keeper's check
+  and the bots then use Colima only, and a stopped Colima shows as `down`. Start
+  Colima at login (`brew services start colima`).
 - **The first start** downloads the VM image and takes about a minute and a half.
   Later starts take about 12 s.
 
