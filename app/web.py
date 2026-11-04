@@ -713,9 +713,12 @@ font:600 11px var(--mono);color:var(--dim)}
 border:1px solid transparent;cursor:pointer;font:12.5px var(--sans);background:none;color:var(--ink)}
 .replies:hover,.replies.open{border-color:var(--line);background:var(--panel)}
 @media(hover:hover){.replies.none{opacity:0}.msg:hover .replies.none,.replies.none:focus-visible,.replies.none.open{opacity:1}}
-.shide{margin-left:6px;background:none;border:1px solid transparent;border-radius:6px;padding:3px 7px;font:11.5px var(--mono);color:var(--dim);cursor:pointer}
-.shide:hover{border-color:var(--line);color:var(--ink);background:var(--panel)}
-@media(hover:hover){.shide{opacity:0}.msg:hover .shide,.shide:focus-visible{opacity:1}}
+.tcollapse{align-self:center;margin:0 -2px 0 -4px;width:20px;height:20px;padding:0;background:none;border:1px solid transparent;border-radius:5px;
+font:12px/1 var(--mono);color:var(--dim);cursor:pointer;opacity:.55}
+.tcollapse:hover,.tcollapse:focus-visible{opacity:1;border-color:var(--line);color:var(--ink);background:var(--panel)}
+.msg:hover .tcollapse{opacity:1}
+.fold.tcollapsed b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fold.tcollapsed{margin-left:61px;width:calc(100% - 77px)}    /* its caret under the chevron of an expanded thread */
 .replies .faces{display:inline-flex;margin-right:4px}
 .replies .faces b{width:20px;height:20px;border-radius:5px;background:var(--sel);border:2px solid var(--bg);
 margin-right:-6px;font:600 8.5px/16px var(--mono);text-align:center;color:var(--dim)}
@@ -1159,10 +1162,12 @@ function messageHtml(m, inThread){
   } else if (!inThread && !m.reply_to) {     // a thread with no replies opens the same way (#372)
     rep = '<button class="replies none" data-thread="' + m.id + '"><span class="n">Reply</span></button>';
   }
-  if (!inThread && !m.reply_to && !m.hidden && ME) rep += '<button type="button" class="shide" data-hide="' + m.id + '" title="hide this thread from the channel, for everyone">hide</button>';
+  // a thread in the channel collapses to one line with the chevron on its header (#442)
+  var chev = !inThread && !m.reply_to && ME ? '<button type="button" class="tcollapse" data-collapse="' + m.id + '" aria-expanded="true"' +
+    ' title="collapse this thread" aria-label="collapse thread #' + m.id + '"><span aria-hidden="true">▾</span></button>' : '';
   return '<div class="msg' + (inThread && !m.reply_to ? ' root' : '') + (S.thread === m.id && !inThread ? ' focus' : '') + '" id="' + (inThread ? 't' : 'm') + m.id + '" data-id="' + m.id + '">' +
     av(m.author) + '<div>' +
-    '<div class="head"><a class="who" href="/a/' + esc(m.author) + '">@' + esc(m.author) + '</a>' +
+    '<div class="head">' + chev + '<a class="who" href="/a/' + esc(m.author) + '">@' + esc(m.author) + '</a>' +
     (isHuman(m.author) ? '<span class="hk" title="a person, not a bot">human</span>' : '') +
     '<span title="' + esc(m.created_at) + '">' + esc(when(m.created_at)) + '</span>' +
     '<a class="id" href="/t/' + (m.thread_id || m.id) + '">#' + m.id + '</a></div>' +
@@ -1187,48 +1192,36 @@ function renderHead(){
   document.title = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
 }
 
-// ---------------------------------------------------------------- hidden threads (#407)
-// A thread a human hid (#374) keeps its place in the channel, folded into the same strip a run of
-// @board messages gets: one line, the cards under it when clicked. Consecutive hidden threads make
-// one strip. The roots listing marks them `hidden`; the live poll still leaves their replies out.
+// ---------------------------------------------------------------- collapsed threads (#407, #442)
+// A thread collapsed with the chevron on its header (the board's `hidden` mark, #374) keeps its place
+// in the channel as one line; the same chevron there expands it again. The mark is on the board, so it
+// holds in every browser, and the live poll leaves the thread's replies out while it is collapsed.
 // hidefold:begin
-function hiddenRuns(roots){
-  var out = [], i = 0;
-  while (i < roots.length) {
-    if (!roots[i].hidden) { out.push({msg: roots[i]}); i++; continue; }
-    var run = [];
-    while (i < roots.length && roots[i].hidden) { run.push(roots[i]); i++; }
-    out.push({hidden: run});
-  }
-  return out;
-}
 function firstWords(text, n){
   var w = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   return w.slice(0, n).join(' ') + (w.length > n ? '…' : '');
 }
-function hiddenSummary(run){
-  if (run.length > 1) return run.length + ' hidden threads';
-  var m = run[0], n = m.replies && m.replies.count ? m.replies.count : 0;
+function hiddenSummary(m){
+  var n = m.replies && m.replies.count ? m.replies.count : 0;
   return '#' + m.id + ' ' + firstWords(m.body, 8) + ' · ' + n + (n === 1 ? ' reply' : ' replies');
 }
 // hidefold:end
-function hiddenHtml(run, open){
-  var last = run[run.length - 1], at = last.hidden_at || last.created_at;
-  return '<button type="button" class="fold" data-fold aria-expanded="' + (open ? 'true' : 'false') + '"><span class="caret" aria-hidden="true">▸</span>' +
-    '<b>' + esc(hiddenSummary(run)) + '</b><span class="what">' + (last.hidden_by ? 'hidden by @' + esc(last.hidden_by) : 'hidden') + '</span>' +
-    '<span class="last" title="' + esc(at) + '">' + (run.length > 1 ? 'last ' : '') + esc(when(at)) + '</span></button>' +
-    '<div class="folded' + (open ? ' open' : '') + '">' + run.map(function(m){ return messageHtml(m, false); }).join('') + '</div>';
+function collapsedHtml(m){
+  return '<button type="button" class="fold tcollapsed" id="m' + m.id + '" data-expand="' + m.id + '" aria-expanded="false"' +
+    ' title="expand this thread" aria-label="expand thread #' + m.id + '"><span class="caret" aria-hidden="true">▸</span>' +
+    '<b>' + esc(hiddenSummary(m)) + '</b><span class="what">@' + esc(m.author) + '</span>' +
+    '<span class="last" title="' + esc(m.created_at) + '">' + esc(when(m.created_at)) + '</span></button>';
 }
 function renderStream(){
   var html = '';
   if (S.olderBefore) html += '<button class="older" id="older">↑ older messages</button>';
   if (!S.roots.length) html += '<div class="empty">Nothing posted here yet.</div>';
   var lastDay = null, newShown = false;
-  hiddenRuns(S.roots).forEach(function(seg){
-    var m = seg.msg || seg.hidden[0], dk = dayKey(m.created_at);
+  S.roots.forEach(function(m){
+    var dk = dayKey(m.created_at);
     if (dk !== lastDay) { html += '<div class="day">' + esc(dayLabel(m.created_at)) + '</div>'; lastDay = dk; }
     if (!newShown && m.id > S.newSince && S.newSince > 0) { html += '<div class="newline">new</div>'; newShown = true; }
-    html += seg.msg ? messageHtml(seg.msg, false) : hiddenHtml(seg.hidden, false);
+    html += m.hidden ? collapsedHtml(m) : messageHtml(m, false);
   });
   stream.innerHTML = html;
   stream.scrollTop = stream.scrollHeight;
@@ -1238,8 +1231,10 @@ stream.addEventListener('click', function(ev){
   if (older) { loadOlder(); return; }
   var mr = ev.target.closest('[data-markread]');
   if (mr) { markRead(mr.dataset.markread ? [mr.dataset.markread] : null); return; }
-  var hb = ev.target.closest('[data-hide]');
-  if (hb) { setHidden(+hb.dataset.hide, true); return; }
+  var cb = ev.target.closest('[data-collapse]');
+  if (cb) { setHidden(+cb.dataset.collapse, true); return; }
+  var xb = ev.target.closest('[data-expand]');
+  if (xb) { setHidden(+xb.dataset.expand, false); return; }
   var r = ev.target.closest('.replies,.ctx'); if (!r) return;
   openThread(+r.dataset.thread, true);
 });
@@ -1375,7 +1370,8 @@ async function openThread(id, push){
     if (push) history.pushState({}, '', threadUrl(d.thread_id));
     else if (SOLO) history.replaceState({}, '', threadUrl(d.thread_id));
     tin.textContent = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · #' + d.thread_id + (d.hidden ? ' · hidden' : '');
-    var hideBtn = $('#thide'); hideBtn.hidden = !ME; hideBtn.textContent = d.hidden ? 'bring back' : 'hide'; hideBtn.dataset.hidden = d.hidden ? '1' : '';
+    var hideBtn = $('#thide'); hideBtn.hidden = !ME; hideBtn.textContent = d.hidden ? 'expand' : 'collapse'; hideBtn.dataset.hidden = d.hidden ? '1' : '';
+    hideBtn.title = d.hidden ? 'expand this thread in the channel again' : 'collapse this thread to one line in the channel';
     $('#tboard').href = '/t/' + d.thread_id;
     document.title = 'thread #' + d.thread_id + ' · ' + (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
     S.tmsgs = d.messages;
@@ -1437,16 +1433,15 @@ setInterval(function(){
   }).catch(function(){});
 }, 5000);
 $('#thide').addEventListener('click', function(){ setHidden(S.thread, !this.dataset.hidden); });
-// From the thread panel or a thread card in the channel stream.
-function setHidden(id, shown){
-  if (shown && !confirm('Hide thread #' + id + ' from the channel, for everyone? Bots keep working in it. It stays in search and at /t/' + id + ', where you can bring it back.')) return;
-  fetch('/api/threads/' + id + '/hidden', {method: shown ? 'PUT' : 'DELETE', headers: {'Authorization': 'Bearer ' + ME.token}})
+// Collapse (hidden true) or expand a thread, from its chevron in the channel or the thread panel.
+// Both happen in place: the thread keeps its spot in the stream, and an open thread panel stays open.
+function setHidden(id, hidden){
+  fetch('/api/threads/' + id + '/hidden', {method: hidden ? 'PUT' : 'DELETE', headers: {'Authorization': 'Bearer ' + ME.token}})
   .then(function(r){ return r.json().then(function(d){
     if (!r.ok) { alert(d.detail || ('refused: ' + r.status)); return; }
-    if (!shown) { location.reload(); return; }
     var root = S.roots.filter(function(m){ return m.id === id; })[0];
-    if (root) {     // folds in place; the thread stays open, its header now saying hidden
-      root.hidden = true; root.hidden_by = ME.handle; root.hidden_at = new Date().toISOString();
+    if (root) {
+      root.hidden = hidden; root.hidden_by = hidden ? ME.handle : null; root.hidden_at = hidden ? new Date().toISOString() : null;
       var top = stream.scrollTop; renderStream(); stream.scrollTop = top;
     }
     if (S.thread === id) openThread(id, false);
@@ -1777,7 +1772,7 @@ function onMessage(m){
         root.replies = root.replies || {count: 0, authors: []};
         root.replies.count++; root.replies.last_at = m.created_at; root.replies.last_id = m.id;
         if (root.replies.authors.indexOf(m.author) < 0) root.replies.authors.push(m.author);
-        var old = $('#m' + root.id); if (old) old.replaceWith(el(messageHtml(root, false)));
+        var old = $('#m' + root.id); if (old) old.replaceWith(el(root.hidden ? collapsedHtml(root) : messageHtml(root, false)));
       }
       if (S.thread === m.thread_id) appendToThread(m);
     }
@@ -1946,7 +1941,7 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
           <div class="note">Yours only, in this browser. A message that mentions you or waits on you is always shown in full.</div>
         </div></span>
       <a id="tboard" href="/" title="open in the board">open in board</a>
-      <button type="button" id="thide" hidden title="hide this thread from the channel, for everyone"></button>
+      <button type="button" id="thide" hidden title="collapse this thread to one line in the channel"></button>
       <button type="button" id="twide" title="expand thread to full width">⤢</button>
       <button type="button" id="tpop" title="open thread in its own window">↗</button>
       <button type="button" id="tclose" aria-label="close thread" title="close">×</button>
