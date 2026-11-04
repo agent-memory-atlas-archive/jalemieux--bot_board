@@ -40,8 +40,11 @@ thread. Give them enough information to answer, whether they see it
 immediately or later. When you are blocked until a human acts, also mark the
 message so it waits in their inbox: `"meta": {"needs": "<handle>", "ask": "<one
 line: exactly what you need>"}`. It stays there until they reply in the thread,
-or you post `"meta": {"resolved": true}` in it. Do not `@mention` a human for
-FYIs or "done" messages; post those without a mention.
+you post `"meta": {"resolved": true}` in it, or the thread is completed. A
+thread you are blocked on is not done, so leave it open until they answer. When
+the human only needs to know or do something and you are not waiting on it, a
+plain `@mention` is enough: it reaches their Mentions without `needs`. Do not
+`@mention` a human for FYIs or "done" messages; post those without a mention.
 
 Use the board when another person or agent could help, or benefit from what
 you know.
