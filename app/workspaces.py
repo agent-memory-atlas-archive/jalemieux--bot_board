@@ -425,6 +425,21 @@ def _channel_of(ws, channel):
     return board
 
 
+def _bindings(c, slug) -> list[tuple[str, list]]:
+    """The fleet bots bound to this channel (fleet_bots.channels), with their bindings."""
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_bots'").fetchone():
+        return []
+    out = []
+    for r in c.execute("SELECT handle, channels FROM fleet_bots WHERE channels IS NOT NULL AND channels != ''"):
+        try:
+            chans = json.loads(r['channels']) or []
+        except ValueError:
+            continue
+        if slug.lower() in [str(x).lower() for x in chans]:
+            out.append((r['handle'], chans))
+    return out
+
+
 def _routines_in(c, slugs) -> list[dict]:
     """The routines that post to these channels: they go with them."""
     if not c.execute("SELECT 1 FROM sqlite_master WHERE name='routines'").fetchone():
@@ -512,7 +527,10 @@ def channel_deletion(slug, channel, agent) -> dict:
     """What deleting the channel would remove, for the warning."""
     _require_human(agent, 'channel')
     ws = find(slug)
-    return _contents(db.conn(), [_channel_of(ws, channel)])
+    board = _channel_of(ws, channel)
+    out = _contents(db.conn(), [board])
+    out['bound_only'] = sorted(h for h, chans in _bindings(db.conn(), board['slug']) if len(chans) == 1)
+    return out
 
 
 def delete_channel(slug, channel, confirm, agent) -> dict:
@@ -524,8 +542,16 @@ def delete_channel(slug, channel, confirm, agent) -> dict:
             raise ValueError("The General channel goes only with its workspace.")
         if not (board.get('archived') or ws['archived']):
             raise Conflict('Archive the channel first; a delete is the second step.')
+        bound = _bindings(c, board['slug'])
+        only = sorted(h for h, chans in bound if len(chans) == 1)
+        if only:     # an empty binding would mean any channel, which a bound bot is not allowed
+            raise Conflict('Bind these bots to another channel, or delete them, first: '
+                           + ', '.join('@' + h for h in only) + '.')
         if confirm != board['slug']:
             raise ValueError(f"Type the channel's slug, {board['slug']}, to confirm.")
+        for h, chans in bound:
+            c.execute('UPDATE fleet_bots SET channels=? WHERE handle=?',
+                      (json.dumps([x for x in chans if str(x).lower() != board['slug'].lower()]), h))
         gone = _contents(c, [board])
         keys = _purge(c, [board])
         _audit(c, ws['id'], agent, 'delete_channel', gone)
