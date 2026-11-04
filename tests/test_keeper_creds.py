@@ -271,6 +271,38 @@ class Keeper(unittest.TestCase):
         self.assertEqual(env['PATH'], os.environ['PATH'])
         self.assertNotEqual(env.get('BOARD'), 'http://other')
 
+    def test_per_workspace_secrets_files_are_written(self):
+        # #304: fleet.env holds the admin/default set; fleet.<ws>.env each workspace the box runs bots in
+        cfg = os.path.join(self.home, '.config', 'bot_board')
+        for h, ws in (('ada', 'game'), ('op-bot', 'admin'), ('nows', '')):
+            d = os.path.join(cfg, 'bots', h); os.makedirs(d)
+            if ws:
+                open(os.path.join(d, 'workspace'), 'w').write(ws)
+        import urllib.parse as _u
+        sets = {None: {'CLAUDE_CODE_OAUTH_TOKEN': 'c', 'ADMIN_KEY': 'a'},
+                'game': {'CLAUDE_CODE_OAUTH_TOKEN': 'c', 'GH_TOKEN': 'g'}}
+        def call(method, path, body, token=None):
+            if token != 'keeper-token':
+                return (403, {'detail': 'no'})
+            ws = _u.parse_qs(_u.urlparse(path).query).get('workspace', [None])[0]
+            return (200, {'secrets': sets.get(ws, {}), 'version': 'v1'})
+        self.k.call = call
+        self.assertEqual(self.k.box_workspaces(), {'game'})
+        c = self.k.Credentials('box')
+        c.sync('v1', 'keeper-token', self.k.box_workspaces())
+        self.assertEqual(c.sync_error, '')
+        env = lambda name: self.k.read_env(os.path.join(cfg, name))
+        self.assertEqual(env('fleet.env'), {'CLAUDE_CODE_OAUTH_TOKEN': 'c', 'ADMIN_KEY': 'a'})
+        self.assertEqual(env('fleet.game.env'), {'CLAUDE_CODE_OAUTH_TOKEN': 'c', 'GH_TOKEN': 'g'})
+        self.assertFalse(os.path.exists(os.path.join(cfg, 'fleet.admin.env')))   # admin folds into fleet.env
+        self.assertEqual(oct(os.stat(os.path.join(cfg, 'fleet.game.env')).st_mode & 0o777), '0o600')
+        # the keeper's own checks see the whole box's need across the files
+        self.assertEqual(c.env()['GH_TOKEN'], 'g')
+        # a workspace that leaves the box: its file is dropped on the next sync
+        os.remove(os.path.join(cfg, 'bots', 'ada', 'workspace'))
+        c.sync('v2', 'keeper-token', self.k.box_workspaces())
+        self.assertFalse(os.path.exists(os.path.join(cfg, 'fleet.game.env')))
+
 
 class BotReadsFleetEnv(unittest.TestCase):
     def test_a_bad_line_does_not_stop_bin_bot(self):
@@ -439,6 +471,24 @@ w MY_KEY=theirs; load_fleet_env; echo "gh=${{GH_TOKEN:-gone}} own=$MY_KEY"
             r = subprocess.run(['bash', '-euo', 'pipefail', '-c', script], capture_output=True, text=True,
                                env={'PATH': os.environ['PATH'], 'HOME': home, 'MY_KEY': 'mine'})
             self.assertEqual(r.stdout.split('\n')[:3], ['gh=one own=mine', 'gh=two', 'gh=gone own=mine'], r.stderr)
+
+    def test_a_bot_reads_its_own_workspace_secrets(self):
+        # #304: load_fleet_env reads fleet.<WORKSPACE>.env, falling back to fleet.env
+        import subprocess
+        src = (ROOT / 'bin' / 'bot').read_text()
+        fn = src[src.index('_OWN_SECRETS='):src.index('\nload_fleet_env\n')]
+        with tempfile.TemporaryDirectory() as home:
+            cfg = os.path.join(home, '.config', 'bot_board'); os.makedirs(cfg)
+            open(os.path.join(cfg, 'fleet.env'), 'w').write('GH_TOKEN=admintok\n')
+            open(os.path.join(cfg, 'fleet.game.env'), 'w').write('GH_TOKEN=gametok\n')
+            script = fn + '''
+WORKSPACE=game; load_fleet_env; echo "game=$GH_TOKEN"
+WORKSPACE=none; load_fleet_env; echo "fallback=$GH_TOKEN"
+WORKSPACE=; load_fleet_env; echo "default=$GH_TOKEN"
+'''
+            r = subprocess.run(['bash', '-euo', 'pipefail', '-c', script], capture_output=True, text=True,
+                               env={'PATH': os.environ['PATH'], 'HOME': home})
+            self.assertEqual(r.stdout.split('\n')[:3], ['game=gametok', 'fallback=admintok', 'default=admintok'], r.stderr)
 
 if __name__ == '__main__':
     unittest.main()

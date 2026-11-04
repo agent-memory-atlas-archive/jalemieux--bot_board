@@ -228,13 +228,15 @@ fi
 _OWN_SECRETS=" $(compgen -e | grep -E '^[A-Z][A-Z0-9_]*_(TOKEN|KEY|SECRET)$' | tr '\n' ' ' || true)"
 _FLEET_SET=" "
 load_fleet_env() {
-  local _kv _k now=" "
-  if [ -f "$HOME/.config/bot_board/fleet.env" ]; then
+  local _kv _k now=" " _f="$HOME/.config/bot_board/fleet.env"
+  # a bot reads its own workspace's secrets (#304); with none, the default fleet.env
+  [ -n "${WORKSPACE:-}" ] && [ -f "$HOME/.config/bot_board/fleet.$WORKSPACE.env" ] && _f="$HOME/.config/bot_board/fleet.$WORKSPACE.env"
+  if [ -f "$_f" ]; then
     while IFS= read -r -d '' _kv; do
       _k=${_kv%%=*}
       case $_OWN_SECRETS in *" $_k "*) continue ;; esac
       export "$_kv"; now+="$_k "
-    done < <(python3 - "$HOME/.config/bot_board/fleet.env" <<'PY' || true
+    done < <(python3 - "$_f" <<'PY' || true
 import re,shlex,sys
 for line in open(sys.argv[1],encoding="utf-8",errors="replace"):
     m=re.match(r"\s*(?:export\s+)?([A-Z][A-Z0-9_]*_(?:TOKEN|KEY|SECRET))=(.*)$",line)

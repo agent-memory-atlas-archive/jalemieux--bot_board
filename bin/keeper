@@ -561,6 +561,28 @@ TOKEN_PROBE = ("claude", "-p", "--no-session-persistence", "--output-format", "j
                "Reply with OK.")
 FLEET_ENV = os.path.join(CFG, "fleet.env")
 FROM_BOARD = "# written by bin/keeper from the board's secrets (/fleet); edits here are replaced\n"
+_WS_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def ws_env_path(workspace):
+    """The per-workspace secrets file bin/bot reads for a bot of that workspace (#304)."""
+    return os.path.join(CFG, f"fleet.{workspace}.env")
+
+
+def box_workspaces():
+    """The workspaces of the bots on this box, from each bot's own state (bin/bot writes it).
+    These are the fleet.env files the keeper keeps (#304)."""
+    out = set()
+    d = os.path.join(CFG, "bots")
+    try:
+        handles = os.listdir(d)
+    except OSError:
+        return out
+    for h in handles:
+        w = read_text(os.path.join(d, h, "workspace"))
+        if w and _WS_RE.fullmatch(w) and w != "admin":
+            out.add(w)
+    return out
 
 
 SECRET_NAME = re.compile(r"[A-Z][A-Z0-9_]*_(?:TOKEN|KEY|SECRET)")   # what fleet.env may set; bin/bot reads the same
@@ -593,36 +615,70 @@ class Credentials:
         self.me = me
         self.state = {}         # name -> (state, detail)
         self.checked = 0        # when the checks last ran
-        self.version = None     # the version of the board's secrets fleet.env holds
+        self.version = None     # the version of the board's secrets the fleet.env files hold
+        self.workspaces = None  # the workspaces those files were written for (#304)
         self.sync_error = ""
         self.probe = None       # the last real try of the fleet's claude token: {fp, at, result}
 
-    def sync(self, version, token):
-        """When the board's secrets changed (version, from the report), fetch them and write
-        fleet.env. Errors keep our copy, and are reported."""
-        if not version or version == self.version:
+    def _fetch(self, token, workspace):
+        """The board's secrets for a workspace (None: the admin/default set, #304), filtered to
+        the names and one-line values bin/bot and the keeper accept."""
+        path = "/api/fleet/secrets/values" + (f"?workspace={urllib.parse.quote(workspace)}" if workspace else "")
+        code, got = call("GET", path, None, token)
+        if code != 200:
+            raise RuntimeError(f"refused ({code}): {got.get('detail', got)}")
+        return {k: v for k, v in got["secrets"].items()
+                if SECRET_NAME.fullmatch(k) and "\n" not in v and "\0" not in v}, got.get("version")
+
+    def _write(self, path, secrets):
+        """Write one fleet.env file, 0600, marked as the board's. A hand-kept file is left alone."""
+        mine = os.path.exists(path) and Path(path).read_text(errors="replace").startswith(FROM_BOARD)
+        if not (secrets or mine):     # none from the board: a file kept here by hand stays
+            return ""
+        tmp = path + ".new"
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            fh.write(FROM_BOARD + "".join(f"{k}={shlex.quote(v)}\n" for k, v in secrets.items()))
+        os.replace(tmp, path)
+        return ", ".join(secrets) or "no secrets"
+
+    def sync(self, version, token, workspaces=frozenset()):
+        """When the board's secrets or this box's workspaces changed, fetch and write a
+        fleet.env per workspace the box runs bots in (#304): fleet.env holds the admin/default
+        set (the keeper's checks, and bots with no workspace), fleet.<workspace>.env each
+        workspace's. Errors keep our copies, and are reported."""
+        workspaces = frozenset(w for w in workspaces if w and w != "admin")
+        if not version or (version == self.version and workspaces == self.workspaces):
             return
         try:
-            code, got = call("GET", "/api/fleet/secrets/values", None, token)
-            if code != 200:
-                raise RuntimeError(f"refused ({code}): {got.get('detail', got)}")
-            secrets = {k: v for k, v in got["secrets"].items()
-                       if SECRET_NAME.fullmatch(k) and "\n" not in v and "\0" not in v}
-            mine = os.path.exists(FLEET_ENV) and Path(FLEET_ENV).read_text(errors="replace").startswith(FROM_BOARD)
-            if secrets or mine:     # none on the board: a fleet.env kept here by hand stays
-                tmp = FLEET_ENV + ".new"
-                with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
-                    fh.write(FROM_BOARD + "".join(f"{k}={shlex.quote(v)}\n" for k, v in secrets.items()))
-                os.replace(tmp, FLEET_ENV)
-                print(f"keeper: fleet.env updated from the board ({', '.join(secrets) or 'no secrets'})", flush=True)
-            self.version, self.sync_error, self.checked = got.get("version", version), "", 0   # check again now
+            admin, ver = self._fetch(token, None)       # the whole set, for the keeper's own checks
+            wrote = []
+            note = self._write(FLEET_ENV, admin)
+            if note:
+                wrote.append(f"fleet.env ({note})")
+            for ws in sorted(workspaces):
+                secrets, _ = self._fetch(token, ws)
+                note = self._write(ws_env_path(ws), secrets)
+                if note:
+                    wrote.append(f"fleet.{ws}.env ({note})")
+            # a workspace that left the box: drop its file so a stopped bot's secrets do not linger
+            for stale in (self.workspaces or set()) - workspaces:
+                try:
+                    os.remove(ws_env_path(stale))
+                except OSError:
+                    pass
+            if wrote:
+                print("keeper: secrets updated from the board: " + "; ".join(wrote), flush=True)
+            self.version, self.workspaces, self.sync_error, self.checked = ver or version, workspaces, "", 0
         except (OSError, RuntimeError, ConnectionError, KeyError, AttributeError) as e:
             self.sync_error = f"fleet.env not updated from the board: {str(e)[:200]}"
 
     def env(self):
-        """The environment the checks run in: fleet.env's secrets under the keeper's own
-        environment, which wins (as it does in bin/bot)."""
-        return {**read_env(FLEET_ENV), **os.environ}
+        """The environment the checks run in: every fleet.env file's secrets (the box's whole
+        need, #304) under the keeper's own environment, which wins (as it does in bin/bot)."""
+        merged = dict(read_env(FLEET_ENV))
+        for ws in self.workspaces or ():
+            merged.update(read_env(ws_env_path(ws)))
+        return {**merged, **os.environ}
 
     def needed(self, harnesses):
         return [c for c in CREDENTIALS if c[1] == "secret" or set(c[4]) & set(harnesses)]
@@ -1206,7 +1262,7 @@ def main():
             if code != 200:
                 print(f"keeper: report refused ({code}): {got}", file=sys.stderr, flush=True)
             else:
-                creds.sync(got.get("secrets"), token)
+                creds.sync(got.get("secrets"), token, box_workspaces())
                 updater.release = str(got.get("release") or "")
                 if ask and got.get("default_bot"):
                     default_bot_note(got["default_bot"])

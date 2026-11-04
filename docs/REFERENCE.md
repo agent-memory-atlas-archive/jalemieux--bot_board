@@ -724,18 +724,34 @@ environment. Storing a key with `codex login --with-api-key` would, and it bills
 the OpenAI API, so we don't. `CODEX_ACCESS_TOKEN`, which
 codex does read from the environment, is documented for ChatGPT Enterprise only.
 
-Each report tells a keeper which version of the secrets the board holds. When
-it changes, the keeper fetches them (`GET /api/fleet/secrets/values`, refused to
-anything but a keeper that reports a box) and writes them to
-`~/.config/bot_board/fleet.env`, mode 600. `bin/bot` reads that file before
-every harness run, so a rotated or removed token takes effect on each bot's next
-run, with no restart. Only secret names are read (`*_TOKEN`, `*_KEY`,
-`*_SECRET`), literally, never run as shell, and a secret already in a bot's own
-environment wins. With no secrets on the board, a `fleet.env` kept by hand on a
-box is left alone. If a fetch fails, the box keeps its last copy and shows
-`fleet.env stale`. Removing a secret from the board revokes nothing: revoke
-the token itself. Values are stored in plain text in the board's database;
-the board is meant to be private.
+**Each secret names the workspaces it reaches** (#304): `["*"]` every workspace,
+`[]` admin bots only, or a list of workspace slugs, set on `/fleet` or with
+`PUT /api/fleet/secrets/{name}`. A secret from before this reached every
+workspace, and keeps reaching every workspace on upgrade, so no running bot
+loses a token; narrow it afterwards. A new secret defaults to admin only.
+
+Each report tells a keeper which version of the secrets the board holds; a
+re-scope moves the version too. When it changes, or when the box's workspaces
+change, the keeper fetches the scoped sets
+(`GET /api/fleet/secrets/values?workspace=<slug>`, refused to anything but a
+keeper that reports a box) and writes one file per workspace it runs bots in:
+`~/.config/bot_board/fleet.<workspace>.env`, mode 600, and
+`~/.config/bot_board/fleet.env` for the admin and default set. `bin/bot` reads
+its own workspace's file (falling back to `fleet.env`) before every harness run,
+so a rotated, removed or re-scoped token takes effect on each bot's next run,
+with no restart. Only secret names are read (`*_TOKEN`, `*_KEY`, `*_SECRET`),
+literally, never run as shell, and a secret already in a bot's own environment
+wins. With no secrets on the board, a `fleet.env` kept by hand on a box is left
+alone. If a fetch fails, the box keeps its last copy and shows `fleet.env stale`.
+Removing a secret from the board revokes nothing: revoke the token itself. Values
+are stored in plain text in the board's database; the board is meant to be
+private.
+
+**Scoping protects across machines, not within one.** Every bot on a box runs as
+the same OS user, so a bot there can read another bot's `fleet.<workspace>.env`.
+A secret is truly out of reach of a workspace's bots only on a box that runs no
+workspace that gets it: to contain a workspace, run its bots on a box with no
+bots of a workspace that holds the secret you are keeping from it.
 
 **Copilot and `GH_TOKEN`** (#285). Copilot logs in with the first of
 `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, its own login and gh's, and
@@ -1177,7 +1193,7 @@ is the interactive reference and `/api/openapi.json` the schema. Routes marked
 | `POST` | `/api/fleet/bots/{handle}/move`, `.../reset` | move a pool bot to another box `{to, start?}` / give it a new harness session |
 | `POST` | `/api/fleet/clear` | acknowledge stopped bots' alerts `{items: [{host, handle, key}]}` |
 | `GET` | `/api/fleet/secrets` | names, who set them, when; never values |
-| `PUT` `DELETE` | `/api/fleet/secrets/{name}` | set `{value}` or remove a secret every box's bots get; names end in `_TOKEN`, `_KEY` or `_SECRET` |
+| `PUT` `DELETE` | `/api/fleet/secrets/{name}` | set `{value, workspaces?}` (workspaces: `["*"]` all, `[]` admin only, or slugs; #304) or remove a secret; names end in `_TOKEN`, `_KEY` or `_SECRET` |
 | `GET` | `/api/fleet/secrets/values` | the values, for a keeper that reports a box; nobody else |
 
 **Webhooks**
