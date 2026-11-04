@@ -1,5 +1,5 @@
-"""A human hides a thread (#374): out of the channel views and counts for every human, folded into a
-strip in the channel stream (#407), still in search and at its link, unchanged for bots.
+"""A human collapses a thread (#374, #442): out of the unread counts for every human, one line in the
+channel stream with a chevron to expand it (#407), still in search and at its link, unchanged for bots.
 Run with python -m unittest discover -s tests."""
 import json
 import os
@@ -76,78 +76,78 @@ class HideThread(unittest.TestCase):
         self.assertFalse(self.client.get(f"/api/threads/{self.root}").json()["hidden"])
         self.assertEqual(self.count(), 2)
 
-    def test_the_thread_panel_hides_it_and_brings_it_back(self):
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            self.skipTest("Install Playwright and Chromium for board page checks")
-        pw = self.stack.enter_context(sync_playwright())
-        browser = pw.chromium.launch()
-        self.stack.callback(browser.close)
-        page = browser.new_page()
-        errors = []
-        page.on("pageerror", lambda err: errors.append(str(err)))
-        page.on("dialog", lambda d: d.accept())
-
-        def serve(route):
-            path = route.request.url.replace("http://board.test", "")
-            if "wait=" in path:
-                return route.abort()
-            r = self.client.request(route.request.method, path, content=route.request.post_data, headers=route.request.headers)
-            route.fulfill(status=r.status_code, body=r.content, content_type=r.headers.get("content-type", "text/plain"))
-        page.route("**/*", serve)
-        page.add_init_script("localStorage.setItem('bb.me', " + json.dumps(json.dumps({"handle": "jac", "token": self.token})) + ")")
+    def test_the_thread_panel_collapses_it_and_expands_it(self):
+        page = self.page()
         page.goto("http://board.test/#proj")
         page.click(f"#m{self.root} button.replies")
         page.wait_for_selector("#thide:visible")
-        self.assertEqual(page.inner_text("#thide"), "hide")
+        self.assertEqual(page.inner_text("#thide"), "collapse")
         page.click("#thide")
-        # folded into a strip in its place (#407): the card is under it, shown by a click; the thread stays open
-        page.wait_for_selector("#stream button.fold")
-        strip = page.locator("#stream button.fold")
-        self.assertIn(f"#{self.root} needle in a hidden thread · 1 reply", strip.inner_text())
-        self.assertIn("hidden by @jac", strip.inner_text())
-        self.assertTrue(page.locator(f"#m{self.keep}").is_visible())
-        self.assertFalse(page.locator(f"#m{self.root}").is_visible())
-        strip.click()
-        self.assertTrue(page.locator(f"#m{self.root}").is_visible())
-        page.wait_for_selector("#thide:visible")
-        self.assertEqual(page.inner_text("#thide"), "bring back")
+        # one line in its place (#442); the thread panel stays open, its button now saying expand
+        page.wait_for_selector("#stream button.tcollapsed")
+        line = page.locator("#stream button.tcollapsed")
+        self.assertIn(f"#{self.root} needle in a hidden thread · 1 reply", line.inner_text())
+        self.assertIn("@jac", line.inner_text())
+        self.assertTrue(page.locator(f".msg#m{self.keep}").is_visible())
+        self.assertEqual(page.locator(f".msg#m{self.root}").count(), 0)
+        page.wait_for_function("document.querySelector('#thide').textContent === 'expand'")
         self.assertTrue(db.thread_hidden(self.root))
-        # a reload lists it folded the same way, from the server's mark
+        # a reload shows it collapsed the same way, from the board's mark
         page.goto("http://board.test/#proj")
-        page.wait_for_selector("#stream button.fold")
-        self.assertFalse(page.locator(f"#m{self.root}").is_visible())
+        page.wait_for_selector("#stream button.tcollapsed")
+        self.assertEqual(page.locator(f".msg#m{self.root}").count(), 0)
 
         page.goto(f"http://board.test/t/{self.root}")
         page.wait_for_selector("#thide:visible")
-        self.assertEqual(page.inner_text("#thide"), "bring back")
-        # the live poll leaves it out, so an open hidden thread fetches its own replies
+        self.assertEqual(page.inner_text("#thide"), "expand")
+        # the live poll leaves it out, so an open collapsed thread fetches its own replies
         later = self.client.post("/api/messages", headers=self.bot, json={"channel": "proj", "body": "a late reply", "reply_to": self.root}).json()["message"]["id"]
         page.wait_for_selector(f"#t{later}", timeout=8000)
         self.assertEqual(page.inner_text("#tcount"), "2 replies")
-        with page.expect_navigation():
-            page.click("#thide")
+        page.click("#thide")         # expands in place: no confirm, no reload
+        page.wait_for_function("document.querySelector('#thide').textContent === 'collapse'")
         self.assertFalse(db.thread_hidden(self.root))
-        self.assertEqual(errors, [])
+        self.assertEqual(self.dialogs, [])
+        self.assertEqual(self.errors, [])
 
-    def test_a_thread_card_in_the_channel_hides_it(self):
+    def test_the_chevron_on_a_thread_collapses_and_expands_it(self):
         page = self.page()
         page.goto("http://board.test/#proj")
-        page.hover(f"#m{self.root}")
-        page.click(f"#m{self.root} [data-hide]")
-        page.wait_for_selector("#stream button.fold")      # folds in place (#407); no thread opens
+        chevron = page.locator(f".msg#m{self.root} [data-collapse]")
+        self.assertTrue(chevron.is_visible(), "on the header, without hovering")
+        self.assertEqual(chevron.get_attribute("aria-expanded"), "true")
+        self.assertEqual(page.locator("[data-hide], .shide").count(), 0, "no hide button any more")
+        chevron.click()
+        page.wait_for_selector("#stream button.tcollapsed")    # in place, no confirm; no thread opens
         self.assertTrue(db.thread_hidden(self.root))
-        self.assertFalse(page.is_visible(f"#m{self.root}"))
-        self.assertTrue(page.is_visible(f"#m{self.keep}"))
+        self.assertEqual(page.locator(f".msg#m{self.root}").count(), 0)
+        self.assertTrue(page.is_visible(f".msg#m{self.keep}"))
         self.assertEqual(page.locator("#app.thread-closed").count(), 1)
-        page.click("#stream button.fold")
-        self.assertEqual(page.locator(f"#m{self.root} [data-hide]").count(), 0, "a hidden card has no hide button")
+        line = page.locator(f"#stream button.tcollapsed[data-expand='{self.root}']")
+        self.assertEqual(line.get_attribute("aria-expanded"), "false")
+        line.click()
+        page.wait_for_selector(f".msg#m{self.root} [data-collapse]")
+        self.assertFalse(db.thread_hidden(self.root))
+        self.assertEqual(page.locator("#stream button.tcollapsed").count(), 0)
+        self.assertEqual(self.dialogs, [])
         # the @board toggle sits in the top bar, without opening a thread
         self.assertEqual(page.inner_text("#navboard"), "@board: shown")
         page.click("#navboard")
         self.assertEqual(page.inner_text("#navboard"), "@board: folded")
         self.assertEqual(page.evaluate("localStorage.getItem('bb.boardMsgs')"), '"fold"')
+        self.assertEqual(self.errors, [])
+
+    def test_consecutive_collapsed_threads_each_keep_their_line(self):
+        other = self.post("another thread")
+        for tid in (self.root, other):
+            self.client.put(f"/api/threads/{tid}/hidden", headers=self.human).raise_for_status()
+        page = self.page()
+        page.goto("http://board.test/#proj")
+        page.wait_for_selector("#stream button.tcollapsed")
+        self.assertEqual(page.locator("#stream button.tcollapsed").count(), 2)
+        page.click(f"[data-expand='{other}']")
+        page.wait_for_selector(f".msg#m{other}")
+        self.assertTrue(db.thread_hidden(self.root))
         self.assertEqual(self.errors, [])
 
     def page(self):
@@ -159,9 +159,9 @@ class HideThread(unittest.TestCase):
         browser = pw.chromium.launch()
         self.stack.callback(browser.close)
         page = browser.new_page()
-        self.errors = []
+        self.errors, self.dialogs = [], []
         page.on("pageerror", lambda err: self.errors.append(str(err)))
-        page.on("dialog", lambda d: d.accept())
+        page.on("dialog", lambda d: (self.dialogs.append(d.message), d.accept()))
 
         def serve(route):
             path = route.request.url.replace("http://board.test", "")
