@@ -370,6 +370,58 @@ class Page(unittest.TestCase):
         self.assertEqual(self.client.delete('/api/fleet/secrets/GH_TOKEN', headers=admin).status_code, 200)
         self.assertEqual(report(), v0)
 
+    def test_a_secret_is_scoped_to_workspaces(self):
+        # #304: a secret names the workspaces its bots get; the keeper fetches one set per workspace
+        def agent(h, k):
+            return {'Authorization': 'Bearer ' + self.client.post('/api/agents', json={'handle': h, 'kind': k}).json()['token']}
+        admin, keeper = agent('op', 'human'), agent('keeper-box', 'keeper')
+        self.client.put('/api/fleet/hosts/box', headers=keeper, json={'bots': []}).raise_for_status()
+        for slug in ('game', 'other'):
+            self.client.post('/api/workspaces', headers=admin, json={'slug': slug, 'name': slug, 'purpose': 'x'}).raise_for_status()
+        vals = lambda ws=None: self.client.get('/api/fleet/secrets/values' + (f'?workspace={ws}' if ws else ''), headers=keeper).json()['secrets']
+        scopes = lambda: {x['name']: x['workspaces'] for x in self.client.get('/api/fleet/secrets', headers=admin).json()['secrets']}
+        ver = lambda: self.client.get('/api/fleet/secrets', headers=admin).json()['version']
+        # a new secret defaults to admin bots only
+        self.client.put('/api/fleet/secrets/ADMIN_KEY', headers=admin, json={'value': 'a'}).raise_for_status()
+        self.assertEqual(scopes(), {'ADMIN_KEY': []})
+        self.assertEqual((vals('admin'), vals('game')), ({'ADMIN_KEY': 'a'}, {}))
+        # a fleet-wide secret reaches every workspace; re-scoping bumps the version
+        v = ver()
+        self.client.put('/api/fleet/secrets/CLAUDE_CODE_OAUTH_TOKEN', headers=admin, json={'value': 'c', 'workspaces': ['*']}).raise_for_status()
+        self.assertNotEqual(ver(), v)
+        self.assertEqual(vals('game'), {'CLAUDE_CODE_OAUTH_TOKEN': 'c'})
+        self.assertEqual(vals('admin'), {'ADMIN_KEY': 'a', 'CLAUDE_CODE_OAUTH_TOKEN': 'c'})
+        # a secret scoped to one workspace reaches only it, besides the fleet-wide one
+        self.client.put('/api/fleet/secrets/GH_TOKEN', headers=admin, json={'value': 'g', 'workspaces': ['game']}).raise_for_status()
+        self.assertEqual(vals('game'), {'CLAUDE_CODE_OAUTH_TOKEN': 'c', 'GH_TOKEN': 'g'})
+        self.assertEqual(vals('other'), {'CLAUDE_CODE_OAUTH_TOKEN': 'c'})
+        self.assertEqual(vals('admin'), {'ADMIN_KEY': 'a', 'CLAUDE_CODE_OAUTH_TOKEN': 'c'})
+        # no workspace param: the whole set, as a board upgrade read it
+        self.assertEqual(set(vals()), {'ADMIN_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN'})
+        # a replace with no workspaces keeps the scope; the value changes
+        self.client.put('/api/fleet/secrets/GH_TOKEN', headers=admin, json={'value': 'g2'}).raise_for_status()
+        self.assertEqual((vals('game')['GH_TOKEN'], vals('other')), ('g2', {'CLAUDE_CODE_OAUTH_TOKEN': 'c'}))
+        # an unknown workspace slug is refused, and nothing is set
+        self.assertEqual(self.client.put('/api/fleet/secrets/X_KEY', headers=admin, json={'value': 'x', 'workspaces': ['nope']}).status_code, 422)
+        self.assertNotIn('X_KEY', scopes())
+
+    def test_secrets_from_before_the_workspaces_column_reach_every_workspace(self):
+        # #304: a board upgraded from before the column: existing secrets reach all, nothing breaks on upgrade
+        from app import fleet
+        admin = {'Authorization': 'Bearer ' + self.client.post('/api/agents', json={'handle': 'op', 'kind': 'human'}).json()['token']}
+        self.client.put('/api/fleet/secrets/GH_TOKEN', headers=admin, json={'value': 'g'}).raise_for_status()
+        c = db.conn()
+        with db._write_lock:
+            # recreate the pre-#304 table (no workspaces column), keeping the row
+            c.execute("CREATE TABLE old AS SELECT name, value, set_by, set_at FROM fleet_secrets")
+            c.execute("DROP TABLE fleet_secrets")
+            c.execute("ALTER TABLE old RENAME TO fleet_secrets")
+            c.commit()
+        fleet.init()
+        self.assertEqual({x['name']: x['workspaces'] for x in self.client.get('/api/fleet/secrets', headers=admin).json()['secrets']},
+                         {'GH_TOKEN': ['*']})
+
+
 
 class BotReloadsFleetEnv(unittest.TestCase):
     def test_rotated_and_removed_secrets_reach_the_next_run(self):

@@ -2740,7 +2740,9 @@ function listSecrets() {
     box.textContent = d.secrets.length ? '' : 'None set.';
     d.secrets.forEach(function (x) {
       var row = document.createElement('div');
-      row.textContent = x.name + ' \\u2026' + x.ends + ' \\u00b7 set by @' + x.set_by + ' ' + x.set_at + ' ';
+      var ws = (x.workspaces || []).indexOf('*') >= 0 ? 'every workspace'
+             : (x.workspaces || []).length ? 'workspaces: ' + x.workspaces.join(', ') : 'admin only';
+      row.textContent = x.name + ' \\u2026' + x.ends + ' \\u00b7 ' + ws + ' \\u00b7 set by @' + x.set_by + ' ' + x.set_at + ' ';
       var del = document.createElement('button'); del.type = 'button'; del.textContent = 'remove';
       del.onclick = function () { if (confirm('Remove ' + x.name + ' from every box?'))
         secretCall('DELETE', x.name).then(listSecrets, function (e) { alert(e.message); }); };
@@ -2752,7 +2754,9 @@ listSecrets();
 document.addEventListener('submit', function (ev) {
   var f = ev.target.closest('form.secret'); if (!f) return;
   ev.preventDefault();
-  secretCall('PUT', f.elements.name.value.trim(), {value: f.elements.value.value})
+  var raw = (f.elements.workspaces.value || '').trim();
+  var ws = raw === '*' ? ['*'] : raw ? raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+  secretCall('PUT', f.elements.name.value.trim(), {value: f.elements.value.value, workspaces: ws})
   .then(function () { f.reset(); listSecrets(); }, function (e) { if (e) alert(e.message); });
 });
 // Each table sorts by a column from its heading (#282), by the cell's data-sort: numbers as
@@ -3300,15 +3304,18 @@ If this board requires an invite code, configure it on the machine before instal
 <p class="sub">Once the keeper reports in, add a bot on it.</p>
 </details>
 <details class="fleet-settings" id="secrets" open><summary>Shared secrets and project pools</summary>{pooled}
-<p class="sub">Shared secrets given to every bot on every box: each keeper writes them to <code>~/.config/bot_board/fleet.env</code>
-on its box, and bots read that before each run, so a replaced token is used from the next run on. Values are never
-shown again. To log Claude Code in on every machine at once, run <code>claude setup-token</code> on a machine with a
-browser and set what it prints as <code>CLAUDE_CODE_OAUTH_TOKEN</code>; it lasts a year, and every bot shares the
-subscription's usage limits.</p>
+<p class="sub">Secrets given to a workspace's bots: each keeper writes a <code>~/.config/bot_board/fleet.&lt;workspace&gt;.env</code>
+on its box from the set that workspace gets, and a bot reads its own before each run, so a replaced token is used from the next
+run on. A secret names the workspaces it reaches: <code>*</code> for every workspace, a comma-separated list of slugs, or empty
+for admin bots only. Secrets a box shares across machines are only truly isolated when the box runs no workspace that gets them,
+since bots on one box run as one user. Values are never shown again. To log Claude Code in on every machine at once, run
+<code>claude setup-token</code> on a machine with a browser and set what it prints as <code>CLAUDE_CODE_OAUTH_TOKEN</code>
+scoped to <code>*</code>; it lasts a year, and every bot shares the subscription's usage limits.</p>
 <div id="secretlist" class="sub"></div>
 <form class="secret">set <input name="name" placeholder="GH_TOKEN" aria-label="name" pattern="[A-Z][A-Z0-9_]*_(TOKEN|KEY|SECRET)"
  autocomplete="off" required> to <input name="value" type="password" placeholder="value" aria-label="value"
- autocomplete="off" required> <button type="submit">save</button></form></details>
+ autocomplete="off" required> for <input name="workspaces" placeholder="* or game,other (blank: admin only)"
+ aria-label="workspaces" autocomplete="off" size="26"> <button type="submit">save</button></form></details>
 </div></div>
 <script>{FLEET_JS}{registry_web.REG_SECTION_JS}</script>""")
 

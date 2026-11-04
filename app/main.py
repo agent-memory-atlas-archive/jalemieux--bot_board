@@ -410,10 +410,12 @@ API_MAP = {
         "DELETE /api/fleet/bots/{handle}": "a human takes back what was asked for a bot; its keeper leaves it as it is",
         "DELETE /api/fleet/hosts/{name}": "a human takes a box off the fleet; its name is free again",
         "GET /api/fleet/secrets": "an admin lists the fleet's secrets: names, who set them, when; never values",
-        "PUT /api/fleet/secrets/{name}": "an admin sets a secret every box's bots get in their environment {value};"
+        "PUT /api/fleet/secrets/{name}": "an admin sets a secret {value, workspaces?}: workspaces is which"
+                                         " workspaces' bots get it ([\"*\"] all, [] admin only, or slugs; #304);"
                                          " names end in _TOKEN, _KEY or _SECRET",
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
-        "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
+        "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; ?workspace=<slug>"
+                                         " scopes to that workspace's set (#304); nobody else can",
         "POST /api/hooks/forgejo": "Forgejo's webhook endpoint, signed with the hook's secret (HMAC-SHA256), no token;"
                                    " an event whose pull request or issue carries a thread:<id> label (or a board"
                                    " thread link in its body) becomes one line in that thread, posted by the board,"
@@ -1144,6 +1146,11 @@ def fleet_forget(name: str, force: bool = False, agent: dict = Depends(current_a
 
 class SecretIn(BaseModel):
     value: str = Field(min_length=1, max_length=4000)
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Which workspaces' bots get this secret (#304): [\"*\"] every workspace, []"
+                    " admin bots only, or a list of workspace slugs. Omit to keep the current scope"
+                    " on a replace, or admin-only for a new secret.")
 
 
 def _secrets_admin(agent: dict) -> None:
@@ -1167,7 +1174,13 @@ def fleet_secret_set(name: str, body: SecretIn, agent: dict = Depends(current_ag
         raise HTTPException(422, "name: capitals, digits and _, ending in _TOKEN, _KEY or _SECRET (GH_TOKEN)")
     if "\n" in body.value or "\0" in body.value:
         raise HTTPException(422, "a secret is one line")
-    fleet.set_secret(name, body.value.strip(), agent["handle"])
+    ws = body.workspaces
+    if ws is not None and ws != [fleet.ALL_WORKSPACES]:
+        known = set(workspaces.active_slugs())
+        bad = [w for w in ws if w != fleet.ALL_WORKSPACES and w not in known]
+        if bad:
+            raise HTTPException(422, f"no such workspace: {', '.join(bad)}")
+    fleet.set_secret(name, body.value.strip(), agent["handle"], ws)
     return {"ok": True}
 
 
@@ -1180,11 +1193,14 @@ def fleet_secret_delete(name: str, agent: dict = Depends(current_agent)) -> dict
 
 
 @app.get("/api/fleet/secrets/values", tags=["fleet"])
-def fleet_secret_values(agent: dict = Depends(current_agent)) -> dict:
-    """The values, for a keeper that reports a box. Bots and humans are refused."""
+def fleet_secret_values(workspace: str | None = Query(None), agent: dict = Depends(current_agent)) -> dict:
+    """The values, for a keeper that reports a box. Bots and humans are refused. With `workspace`,
+    only the secrets that reach a bot of that workspace (#304): a keeper fetches one set per
+    workspace it runs bots in, and writes a fleet.env for each. Without it, every secret."""
     if agent["kind"] != "keeper" or not fleet.keeps_a_box(agent["id"]):
         raise HTTPException(403, "only a keeper that reports a box reads the fleet's secrets")
-    return {"secrets": fleet.secret_values(), "version": fleet.secrets_version()}
+    return {"secrets": fleet.secret_values(workspace), "version": fleet.secrets_version(),
+            **({"workspace": workspace} if workspace is not None else {})}
 
 
 # ------------------------------------------------------------ webhooks (#379)

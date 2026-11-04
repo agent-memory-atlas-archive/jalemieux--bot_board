@@ -50,7 +50,11 @@ CREATE TABLE IF NOT EXISTS fleet_secrets (
     name   TEXT PRIMARY KEY,
     value  TEXT NOT NULL,
     set_by TEXT NOT NULL,
-    set_at TEXT NOT NULL
+    set_at TEXT NOT NULL,
+    -- which workspaces' bots get this secret, as a JSON list of slugs (#304). ["*"] means every
+    -- workspace; [] means admin bots only. A new secret defaults to admin only; a secret from
+    -- before this column gets ["*"] by the migration, so no running bot loses a token on upgrade.
+    workspaces TEXT NOT NULL DEFAULT '["*"]'
 );
 """
 # What a secret may be called: the names bin/bot and the keeper accept from fleet.env,
@@ -102,6 +106,10 @@ def init() -> None:
         for col in EXTRA_COLUMNS + ("workspace", "profile", "channels", "voice", "personality"):
             if col not in have:
                 c.execute(f"ALTER TABLE fleet_bots ADD COLUMN {col} TEXT")
+        # secrets per workspace (#304): a secret from before this column reaches every workspace,
+        # so no running bot loses a token when the board is upgraded; narrow it on /fleet after.
+        if "workspaces" not in {r["name"] for r in c.execute("PRAGMA table_info(fleet_secrets)")}:
+            c.execute("ALTER TABLE fleet_secrets ADD COLUMN workspaces TEXT NOT NULL DEFAULT '[\"*\"]'")
         c.commit()
 
 
@@ -197,9 +205,33 @@ def hand_off(host: str, bots: list[dict]) -> None:
             c.commit()
 
 
+ADMIN_WORKSPACE = "admin"
+ALL_WORKSPACES = "*"
+
+
+def _workspaces(raw: str) -> list[str]:
+    try:
+        v = json.loads(raw or "[]")
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _reaches(ws_list: list[str], workspace: str | None) -> bool:
+    """Whether a secret scoped to `ws_list` reaches a bot of `workspace` (#304). ["*"] reaches
+    every workspace; [] reaches admin bots only; otherwise the workspace must be named. A bot
+    with no workspace (from before workspaces) gets the admin set."""
+    if ALL_WORKSPACES in ws_list:
+        return True
+    ws = workspace or ADMIN_WORKSPACE
+    return ws in ws_list if ws_list else ws == ADMIN_WORKSPACE
+
+
 def secrets() -> list[dict]:
-    """The fleet's secrets without their values: name, who set it, when, and its last 4 characters."""
-    return [{"name": r["name"], "set_by": r["set_by"], "set_at": r["set_at"], "ends": r["value"][-4:]}
+    """The fleet's secrets without their values: name, who set it, when, its last 4 characters,
+    and the workspaces it reaches (["*"] for every workspace, [] for admin bots only)."""
+    return [{"name": r["name"], "set_by": r["set_by"], "set_at": r["set_at"], "ends": r["value"][-4:],
+             "workspaces": _workspaces(r["workspaces"])}
             for r in db.conn().execute("SELECT * FROM fleet_secrets ORDER BY name")]
 
 
@@ -218,22 +250,36 @@ def claude_token_due() -> dict | None:
     return {"set_at": row["set_at"], "days_left": round(left)} if left < 14 else None
 
 
-def secret_values() -> dict[str, str]:
-    """name -> value. For keepers only."""
-    return {r["name"]: r["value"] for r in db.conn().execute("SELECT name, value FROM fleet_secrets ORDER BY name")}
+def secret_values(workspace: str | None = None) -> dict[str, str]:
+    """name -> value, for keepers only. With `workspace`, only the secrets that reach a bot of
+    that workspace (#304); without it, every secret, as a board upgrade had it."""
+    rows = db.conn().execute("SELECT name, value, workspaces FROM fleet_secrets ORDER BY name")
+    return {r["name"]: r["value"] for r in rows
+            if workspace is None or _reaches(_workspaces(r["workspaces"]), workspace)}
 
 
 def secrets_version() -> str:
-    """Changes whenever a secret is added, replaced or removed; keepers fetch the values when it does."""
-    return hashlib.sha256(json.dumps(secret_values(), sort_keys=True).encode()).hexdigest()[:16]
+    """Changes whenever a secret is added, replaced, removed or re-scoped; keepers fetch the
+    values when it does, so a scope change reaches a box's fleet.env too (#304)."""
+    rows = [(r["name"], r["value"], r["workspaces"])
+            for r in db.conn().execute("SELECT name, value, workspaces FROM fleet_secrets ORDER BY name")]
+    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def set_secret(name: str, value: str, by: str) -> None:
+def set_secret(name: str, value: str, by: str, workspaces: list[str] | None = None) -> None:
+    """Add or replace a secret. `workspaces` is the workspaces it reaches (#304): ["*"] every
+    one, [] admin bots only, a list of slugs otherwise; None keeps the current scope on a
+    replace, or admin-only for a new secret."""
     c = db.conn()
     with db._write_lock:
-        c.execute("INSERT INTO fleet_secrets (name, value, set_by, set_at) VALUES (?,?,?,?)"
+        if workspaces is None:
+            row = c.execute("SELECT workspaces FROM fleet_secrets WHERE name=?", (name,)).fetchone()
+            ws = row["workspaces"] if row else "[]"
+        else:
+            ws = json.dumps([str(x) for x in workspaces])
+        c.execute("INSERT INTO fleet_secrets (name, value, set_by, set_at, workspaces) VALUES (?,?,?,?,?)"
                   " ON CONFLICT(name) DO UPDATE SET value=excluded.value, set_by=excluded.set_by,"
-                  " set_at=excluded.set_at", (name, value, by, db.now()))
+                  " set_at=excluded.set_at, workspaces=excluded.workspaces", (name, value, by, db.now(), ws))
         c.commit()
 
 
