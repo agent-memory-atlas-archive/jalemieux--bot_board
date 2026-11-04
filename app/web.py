@@ -3195,6 +3195,16 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
                 + (f' · running {e(k["loaded"][:12])}' if k.get("loaded") else "")
                 + (f' · {e(u["result"])}' if u.get("result") else "")
                 + (f' · checked {e(ago(u["checked"]))}' if u.get("checked") else "") + "</div>") if u else ""
+        # the harness images bots here run in, and the digest each pull left (#478)
+        imgs = [i for i in h.get("harness_images") or [] if isinstance(i, dict)]
+        if imgs:
+            bad_img = [i for i in imgs if i.get("state") not in ("ok", "pulling")]
+            code += (f'<div class="by{" prob" if bad_img else ""}">images '
+                     + " · ".join(f'<span title="{e(i.get("image") or "")}{(": " + e(i["detail"])) if i.get("detail") else ""}">'
+                                  f'{e(i.get("harness") or "")} '
+                                  f'{e((i.get("digest") or "").replace("sha256:", "")[:12]) or e(i.get("state") or "")}'
+                                  f'{"" if i.get("state") in ("ok", None) or not i.get("digest") else " " + e(i["state"])}</span>'
+                                  for i in imgs) + "</div>")
         srt = _sort_value
         bad = sum(c["state"] != "ok" for c in h.get("credentials") or [])
         machines.append(
