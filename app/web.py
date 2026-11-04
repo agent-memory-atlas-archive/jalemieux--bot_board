@@ -130,6 +130,11 @@ padding:12px 15px;margin-bottom:9px}
 .msg .head{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;font-size:12px;
 font-family:var(--mono);color:var(--dim)}
 .msg .head .who{color:var(--ink);font-weight:600;font-size:13px}
+.msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.msg .files a.file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:6px 10px;border:1px solid var(--line);
+border-radius:8px;background:var(--panel);color:var(--ink);font:12.5px var(--sans);text-decoration:none}
+.msg .files a.file:hover{border-color:var(--accent)}
+.msg .files .sz{color:var(--dim);font:11px var(--mono)}
 .msg .head .kind{background:var(--accent-soft);color:var(--accent);
 border-radius:4px;padding:1px 6px;font-size:11px}
 .msg .body{margin-top:7px;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -500,8 +505,12 @@ def message_html(m: dict, *, show_board: bool = True, indent: bool = False) -> s
         f'style="display:block;max-width:100%;max-height:320px" loading="lazy">'
         for a in m.get("attachments", []) if a.get("media_type", "").startswith("image/")
     )
-    attachments = " ".join(
-        f'<a href="{e(a["url"])}" data-attachment download="{e(a["name"])}">{e(a["name"])} ({a["size_bytes"]} bytes)</a>'
+    def size(n):
+        return f"{n} B" if n < 1024 else f"{round(n / 1024)} KB" if n < 1048576 else f"{n / 1048576:.1f} MB"
+    files = "".join(     # a chip under the message, as on the board page (thread 10173)
+        f'<a class="file" href="{e(a["url"])}" data-attachment download="{e(a["name"])}" title="download {e(a["name"])}">'
+        f'<span class="ic" aria-hidden="true">{"🖼" if a.get("media_type", "").startswith("image/") else "📄"}</span>'
+        f'<b>{e(a["name"])}</b><span class="sz">{size(a["size_bytes"])}</span></a>'
         for a in m.get("attachments", [])
     )
     if m.get("meta"):
@@ -519,12 +528,12 @@ def message_html(m: dict, *, show_board: bool = True, indent: bool = False) -> s
     {board}
     <span>{e(ago(m['created_at']))}</span>
   </div>
-  <div class="body">{render_body(m['body'])}{image_previews}</div>
+  <div class="body">{render_body(m['body'])}{image_previews}</div>{f'<div class="files">{files}</div>' if files else ""}
   {pickup}
   <div class="foot">
     <a href="/t/{m['thread_id'] or m['id']}#m{m['id']}">#{m['id']}</a>
     {'<span>re: #%d</span>' % m['reply_to'] if m.get('reply_to') else ''}
-    {tags}{meta_note}{attachments}
+    {tags}{meta_note}
   </div>
 </div>"""
 
@@ -748,6 +757,26 @@ padding:4px 0;max-height:200px;overflow-y:auto;outline:none}
 .compose textarea::placeholder{color:var(--dim)}
 .compose .send{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 12px;font:600 12.5px var(--sans);cursor:pointer;flex:none}
 .compose .send:disabled{opacity:.5;cursor:default}
+.compose .attach{flex:none;position:relative;display:grid;place-items:center;width:30px;height:30px;border-radius:6px;cursor:pointer;
+font-size:15px;color:var(--dim)}
+.compose .attach:hover,.compose .attach:focus-within{background:var(--sel);color:var(--ink)}
+.compose .attach input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.compose .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.compose .box.drop{border-color:var(--accent);border-style:dashed;background:var(--accent-soft)}
+.compose .image-tools{margin-top:6px}
+.compose .chip{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:4px 4px 4px 8px;border:1px solid var(--line);
+border-radius:8px;background:var(--panel);font:12.5px var(--sans);color:var(--ink)}
+.compose .chip[hidden],.compose .chip .thumb[hidden]{display:none}
+.compose .chip .thumb{width:36px;height:36px;object-fit:cover;border-radius:5px}
+.compose .chip .image-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compose .chip .remove-image{border:0;background:none;color:var(--dim);font-size:16px;line-height:1;padding:2px 6px;border-radius:5px;cursor:pointer}
+.compose .chip .remove-image:hover{background:var(--sel);color:var(--ink)}
+.msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.msg .files a.file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+background:var(--panel);color:var(--ink);font:12.5px var(--sans);text-decoration:none}
+.msg .files a.file:hover{border-color:var(--accent);text-decoration:none}
+.msg .files a.file b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg .files .sz{color:var(--dim);font:11px var(--mono)}
 .compose .hint{display:flex;justify-content:space-between;gap:10px;margin-top:5px;font:11px var(--mono);color:var(--dim)}
 .compose .hint .err{color:var(--accent)}
 .compose .hint a{cursor:pointer}
@@ -1112,15 +1141,22 @@ function pickupHtml(worker){
     '"><span aria-hidden="true">👀</span> Picked up by <a href="/a/' +
     esc(worker) + '">@' + esc(worker) + '</a>' + (down ? ' · ' + esc(down) : '') + '</span>';
 }
+// an attachment as a chip under the message, not in the footer that shows only on hover (thread 10173)
+function sizeText(n){ return n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function fileChip(a){
+  return '<a class="file" href="' + esc(a.url) + '" data-attachment download="' + esc(a.name) + '" title="download ' + esc(a.name) + '">' +
+    '<span class="ic" aria-hidden="true">' + ((a.media_type || '').indexOf('image/') === 0 ? '🖼' : '📄') + '</span>' +
+    '<b>' + esc(a.name) + '</b><span class="sz">' + sizeText(a.size_bytes) + '</span></a>';
+}
 function messageHtml(m, inThread){
   var foot = m.tags.map(function(t){ return '<span class="tag">#' + esc(t) + '</span>'; }).join('');
-  var previews = '';
+  var previews = '', files = '';
   (m.attachments || []).forEach(function(a){
     if ((a.media_type || '').indexOf('image/') === 0) {
       previews += '<img class="attached-image" data-image-src="' + esc(a.url) + '" alt="' + esc(a.name) +
         '" style="display:block;max-width:100%;max-height:320px" loading="lazy">';
     }
-    foot += '<a href="' + esc(a.url) + '" data-attachment download="' + esc(a.name) + '">' + esc(a.name) + ' (' + a.size_bytes.toLocaleString() + ' bytes)</a>';
+    files += fileChip(a);
   });
   if (m.meta && Object.keys(m.meta).length) foot += '<span title="' + esc(JSON.stringify(m.meta)) + '">meta: ' + esc(Object.keys(m.meta).join(', ')) + '</span>';
   var rep = '';
@@ -1141,7 +1177,7 @@ function messageHtml(m, inThread){
     (isHuman(m.author) ? '<span class="hk" title="a person, not a bot">human</span>' : '') +
     '<span title="' + esc(m.created_at) + '">' + esc(when(m.created_at)) + '</span>' +
     '<a class="id" href="/t/' + (m.thread_id || m.id) + '">#' + m.id + '</a></div>' +
-    '<div class="body">' + body(m.body) + previews + '</div>' +
+    '<div class="body">' + body(m.body) + previews + '</div>' + (files ? '<div class="files">' + files + '</div>' : '') +
     (!m.reply_to ? '<div class="pickup" data-worker-thread="' + m.id + '">' + pickupHtml(m.worker) + '</div>' : '') +
     '<div class="pickup" data-receipt-message="' + m.id + '"></div>' +
     '<div class="foot">' + foot + '</div>' + rep + '</div></div>';
@@ -1643,8 +1679,10 @@ function wireCompose(form, target){
     send.disabled = busy;
     if (fileInput) { fileInput.disabled = busy; removeImage.disabled = busy; }
   }
+  var chip = $('.chip', form), thumb = $('.thumb', form), box = $('.box', form);
   function clearImage(){
     imageData = fileData = null; fileInput.value = ''; imageNote.textContent = ''; removeImage.hidden = true;
+    chip.hidden = true; thumb.hidden = true; thumb.removeAttribute('src');
   }
   function chooseImage(files){
     if (send.disabled || readingImage || !files.length) return;
@@ -1659,8 +1697,9 @@ function wireCompose(form, target){
     reader.onload = function(){
       var data = reader.result.slice(reader.result.indexOf(',') + 1);
       imageData = image ? data : null; fileData = image ? null : {name: file.name, content: data};
-      imageNote.textContent = file.name + ' (' + file.size.toLocaleString() + ' bytes)';
-      removeImage.hidden = false;
+      imageNote.textContent = file.name + ' · ' + sizeText(file.size);
+      if (image) thumb.src = reader.result;
+      thumb.hidden = !image; chip.hidden = false; removeImage.hidden = false;
     };
     reader.onerror = function(){ err.textContent = 'Could not read the file. Choose it again.'; };
     reader.onloadend = function(){ readingImage = false; setBusy(false); };
@@ -1669,8 +1708,9 @@ function wireCompose(form, target){
   if (fileInput) {
     fileInput.addEventListener('change', function(){ chooseImage(fileInput.files); });
     removeImage.addEventListener('click', clearImage);
-    form.addEventListener('dragover', function(ev){ ev.preventDefault(); });
-    form.addEventListener('drop', function(ev){ ev.preventDefault(); chooseImage(ev.dataTransfer.files); });
+    form.addEventListener('dragover', function(ev){ ev.preventDefault(); box.classList.add('drop'); });
+    form.addEventListener('dragleave', function(ev){ if (!form.contains(ev.relatedTarget)) box.classList.remove('drop'); });
+    form.addEventListener('drop', function(ev){ ev.preventDefault(); box.classList.remove('drop'); chooseImage(ev.dataTransfer.files); });
   }
   function attachmentNotice(){
     try {
@@ -1991,10 +2031,10 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form class="compose" id="compose" hidden autocomplete="off">
     <ul class="mentions" hidden></ul>
     <button type="button" class="signin"><b>Sign in</b> to post here as a human: tell a bot what to do, hand out an issue, answer a question.</button>
-    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Post</button></div>
+    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><label class="attach" title="attach a file, or drop one on the box"><span aria-hidden="true">📎</span><span class="sr-only">Attach a file</span><input class="image-file" type="file"></label><button type="submit" class="send">Post</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach a file <input class="image-file" type="file"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove</button></div>
+    <div class="image-tools" hidden><span class="chip" hidden><img class="thumb" alt="" hidden><span class="image-note" role="status"></span>
+    <button type="button" class="remove-image" hidden title="remove the attachment" aria-label="remove the attachment">×</button></span></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter posts · Shift+Enter newline · @ mentions</span></div>
   </form>
 </main>
@@ -2019,10 +2059,10 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form class="compose" id="tcompose" hidden autocomplete="off">
     <ul class="mentions" hidden></ul>
     <button type="button" class="signin"><b>Sign in</b> to reply in this thread as a human.</button>
-    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Reply</button></div>
+    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><label class="attach" title="attach a file, or drop one on the box"><span aria-hidden="true">📎</span><span class="sr-only">Attach a file</span><input class="image-file" type="file"></label><button type="submit" class="send">Reply</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach a file <input class="image-file" type="file"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove</button></div>
+    <div class="image-tools" hidden><span class="chip" hidden><img class="thumb" alt="" hidden><span class="image-note" role="status"></span>
+    <button type="button" class="remove-image" hidden title="remove the attachment" aria-label="remove the attachment">×</button></span></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter replies · Shift+Enter newline · @ mentions</span></div>
   </form>
 </aside>
