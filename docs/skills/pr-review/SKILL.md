@@ -88,7 +88,11 @@ send-back reaches you as a new review job from the routine.
 Very simple English: short sentences, everyday words. Explain a technical
 term the first time you use it. The reader may never have seen this code.
 
-Start with `What this change does:` in two or three sentences.
+The first line is your signature, `bot <handle>, board thread <id>`, on a line
+of its own, then a blank line. Every bot is the same forge account, and the
+board quotes a review's first line into the thread, so this line is how anyone
+knows which bot reviewed. Then `What this change does:` in two or three
+sentences.
 
 Then the findings in three groups, skip empty groups:
 - **Must fix:** bug, security, data loss, breaks at the expected load, does
@@ -125,34 +129,48 @@ Inline comments on lines go through the same call with `comments`.
 fj "/repos/$REPO/pulls/<pr>/reviews" -d "$(jq -n --arg b "$BODY" '{event:"COMMENT", body:$b}')"
 ```
 
-## 5. The verdict, in the thread
+## 5. The verdict, in the pull request's thread
+
+The pull request has a board thread of its own: the one its `thread:<id>`
+label names (or the link in its body). Its author works there, the board
+posts the forge's events there, and the human who merges follows it. Your
+verdict goes there too, as a reply, so one thread tells the pull request's
+story in order, with a handle on every line. The job thread that woke you is
+not that place.
 
 One message: the verdict, the link to the review, the `Tested:` and `Not
-checked:` lines. Mention the human who merges (the workspace's knowledge base
-says who) and hold the message in their inbox:
+checked:` lines, and how to reach you. Mention the human who merges (the
+workspace's knowledge base says who) and hold the message in their inbox:
 
 ```json
-{"body": "@<human> Ship: PR #<pr> <review url>. Tested: ... Not checked: ...",
+{"reply_to": <the PR's thread id>,
+ "body": "@<human> Ship: PR #<pr> <review url>. Tested: ... Not checked: ... (I am @<handle>: mention me to correct this.)",
  "meta": {"needs": "<human>", "ask": "merge PR #<pr>"}}
 ```
 
-or `"ask": "send back PR #<pr>: fix 1 and 3 first"`. Then complete the thread,
-so the routine can hand you the next pull request. The human's reply reopens
-it and reaches you.
+or `"ask": "send back PR #<pr>: fix 1 and 3 first"`. You are not that
+thread's worker, so a plain reply there reaches its author, not you; a
+mention of your handle does, which is why the verdict says so.
+
+Then close the job: reply in the job thread with one line, the verdict and a
+link to the verdict message, and `"meta": {"done": true}`. Complete the job
+thread, so the routine can hand you the next pull request.
 
 ## 6. When the human answers
 
-- **They merged, or agreed.** The merge reaches the thread as a forge line.
-  Post `"meta": {"resolved": true}` if your ask still stands, complete the
-  thread, and add one line to the tally in the standards.
-- **They corrected you.** This is the point of the skill. In the thread, say
-  in one sentence the rule you take from it. Then write it into the standards
+- **They merged, or agreed.** The merge reaches the pull request's thread as
+  a forge line; you see it when you look, or when someone mentions you. Post
+  `"meta": {"resolved": true}` there if your ask still stands, and add one line
+  to the tally in the standards.
+- **They corrected you.** This is the point of the skill. It reaches you as a
+  mention in the pull request's thread. Say there, in one sentence, the rule
+  you take from it. Then write it into the standards
   the same day, with their message id. Do not write a rule they did not give;
   ask one precise question when the correction is unclear. Add the tally line
   with `overruled` and what they said.
-- **They sent it back to the author.** The author's thread gets the forge
-  events; you need do nothing. A push to the branch fires a new review job,
-  and the new review says which earlier findings are fixed, by number.
+- **They sent it back to the author.** You need do nothing. A push to the
+  branch fires a new review job, and the new review says which earlier
+  findings are fixed, by number, in the same thread as the first verdict.
 
 ## 7. The standards document
 
