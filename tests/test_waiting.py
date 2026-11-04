@@ -102,6 +102,22 @@ class Waiting(unittest.TestCase):
         self.post(self.jac, 'thanks', reply_to=m)
         self.assertEqual(self.status()['mentions'], [])
 
+    def test_all_mentions_are_cleared_at_once_and_asks_stay(self):
+        # thread 10067: one "all done" for every plain mention, past the 30 the status lists
+        ask = self.post(self.bot, '@jac decide X', meta={'needs': 'jac', 'ask': 'decide X'})
+        for i in range(35):
+            self.post(self.bot, f'@jac fyi {i}')
+        self.assertEqual(len(self.status()['mentions']), 30)
+        self.assertEqual(self.client.post('/api/status/mentions/done', headers=self.bot).status_code, 403)
+        r = self.client.post('/api/status/mentions/done', headers=self.jac)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['mentions'], [])
+        self.assertEqual([x['key'] for x in r.json()['waiting']], [f'm{ask}'], 'what waits on jac stays')
+        self.assertEqual(self.status()['mentions'], [])
+        # a new mention after it is listed again
+        later = self.post(self.bot, '@jac one more')
+        self.assertEqual([x['key'] for x in self.status()['mentions']], [f'm{later}'])
+
     def test_a_paused_routine_nobody_said_yes_to_is_an_alert(self):
         root = self.post(self.bot, 'a routine for triage')
         r = self.client.post('/api/routines', headers=self.jac, json={
@@ -152,7 +168,7 @@ class Waiting(unittest.TestCase):
                 page.wait_for_selector('#stream .mrow')
                 self.assertTrue(page.url.endswith('/mentions'))
                 groups = page.locator('#stream .ugroup h3').all_inner_texts()
-                self.assertEqual([g.split()[0:3] for g in groups], [['Waiting', 'on', 'you'], ['Mentions', '1']])
+                self.assertEqual([g.split()[0:3] for g in groups], [['Waiting', 'on', 'you'], ['Mentions', '1', 'all']])
                 self.assertIn('review PR 9', page.inner_text('#stream .ugroup:nth-of-type(1) .ask'))
                 self.assertIn('merged, fyi', page.inner_text('#stream .ugroup:nth-of-type(2)'))
                 # done clears one without a reply; an answer in the thread clears the other
@@ -168,6 +184,14 @@ class Waiting(unittest.TestCase):
                 page.goto('http://board.test/mentions')
                 page.wait_for_selector('#stream .mrow')
                 self.assertIn('one more', page.inner_text('#stream'))
+                # all done clears every plain mention in one go (thread 10067)
+                self.post(self.bot, '@jac and another')
+                page.evaluate('window.bbStatusRefresh()')
+                page.wait_for_function("document.querySelector('#mentionsli .badge').textContent === '2'")
+                page.wait_for_function("document.querySelectorAll('#stream .mrow').length === 2")
+                page.click('[data-alldone]')
+                page.wait_for_function("document.querySelector('#mentionsli .badge').hidden")
+                self.assertIn('You are all caught up', page.inner_text('#stream'))
                 self.assertEqual(errors, [])
             finally:
                 browser.close()
