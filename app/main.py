@@ -474,6 +474,8 @@ API_MAP = {
         "PUT /api/workspaces/{slug}/bots": "a manager sets which bots belong to the workspace {bots: [handle]}",
         "POST /api/workspaces/{slug}/channels": "a manager adds a channel {slug, name, description, focus, references, seed?}",
         "PATCH /api/workspaces/{slug}/channels/{channel}": "a manager edits {name, topic, focus, references, archived}",
+        "DELETE /api/workspaces/{slug}[/channels/{channel}]": "a human deletes an archived workspace (no bots left) or channel"
+                                                              " {confirm: <slug>}; GET .../deletion first says what goes",
         "GET /api/workspaces/{slug}/knowledge": "the workspace's knowledge base, for humans and admin bots; the same"
                                                  " paths and verbs as /api/knowledge",
         "GET /api/conversations": "conversations you are in (all=true for every one);"
@@ -855,6 +857,9 @@ class FleetReportIn(BaseModel):
     mem_total_mb: int | None = Field(default=None, ge=0)
     mem_free_mb: int | None = Field(default=None, ge=0, description="Memory available to new work.")
     os: str = Field(default="", max_length=80)
+    runtime: dict[str, str] | None = Field(default=None, description="The box's BOT_RUNTIME, as the keeper last"
+                                           " checked it (#479): {setting: host | container | a docker-compatible"
+                                           " command, state: ok | missing | down, detail}.")
     bots: list[FleetBot] = Field(default_factory=list, max_length=500)
     credentials: list[FleetCredential] = Field(default_factory=list, max_length=20, description="What bots here"
                                                " need, as the keeper last checked it. Secrets themselves never come here.")
@@ -1587,6 +1592,34 @@ def workspace_get(slug: str, agent: dict | None = Depends(optional_agent)):
 @app.patch('/api/workspaces/{slug}', tags=['workspaces'])
 async def workspace_patch(slug: str, body: WorkspacePatch, agent: dict = Depends(current_agent)):
     return {'workspace': await _ws_write(workspaces.update, slug.lower(), body.model_dump(exclude_unset=True), agent)}
+
+
+class DeleteIn(BaseModel):
+    confirm: str = Field(description="The slug of what is deleted, typed back (#473).")
+
+
+@app.get('/api/workspaces/{slug}/deletion', tags=['workspaces'])
+def workspace_deletion(slug: str, agent: dict = Depends(current_agent)):
+    """What deleting this workspace would remove, and the bots that block it, for the warning."""
+    return {'deletion': _ws_call(workspaces.deletion, slug.lower(), agent)}
+
+
+@app.delete('/api/workspaces/{slug}', tags=['workspaces'])
+async def workspace_delete(slug: str, body: DeleteIn, agent: dict = Depends(current_agent)):
+    """A human deletes an archived workspace with no bots: its channels, messages, attachments,
+    routines and knowledge base. It cannot be undone."""
+    return await _ws_write(workspaces.delete, slug.lower(), body.confirm, agent)
+
+
+@app.get('/api/workspaces/{slug}/channels/{channel}/deletion', tags=['workspaces'])
+def workspace_channel_deletion(slug: str, channel: str, agent: dict = Depends(current_agent)):
+    return {'deletion': _ws_call(workspaces.channel_deletion, slug.lower(), channel.lower(), agent)}
+
+
+@app.delete('/api/workspaces/{slug}/channels/{channel}', tags=['workspaces'])
+async def workspace_channel_delete(slug: str, channel: str, body: DeleteIn, agent: dict = Depends(current_agent)):
+    """A human deletes an archived channel: its messages, attachments and routines. It cannot be undone."""
+    return await _ws_write(workspaces.delete_channel, slug.lower(), channel.lower(), body.confirm, agent)
 
 
 @app.put('/api/workspaces/{slug}/bots', tags=['workspaces'])

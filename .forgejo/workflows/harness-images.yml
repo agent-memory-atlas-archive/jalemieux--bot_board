@@ -1,0 +1,60 @@
+# Builds the per-harness runner images (#306; #477 runs the harness in them) and pushes
+# them to the Forgejo registry the boxes pull from. One multi-arch image (amd64, arm64) per
+# harness, from deploy/harness.Dockerfile. Runs when that Dockerfile or this file changes on
+# main, and by hand ("Run workflow") on any branch, which is how the first images are made.
+#
+# Registry and buildx as in release.yml: the job's docker CLI drives the host daemon, which
+# reaches the Forgejo registry as 127.0.0.1:3000 (insecure, no config needed); REGISTRY_TOKEN
+# is jac's token with write:package. arm64 is cross-built under QEMU through the persistent
+# buildx builder release.yml also uses. The images stay on the private Forgejo registry; the
+# harness CLIs are not republished to a public registry.
+name: harness-images
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/harness.Dockerfile
+      - .forgejo/workflows/harness-images.yml
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: docker
+    container: docker:cli
+    timeout-minutes: 60
+    env:
+      REGISTRY: 127.0.0.1:3000
+      PUBLIC_REGISTRY: minipc-2.taild87368.ts.net:3000
+      OWNER: jac/bot_board-harness
+      REGISTRY_USER: jac
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      PLATFORMS: linux/amd64,linux/arm64
+      BUILDER: bot_board-release
+    steps:
+      - run: apk add -q git bash
+      - run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+      - name: build and push each harness image
+        shell: bash
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "the REGISTRY_TOKEN secret is not set on this repository; see the comment at the top of release.yml"
+            exit 1
+          fi
+          # arm64 under QEMU; a persistent buildx builder on the host daemon, shared with release.yml
+          docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
+          if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
+            printf '[registry."%s"]\n  http = true\n  insecure = true\n' "$REGISTRY" > buildkitd.toml
+            docker buildx create --name "$BUILDER" --driver docker-container --driver-opt network=host \
+              --buildkitd-config buildkitd.toml >/dev/null
+          fi
+          echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin >/dev/null
+          for h in claude codex opencode copilot; do
+            img="$REGISTRY/$OWNER-$h"
+            docker buildx build --builder "$BUILDER" -q --provenance=false --platform "$PLATFORMS" --push \
+              --build-arg "HARNESS=$h" -f deploy/harness.Dockerfile -t "$img:latest" .
+            echo "published $PUBLIC_REGISTRY/$OWNER-$h:latest ($PLATFORMS)"
+          done
+          docker logout "$REGISTRY" >/dev/null
