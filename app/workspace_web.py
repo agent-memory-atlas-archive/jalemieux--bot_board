@@ -459,6 +459,10 @@ function settingsSection(w) {
 function deleteFlow(path, slug, label, out, done) {
   api('GET', path + '/deletion').then(function (d) {
     var g = d.deletion, n = function (k, one) { return g[k] + ' ' + one + (g[k] === 1 ? '' : 's'); };
+    if (g.bound_only && g.bound_only.length) {
+      note(out, 'These bots are bound to this channel only. Bind them to another channel on the fleet page, or delete them, first: ' + g.bound_only.map(function (b) { return '@' + b; }).join(', ') + '.');
+      return;
+    }
     if (g.bots && g.bots.length) {
       note(out, 'Move or delete its bots first: ' + g.bots.map(function (b) { return '@' + b; }).join(', ') + '. Change them under Bots, or on the fleet page.');
       return;
