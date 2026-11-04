@@ -790,8 +790,19 @@ def _mention_elsewhere(r) -> str | None:
     return "elsewhere"
 
 
+def _mention_never_claims(r) -> str | None:
+    """"never claims" for an agent that cannot hold a thread (#450): a human, a keeper, the
+    board's cron agents, an interactive session. On a thread root its mention reserves the
+    thread for nobody, so it is treated like a stopped one: the thread goes to the workspace's
+    bots, and the sender is told."""
+    if r["self_mention"]:     # an author naming themselves reserves nothing, and needs no warning
+        return None
+    return "never claims" if r["kind"] in UNSCOPED_KINDS or r["interactive"] else None
+
+
 def _mention_rows(ids, marks):
-    q = ("SELECT mn.message_id, a.handle, a.kind, a.last_seen_at, a.workspace_id, {run} AS run,"
+    q = ("SELECT mn.message_id, a.handle, a.kind, a.last_seen_at, a.workspace_id, a.interactive, {run} AS run,"
+         " mn.agent_id = m.agent_id AS self_mention,"
          " b.kind AS board_kind, b.workspace_id AS board_workspace_id FROM mentions mn"
          " JOIN agents a ON a.id=mn.agent_id JOIN messages m ON m.id=mn.message_id"
          " JOIN boards b ON b.id=m.board_id {join} WHERE mn.message_id IN ({marks})")
@@ -830,9 +841,11 @@ def _hydrate(rows, hide_events: bool = False) -> list[dict]:
             f"SELECT message_id, tag FROM tags WHERE message_id IN ({marks})", ids
         ):
             tags.setdefault(r["message_id"], []).append(r["tag"])
+        roots = {r["id"] for r in rows if r["reply_to"] is None}
         for r in _mention_rows(ids, marks):
             mentions.setdefault(r["message_id"], []).append(r["handle"])
-            state = mention_state(r["kind"], r["last_seen_at"], r["run"]) or _mention_elsewhere(r)
+            state = (_mention_never_claims(r) if r["message_id"] in roots else None) \
+                or mention_state(r["kind"], r["last_seen_at"], r["run"]) or _mention_elsewhere(r)
             if state:
                 unreachable.setdefault(r["message_id"], []).append(
                     {"mention": r["handle"], "state": state, "last_seen_at": r["last_seen_at"]})
@@ -972,8 +985,13 @@ def _claim_thread(c: sqlite3.Connection, tid: int, agent: dict) -> dict:
         # the moderator reads and replies everywhere but claims only in the admin workspace (#319)
         raise PermissionError("the moderator claims threads only in the admin workspace: this one is"
                               " for its workspace's bots")
-    mentions = c.execute("SELECT agent_id FROM mentions WHERE message_id=?", (tid,)).fetchall()
-    if mentions and agent["id"] not in {m["agent_id"] for m in mentions}:
+    # a mention reserves the thread for the agents that can hold it: not one that never claims
+    # (a human, the board's cron, a session), one stopped on /fleet or one outside this
+    # workspace (#450). A bot only away by presence still holds its reservation.
+    mentioned = _mention_rows([tid], "?")
+    reserved = {r["handle"].lower() for r in mentioned if not (
+        r["kind"] in UNSCOPED_KINDS or r["interactive"] or r["run"] == 0 or _mention_elsewhere(r))}
+    if reserved and agent["handle"].lower() not in reserved | {r["handle"].lower() for r in mentioned}:
         raise PermissionError("this request is addressed to someone else")
     from . import workspaces
     if workspaces.is_archived(root["board_id"]):
