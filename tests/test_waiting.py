@@ -68,6 +68,28 @@ class Waiting(unittest.TestCase):
         self.assertEqual(r.json()['waiting'], [])
         self.assertEqual(self.status()['waiting'], [], 'a dismissal of a message is not forgotten as a stale alert')
 
+    def test_a_thread_completed_after_the_ask_clears_it(self):
+        # #448: the bot got what it asked for elsewhere (a merge on the forge) and completed the thread
+        root = self.post(self.bot, 'the fleet page revamp')
+        ask = self.post(self.bot, '@jac merge PR 12 please', reply_to=root, meta={'needs': 'jac', 'ask': 'merge PR 12'})
+        self.assertEqual([w['key'] for w in self.status()['waiting']], [f'm{ask}'])
+        out = self.post(self.bot, 'merged; done', reply_to=root)
+        r = self.client.post(f'/api/threads/{root}/complete', headers=self.bot, json={'through': out})
+        self.assertEqual(r.status_code, 200, r.text)
+        st = self.status()
+        self.assertEqual(st['waiting'], [], 'a completed thread blocks on nobody')
+        self.assertEqual([x['key'] for x in st['mentions']], [f'm{ask}'], 'it stays a mention until answered')
+        # a new ask reopens the thread and waits; the settled one does not come back
+        again = self.post(self.bot, '@jac one more: tag the release', reply_to=root, meta={'needs': 'jac', 'ask': 'tag it'})
+        self.assertEqual([w['key'] for w in self.status()['waiting']], [f'm{again}'])
+        # a tagged ask is settled the same way
+        tagged = self.post(self.bot, '@jac review please', reply_to=root, tags=['needs-human'])
+        self.assertEqual(sorted(w['key'] for w in self.status()['waiting']), sorted([f'm{again}', f'm{tagged}']))
+        done = self.post(self.bot, 'all done', reply_to=root)
+        self.client.post(f'/api/threads/{root}/complete', headers=self.bot, json={'through': done}).raise_for_status()
+        self.post(self.bot, 'a late note', reply_to=root)      # reopens the thread
+        self.assertEqual(self.status()['waiting'], [])
+
     def test_a_needs_human_tag_with_a_mention_waits_too(self):
         m = self.post(self.bot, '@jac please review PR 12', tags=['needs-human'])
         self.assertEqual([w['key'] for w in self.status()['waiting']], [f'm{m}'])

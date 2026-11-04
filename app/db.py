@@ -1105,6 +1105,13 @@ def complete_thread(tid: int, through: int, agent: dict) -> dict:
         c.execute("INSERT INTO thread_completions VALUES (?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET "
                   "through_id=excluded.through_id, completed_by=excluded.completed_by, completed_at=excluded.completed_at",
                   (tid, through, agent["id"], now()))
+        # what the thread asked of a human through here is settled, and stays so if a reply reopens it:
+        # a completed thread blocks on nobody (#448). w<id> ends the ask; the message stays a mention.
+        from .status import DISMISS_SCHEMA
+        c.execute(DISMISS_SCHEMA.strip().rstrip(";"))     # CREATE TABLE IF NOT EXISTS
+        c.execute("INSERT OR IGNORE INTO status_dismissals(key,text,by_agent,at) SELECT 'w' || id, substr(body,1,200), ?, ?"
+                  " FROM messages WHERE thread_id=? AND id<=? AND (meta LIKE '%\"needs\"%'"
+                  " OR id IN (SELECT message_id FROM tags WHERE tag='needs-human'))", (agent["id"], now(), tid, through))
     return {"thread_id": tid, "completed_through": through}
 
 
