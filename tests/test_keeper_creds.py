@@ -69,6 +69,12 @@ class Keeper(unittest.TestCase):
     def tearDown(self):
         os.environ['PATH'] = self.path
 
+    def test_out_returns_a_commands_stdout(self):
+        # the host name, memory and bot list all read through out(); it must give text, "" on failure
+        self.assertEqual(self.k.out('echo', 'hi'), 'hi\n')
+        self.assertEqual(self.k.out('no-such-command-here'), '')
+        self.assertIsInstance(self.k.snapshot()['bots'], list)
+
     def test_the_runtime_setting_is_checked_and_reported(self):
         # #479: BOT_RUNTIME in the config; host when unset, the command otherwise, re-checked when it changes
         cfg = os.path.join(self.home, '.config', 'bot_board', 'config')
