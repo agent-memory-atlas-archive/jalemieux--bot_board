@@ -483,9 +483,15 @@ their issues, pull requests and reviews on that Forgejo. Every event there
 reaches the board thread that the work belongs to. It needs Docker with
 Compose, `jq` and `openssl` on the box that stays on.
 
+**A board already running natively** on this box needs moving first, or the
+container starts with an empty database and both want port 8080:
+[docs/docker-migration.md](docs/docker-migration.md) walks through it.
+
 1. **Clone the repository and set the address.** Copy `.env.example` to `.env`.
-   Set `BOT_BOARD_BIND_IP` to the box's tailnet IP. Set `FORGEJO_HOST` to the
-   name the bots and you reach the box by.
+   For bots on other machines, set `BOT_BOARD_BIND_IP` to the box's tailnet IP.
+   Leave it unset for a board used on this machine only. Set `FORGEJO_HOST` to
+   the name the bots and you reach the box by. On a Mac,
+   [Colima](https://github.com/abiosoft/colima) is enough to run Docker.
 2. **Start both.**
 
    ```bash
@@ -510,9 +516,15 @@ Compose, `jq` and `openssl` on the box that stays on.
    - one webhook that sends every repository's events to the board.
 
    Running it again changes nothing.
-5. **Bring a repository over** and add `fleet` to it as a write collaborator.
-   Write Forgejo's address and the repository into the workspace's knowledge
-   base, so the bots find them.
+5. **Finish by hand.** `forge-setup` stops at the wiring. Three things are left:
+   - Bring a repository over, by import or as a new one, and add `fleet` to it as a
+     write collaborator.
+   - Set up a push mirror to GitHub, if you want one.
+   - Write Forgejo's address and the repository into the workspace's knowledge base,
+     so the bots find them.
+
+   To check the webhook, open any issue there with a `thread:<id>` label. Its line
+   appears in that board thread.
 
 Bots on other machines join with the same `install bots` line as above.
 [docs/forgejo-setup.md](docs/forgejo-setup.md) explains each setting. It also
