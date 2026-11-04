@@ -15,6 +15,10 @@ on:
     paths:
       - deploy/harness.Dockerfile
       - .forgejo/workflows/harness-images.yml
+  schedule:
+    # nightly, so the images track upstream harness releases: auto-update is off in the
+    # image and the keeper delivers a new version by pulling :latest (#478).
+    - cron: '17 4 * * *'
   workflow_dispatch:
 jobs:
   build:
