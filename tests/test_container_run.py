@@ -105,12 +105,11 @@ class ContainerRun(unittest.TestCase):
                 L.wait_for(lambda: not (L.state / "busy").exists() and L.read("runs") == "3",
                            "all three runs done")
 
-                calls = self.calls()
-                self.assertTrue(calls, "the runtime was invoked for %s" % harness)
-                self.assertTrue(all(c and c[0] == "run" for c in calls), calls)
+                runtime_runs = [c for c in self.calls() if c and c[0] == "run"]
+                self.assertTrue(runtime_runs, "the runtime ran a container for %s" % harness)
                 img = "bot_board-harness-%s:latest" % harness
-                self.assertTrue(all(any(img in a for a in c) for c in calls),
-                                "every run used the %s image: %s" % (harness, calls))
+                self.assertTrue(all(any(img in a for a in c) for c in runtime_runs),
+                                "every run used the %s image: %s" % (harness, runtime_runs))
                 self.assertEqual(L.read("health"), "", "every turn completed in the container")
                 self.assertIn("please fix the widget", "\n".join(L.prompts()),
                               "the prompt reached the harness through the container")
@@ -202,8 +201,15 @@ class ContainerRun(unittest.TestCase):
         r2 = self.run_sub(["claude", "--handle", "tbot", "--dir", checkout, "--", "--version"],
                           self.sub_env({"BOARD": "http://127.0.0.1:8080", "BOT_CONTAINER_HOST_NETWORK": "1"}))
         self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
-        self.assertTrue(any("bot_board-tbot-run" in c for call in self.calls() for c in call),
-                        "bot mode names the container for kill: %s" % self.calls())
+        calls = self.calls()
+        name = "bot_board-tbot-run"
+        self.assertTrue(any(call and call[0] == "run" and name in call for call in calls),
+                        "bot mode names the container for kill: %s" % calls)
+        # a stale leftover of that name is cleared before the run (a crashed launcher leaves one)
+        rm_i = next((i for i, c in enumerate(calls) if c[:2] == ["rm", "-f"] and name in c), None)
+        run_i = next((i for i, c in enumerate(calls) if c and c[0] == "run" and name in c), None)
+        self.assertIsNotNone(rm_i, "a leftover-container cleanup ran: %s" % calls)
+        self.assertLess(rm_i, run_i, "cleanup runs before the container: %s" % calls)
 
     def test_kill_removes_the_named_container(self):
         with FakeBoard() as board:

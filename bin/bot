@@ -277,9 +277,9 @@ container_run() {
   # networking 127.0.0.1 inside the container is the container, so the harness's own curls to the
   # board would fail while the turn still "succeeds" with nothing posted. Refuse it, naming the
   # setting (#485 review). The launcher fetched the prompt on the host, so only the harness's own
-  # board calls are at stake. Set BOT_CONTAINER_HOST_NETWORK=1 when the runtime shares the host
-  # network (a `--network host` runtime, or the board and bots on one Linux box): then loopback
-  # does reach the host and the refusal is wrong.
+  # board calls are at stake. Set BOT_CONTAINER_HOST_NETWORK=1 only when the runtime shares the
+  # host network (a `--network host` runtime): then loopback does reach the host and the refusal
+  # is wrong. Plain bridge networking, which this uses, does not qualify, not even on a one-box setup.
   if [ "$mode" = bot ] && [ -z "${BOT_CONTAINER_HOST_NETWORK:-}" ]; then case ${BOARD:-} in
     http://127.*|http://localhost|http://localhost:*|http://localhost/*|"http://[::1]"*)
       echo "bot: BOARD is ${BOARD:-} — a container reads that as itself, not the host, so the harness could not reach the board. Set BOARD to the box's reachable address (its Tailscale name) in the box config, or BOT_CONTAINER_HOST_NETWORK=1 if the runtime shares the host network, before enabling BOT_RUNTIME." >&2
@@ -299,6 +299,11 @@ container_run() {
   if [ "$mode" = box ]; then
     $BOT_RUNTIME "${run[@]}" "$image" "$@"
   else
+    # Clear a leftover container of this name first: a launcher that died without `bot kill` (a
+    # crash, an OOM, a kill -9) leaves one behind, and then every turn fails with a name conflict.
+    # The launcher is the only owner of the name and turns are serialised, so a live turn never
+    # collides here; removing a leftover is always right (#485 review).
+    $BOT_RUNTIME rm -f "bot_board-${HANDLE:-bot}-run" >/dev/null 2>&1 || true
     # Refuse an empty /work: on Colima or Docker Desktop only paths under $HOME bind-mount, so a
     # checkout elsewhere mounts as an empty /work with no error (seth, #485). Fail loud instead of
     # running the harness on nothing. The check runs then exec's the harness, so no extra container.
