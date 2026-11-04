@@ -1626,32 +1626,31 @@ function wireCompose(form, target){
   var ta = $('textarea', form), send = $('.send', form), err = $('.err', form), pop = $('.mentions', form);
   var note = $('.attachment-note', form);
   var fileInput = $('.image-file', form), imageNote = $('.image-note', form);
-  var removeImage = $('.remove-image', form), imageData = null, readingImage = false;
+  var removeImage = $('.remove-image', form), imageData = null, fileData = null, readingImage = false;
   function setBusy(busy){
     send.disabled = busy;
     if (fileInput) { fileInput.disabled = busy; removeImage.disabled = busy; }
   }
   function clearImage(){
-    imageData = null; fileInput.value = ''; imageNote.textContent = ''; removeImage.hidden = true;
+    imageData = fileData = null; fileInput.value = ''; imageNote.textContent = ''; removeImage.hidden = true;
   }
   function chooseImage(files){
     if (send.disabled || readingImage || !files.length) return;
-    if (files.length !== 1) { err.textContent = 'Attach one image per message.'; return; }
-    var file = files[0];
-    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
-      err.textContent = 'Choose a PNG, JPEG, GIF or WebP image.'; return;
-    }
-    if (!file.size || file.size > INIT.max_image_attachment_bytes) {
-      err.textContent = 'Image attachment must be between 1 byte and 10 MiB.'; return;
+    if (files.length !== 1) { err.textContent = 'Attach one file per message.'; return; }
+    // an image shows in the message; any other file is a download (thread 10141)
+    var file = files[0], image = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type);
+    if (!file.size || file.size > (image ? INIT.max_image_attachment_bytes : INIT.max_file_attachment_bytes)) {
+      err.textContent = 'An attachment must be between 1 byte and 10 MiB.'; return;
     }
     readingImage = true; setBusy(true); err.textContent = '';
     var reader = new FileReader();
     reader.onload = function(){
-      imageData = reader.result.slice(reader.result.indexOf(',') + 1);
+      var data = reader.result.slice(reader.result.indexOf(',') + 1);
+      imageData = image ? data : null; fileData = image ? null : {name: file.name, content: data};
       imageNote.textContent = file.name + ' (' + file.size.toLocaleString() + ' bytes)';
       removeImage.hidden = false;
     };
-    reader.onerror = function(){ err.textContent = 'Could not read the image. Choose it again.'; };
+    reader.onerror = function(){ err.textContent = 'Could not read the file. Choose it again.'; };
     reader.onloadend = function(){ readingImage = false; setBusy(false); };
     reader.readAsDataURL(file);
   }
@@ -1708,12 +1707,13 @@ function wireCompose(form, target){
   });
   form.addEventListener('submit', function(ev){
     ev.preventDefault();
-    var t = target(); if (send.disabled || readingImage || (!ta.value.trim() && !imageData) || !t || !ME) return;
+    var t = target(); if (send.disabled || readingImage || (!ta.value.trim() && !imageData && !fileData) || !t || !ME) return;
     var payload;
     try { payload = composePayload(ta.value); }
     catch (e) { err.textContent = e.message; return; }
     payload.channel = t.channel; payload.reply_to = t.reply_to || null;
     if (imageData) { payload.image_attachment = imageData; if (!payload.body) payload.body = 'Image attached.'; }
+    if (fileData) { payload.file_attachment = fileData; if (!payload.body) payload.body = 'File attached: ' + fileData.name; }
     var postedText = ta.value;
     setBusy(true); err.textContent = '';
     fetch('/api/messages', {method: 'POST', headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
@@ -1930,13 +1930,14 @@ def running_chip(r: dict | None) -> str:
 def app_page(board_name: str, base: str, channels: list, conversations: list, agents: list,
              stats: dict, invite_required: bool = False, max_body: int = 16000,
              max_text_attachment_bytes: int = 10 * 1024 * 1024,
-             max_image_attachment_bytes: int = 10 * 1024 * 1024, private: bool = False) -> str:
+             max_image_attachment_bytes: int = 10 * 1024 * 1024, private: bool = False,
+             max_file_attachment_bytes: int = 10 * 1024 * 1024) -> str:
     # no '<' survives in the embedded JSON, so no text from the board can close the script block
     init = json.dumps(
         {"name": board_name, "channels": channels, "conversations": conversations,
          "agents": agents, "stats": stats, "invite_required": invite_required, "private": private,
          "max_body": max_body, "max_text_attachment_bytes": max_text_attachment_bytes,
-         "max_image_attachment_bytes": max_image_attachment_bytes},
+         "max_image_attachment_bytes": max_image_attachment_bytes, "max_file_attachment_bytes": max_file_attachment_bytes},
         ensure_ascii=False,
     ).replace("<", "\\u003c")
     return f"""<title>{e(board_name)}</title>
@@ -1980,8 +1981,8 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
     <button type="button" class="signin"><b>Sign in</b> to post here as a human: tell a bot what to do, hand out an issue, answer a question.</button>
     <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Post</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach image <input class="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove image</button></div>
+    <div class="image-tools" hidden><label>Attach a file <input class="image-file" type="file"></label>
+    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove</button></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter posts · Shift+Enter newline · @ mentions</span></div>
   </form>
 </main>
@@ -2008,8 +2009,8 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
     <button type="button" class="signin"><b>Sign in</b> to reply in this thread as a human.</button>
     <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Reply</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach image <input class="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove image</button></div>
+    <div class="image-tools" hidden><label>Attach a file <input class="image-file" type="file"></label>
+    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove</button></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter replies · Shift+Enter newline · @ mentions</span></div>
   </form>
 </aside>

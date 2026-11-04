@@ -133,6 +133,13 @@ CREATE TABLE IF NOT EXISTS image_attachments (
     size_bytes INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS file_attachments (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    storage_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mentions (
     message_id INTEGER NOT NULL REFERENCES messages(id),
     agent_id   INTEGER NOT NULL REFERENCES agents(id),
@@ -660,6 +667,7 @@ def post_message(
     image_attachment: tuple[bytes, str, str] | None = None,
     workspace_id: int | None = None,
     client_key: str | None = None,
+    file_attachment: tuple[bytes, str] | None = None,
 ) -> dict:
     """`workspace_id`: the poster's scope (db.scope). A bot may post only in its own
     workspace's channels and its conversations; a channel it names that does not
@@ -724,6 +732,10 @@ def post_message(
                 "INSERT INTO image_attachments (message_id, storage_key, media_type, name, size_bytes)"
                 " VALUES (?,?,?,?,?)", (mid, storage.write(content), media_type, name, len(content)),
             )
+        if file_attachment is not None:
+            content, name = file_attachment
+            c.execute("INSERT INTO file_attachments (message_id, storage_key, name, size_bytes) VALUES (?,?,?,?)",
+                      (mid, storage.write(content), name, len(content)))
         if text_attachment is not None:
             add_text_attachment(c, mid, text_attachment)
         if parent_thread is None:
@@ -838,6 +850,13 @@ def _hydrate(rows, hide_events: bool = False) -> list[dict]:
                 "url": f"/api/messages/{mid}/image",
             })
         for r in conn().execute(
+            f"SELECT message_id, name, size_bytes FROM file_attachments WHERE message_id IN ({marks})", ids
+        ):
+            mid = r["message_id"]
+            attachments.setdefault(mid, []).append({
+                "name": r["name"], "size_bytes": r["size_bytes"], "url": f"/api/messages/{mid}/file",
+            })
+        for r in conn().execute(
             f"SELECT message_id, tag FROM tags WHERE message_id IN ({marks})", ids
         ):
             tags.setdefault(r["message_id"], []).append(r["tag"])
@@ -915,6 +934,12 @@ def get_image_attachment(mid: int) -> dict | None:
     return {**row, "path": storage.path(row["storage_key"])} if row else None
 
 
+def get_file_attachment(mid: int) -> dict | None:
+    """A file's name and size, with `path` the file holding it."""
+    row = conn().execute("SELECT * FROM file_attachments WHERE message_id=?", (mid,)).fetchone()
+    return {**row, "path": storage.path(row["storage_key"])} if row else None
+
+
 def delete_attachments(mid: int) -> None:
     """Remove a message's attachments, and each file no other message still uses. Nothing deletes
     messages today; whatever does first calls this, since a key can be shared."""
@@ -922,12 +947,13 @@ def delete_attachments(mid: int) -> None:
     with _write_lock:
         keys = set()
         with c:
-            for table in ("text_attachments", "image_attachments"):
+            for table in ("text_attachments", "image_attachments", "file_attachments"):
                 keys |= {r["storage_key"] for r in c.execute(f"SELECT storage_key FROM {table} WHERE message_id=?", (mid,))}
                 c.execute(f"DELETE FROM {table} WHERE message_id=?", (mid,))
         for key in keys:
             if not c.execute("SELECT 1 FROM text_attachments WHERE storage_key=?"
-                             " UNION ALL SELECT 1 FROM image_attachments WHERE storage_key=?", (key, key)).fetchone():
+                             " UNION ALL SELECT 1 FROM image_attachments WHERE storage_key=?"
+                             " UNION ALL SELECT 1 FROM file_attachments WHERE storage_key=?", (key, key, key)).fetchone():
                 storage.delete(key)
 
 
