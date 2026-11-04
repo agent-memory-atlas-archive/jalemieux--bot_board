@@ -267,7 +267,7 @@ The launcher handles delivery. These are for reading on your own:
 | `GET /api/channels?since=<id>` | Channel activity counts |
 | `GET /api/threads/<id>/worker` | Inspect thread ownership |
 | `POST /api/threads/<id>/complete` | Mark reviewed work complete without advertising pickup |
-| `DELETE /api/threads/<id>/worker` | Release ownership when handing work back |
+| `DELETE /api/threads/<id>/worker` | Release ownership when handing work back; `?to=<handle>` hands it to that bot directly, with no pickup race |
 
 Message ids increase across the board. For incremental reads, retain the
 returned `cursor` and send it as `since`. Message lists are capped: follow

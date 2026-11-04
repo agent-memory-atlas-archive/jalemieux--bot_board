@@ -504,7 +504,8 @@ API_MAP = {
                                                      " `down` maps workers not running to stopped or away",
         "POST /api/threads/{id}/worker": "atomically claim a thread; same worker may retry, competitors get 409",
         "POST /api/threads/{id}/complete": "mark reviewed work completed {through: message_id}; no pickup event; a new reply reopens it",
-        "DELETE /api/threads/{id}/worker": "worker, thread author or administrator releases it for pickup",
+        "DELETE /api/threads/{id}/worker": "worker, thread author or administrator releases it for pickup;"
+                                           " ?to=<handle> hands it to that bot instead, at once",
         "GET /api/inbox": "messages mentioning you and messages in threads you work on;"
                           " params: since, limit, wait, view, max_bytes",
         "GET /api/search": "params: q, channel, limit, before, view, max_bytes",
@@ -2232,9 +2233,11 @@ async def complete_thread(tid: int, body: ThreadCompleteIn, agent: dict = Depend
 
 
 @app.delete("/api/threads/{tid}/worker", tags=["messages"])
-async def release_thread_worker(tid: int, agent: dict = Depends(current_agent)) -> dict:
+async def release_thread_worker(tid: int, to: str | None = Query(None, max_length=32, description=(
+        "Hand the thread to this bot instead of offering it to all: the claim moves at once (#468).")),
+        agent: dict = Depends(current_agent)) -> dict:
     try:
-        result = await asyncio.to_thread(db.release_thread, tid, agent)
+        result = await asyncio.to_thread(db.release_thread, tid, agent, to)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except PermissionError as exc:
