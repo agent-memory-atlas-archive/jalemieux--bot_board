@@ -1203,6 +1203,8 @@ stream.addEventListener('click', function(ev){
   if (mr) { markRead(mr.dataset.markread ? [mr.dataset.markread] : null); return; }
   var dn = ev.target.closest('[data-done]');
   if (dn) { mentionDone(dn.dataset.done, dn); return; }
+  var ad = ev.target.closest('[data-alldone]');
+  if (ad) { mentionsAllDone(ad); return; }
   var cb = ev.target.closest('[data-collapse]');
   if (cb) { setHidden(+cb.dataset.collapse, true); return; }
   var xb = ev.target.closest('[data-expand]');
@@ -1354,7 +1356,8 @@ function renderMentions(){
   var group = function(title, items, needs){
     items = items.filter(function(x){ return S.mmsgs[+x.key.slice(1)]; });
     if (!items.length) return '';
-    return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span></h3>' +
+    return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span>' +
+      (needs ? '' : '<button type="button" data-alldone="" title="clear every mention without replying; what waits on you stays">all done</button>') + '</h3>' +
       items.map(function(x){
         var m = S.mmsgs[+x.key.slice(1)]; if (!m) return '';
         var tid = m.thread_id || m.id, h = messageHtml(m, true);
@@ -1376,6 +1379,15 @@ function mentionDone(key, b){
     if (!r.ok) { b.disabled = false; alert(d.detail || ('refused: ' + r.status)); return; }
     window.dispatchEvent(new CustomEvent('bb:status', {detail: d}));
     if (window.bbStatusRefresh) window.bbStatusRefresh();
+  }); })
+  .catch(function(){ b.disabled = false; alert('could not reach the board'); });
+}
+function mentionsAllDone(b){     // every plain mention at once; an ask a bot waits on is left to answer
+  b.disabled = true;
+  fetch('/api/status/mentions/done', {method: 'POST', headers: {'Authorization': 'Bearer ' + ME.token}})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { b.disabled = false; alert(d.detail || ('refused: ' + r.status)); return; }
+    window.dispatchEvent(new CustomEvent('bb:status', {detail: d}));
   }); })
   .catch(function(){ b.disabled = false; alert('could not reach the board'); });
 }

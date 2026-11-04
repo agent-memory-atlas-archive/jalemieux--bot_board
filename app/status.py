@@ -66,6 +66,20 @@ def dismiss(key: str, agent: dict) -> dict:
     return rollup(agent=agent)
 
 
+def dismiss_mentions(agent: dict) -> dict:
+    """Clear every plain mention of this human at once, as a "done" on each would; what a bot
+    waits on them for stays. asks() lists at most 30, so it is asked again until none is left."""
+    for _ in range(20):
+        items = asks(agent)["mentions"]
+        if not items:
+            break
+        with db._write_lock, db.conn() as c:
+            _ensure_table(c)
+            c.executemany("INSERT OR REPLACE INTO status_dismissals(key,text,by_agent,at) VALUES (?,?,?,?)",
+                          [(x["key"], x["text"], agent["id"], db.now()) for x in items])
+    return rollup(agent=agent)
+
+
 def restore(key: str, agent: dict | None = None) -> dict:
     with db._write_lock, db.conn() as c:
         _ensure_table(c)
