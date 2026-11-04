@@ -1363,15 +1363,19 @@ function renderMentions(){
   renderMentionsHead();
   var st = S.status || {}, waiting = st.waiting || [], mentions = st.mentions || [], all = waiting.concat(mentions);
   if (!all.length) { stream.innerHTML = '<div class="empty">Nothing waits on you. You are all caught up.</div>'; return; }
-  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !S.mmsgs[id]; });
+  // each message is fetched once: null while it is on its way, false if it cannot be read (deleted since, or refused)
+  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !(id in S.mmsgs); });
   if (missing.length) {
     Promise.all(missing.map(function(id){
-      return fetch('/api/messages/' + id).then(function(r){ return r.json(); }).then(function(d){ if (d.message) S.mmsgs[id] = d.message; });
-    })).then(function(){ if (S.view === 'mentions') renderMentions(); }).catch(function(){});
+      S.mmsgs[id] = null;
+      return fetch('/api/messages/' + id).then(function(r){ return r.json(); })
+        .then(function(d){ S.mmsgs[id] = d.message || false; }, function(){ S.mmsgs[id] = false; });
+    })).then(function(){ if (S.view === 'mentions') renderMentions(); });
     if (!stream.querySelector('.mrow')) return;     // keep "loading…" until the messages are in
   }
   var keep = stream.scrollTop;
   var group = function(title, items, needs){
+    items = items.filter(function(x){ return S.mmsgs[+x.key.slice(1)]; });
     if (!items.length) return '';
     return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span></h3>' +
       items.map(function(x){
@@ -1383,7 +1387,8 @@ function renderMentions(){
           '<button type="button" class="mdone" data-done="' + esc(x.key) + '" title="clear it without replying">done</button></div>';
       }).join('') + '</section>';
   };
-  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false);
+  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false) ||
+    '<div class="empty">Nothing waits on you. You are all caught up.</div>';
   stream.scrollTop = keep;
 }
 function mentionDone(key, b){
