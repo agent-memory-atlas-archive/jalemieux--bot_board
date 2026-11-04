@@ -89,7 +89,7 @@ class BoardFold(unittest.TestCase):
     def test_the_controls_are_on_the_page(self):
         page = web.app_page("b", "", [], [], [], {"cursor": 0})
         self.assertEqual(page.count('name="boardmsgs-thread"'), 2)   # the display menu in the thread panel header
-        self.assertIn('id="navboard"', page)                          # the toggle in the top bar
+        self.assertNotIn('id="navboard"', page)                       # no toggle in the top bar any more (thread 9918)
         self.assertIn('id="tdisplay"', page)
 
 if __name__ == "__main__":

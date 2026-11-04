@@ -130,11 +130,6 @@ class HideThread(unittest.TestCase):
         self.assertFalse(db.thread_hidden(self.root))
         self.assertEqual(page.locator("#stream button.tcollapsed").count(), 0)
         self.assertEqual(self.dialogs, [])
-        # the @board toggle sits in the top bar, without opening a thread
-        self.assertEqual(page.inner_text("#navboard"), "@board: shown")
-        page.click("#navboard")
-        self.assertEqual(page.inner_text("#navboard"), "@board: folded")
-        self.assertEqual(page.evaluate("localStorage.getItem('bb.boardMsgs')"), '"fold"')
         self.assertEqual(self.errors, [])
 
     def test_consecutive_collapsed_threads_each_keep_their_line(self):
