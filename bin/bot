@@ -250,6 +250,29 @@ PY
 }
 load_fleet_env
 
+# The container runner (#306, #477). With BOT_RUNTIME set (a per-box setting, #479), a harness
+# runs inside its image instead of on the host, so it cannot read the host home or another bot's
+# token — the dropoff incident's cause. The checkout mounts at /work, the harness's session state
+# lives on a named volume at /home/bot (made writable by the image) so resume works, and the
+# secrets go in by name (already exported by load_fleet_env), never as a file on disk. The
+# container runs as the host uid:gid so a bind-mounted checkout is writable on Linux.
+#   container_run <mode> <harness> <dir> <cmd...>
+#     mode:  bot (checkout + the bot's state volume) | box (neither; a shared box volume, for the
+#            keeper's per-box login checks, #478)
+#     dir:   the bot's checkout (bot mode; ignored in box mode)
+#     cmd:   the command to run in the image, e.g. `claude -p ...` or `claude auth status`
+container_run() {
+  local mode=$1 harness=$2 dir=$3; shift 3
+  local image="${BOT_HARNESS_REGISTRY:-minipc-2.taild87368.ts.net:3000}/jac/bot_board-harness-$harness:latest"
+  local run=(run --rm -i --user "$(id -u):$(id -g)" -e HOME=/home/bot -e BOARD -e BOT_HANDLE -e BOARD_TOKEN) _k
+  for _k in $_FLEET_SET; do run+=(-e "$_k"); done
+  if [ "$mode" = box ]; then run+=(-v "bot_board-box-state:/home/bot")
+  else                       run+=(-v "$dir:/work" -w /work -v "bot_board-${HANDLE:-bot}-state:/home/bot"); fi
+  # codex keeps its login file; mount it read-only so the container never writes the host's
+  [ "$harness" = codex ] && [ -d "$HOME/.codex" ] && run+=(-v "$HOME/.codex:/home/bot/.codex:ro")
+  $BOT_RUNTIME "${run[@]}" "$image" "$@"
+}
+
 BOARD=${BOARD:-http://127.0.0.1:8080}
 BOT_WAIT=${BOT_WAIT:-60}
 # Headless runs cannot answer permission prompts, so the harness must be told
@@ -436,6 +459,26 @@ case ${1:-} in
       | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || true)
     if [ -n "$bv" ]; then echo "board $BOARD: $bv"; else echo "board $BOARD: unreachable"; fi
     exit 0 ;;
+  run-in-container)
+    # Run a harness in its image, the way a bot run does (#477), callable on its own so the
+    # keeper (Python) runs its per-box login checks and token probe through B's exact runtime,
+    # image and mounts, with no second copy (#478):
+    #   bin/bot run-in-container [--box] <harness> [--handle H --dir D] -- <args...>
+    # --box: no checkout, no state volume; a shared box volume and the codex login mount only.
+    # The secrets come from fleet.env (already loaded above). Needs BOT_RUNTIME set.
+    shift; RC_MODE=box; RC_HARNESS=""; RC_DIR=""
+    while [ $# -gt 0 ]; do case $1 in
+      --box) RC_MODE=box; shift ;;
+      --handle) HANDLE=${2:-}; RC_MODE=bot; shift 2 || usage ;;
+      --dir) RC_DIR=${2:-}; RC_MODE=bot; shift 2 || usage ;;
+      --) shift; break ;;
+      -*) usage ;;
+      *) [ -z "$RC_HARNESS" ] || usage; RC_HARNESS=$1; shift ;;
+    esac; done
+    case $RC_HARNESS in claude|codex|opencode|copilot) ;; *) echo "bot: run-in-container needs a harness (claude, codex, opencode, copilot)" >&2; exit 1 ;; esac
+    [ -n "${BOT_RUNTIME:-}" ] || { echo "bot: run-in-container needs BOT_RUNTIME set (the box's container runtime)" >&2; exit 1; }
+    container_run "$RC_MODE" "$RC_HARNESS" "$RC_DIR" "$RC_HARNESS" "$@"
+    exit $? ;;
   keeper)
     # The box agent (reporting, supervising) installs and runs through the same bot
     # binary as every bot, so a box needs only this one command on its PATH.
@@ -903,21 +946,6 @@ run_harness() {
   [ -s "$sfile" ] && sid=$(cat "$sfile")
   load_fleet_env
   export BOARD BOT_HANDLE="${HANDLE:-}" BOARD_TOKEN="$(cat "${TOKFILE:-/dev/null}" 2>/dev/null || true)"
-  # The runner (#306, #477): with BOT_RUNTIME set (a per-box setting, #479), the harness runs
-  # inside its image instead of on the host, so it cannot read the host home or other bots'
-  # files. The checkout is mounted at /work, a named volume holds the harness's session state
-  # so resume works, and the secrets go in by name (already exported by load_fleet_env), never
-  # as a file on disk. Unset: the host path below, byte for byte as before.
-  local image="${BOT_HARNESS_REGISTRY:-minipc-2.taild87368.ts.net:3000}/jac/bot_board-harness-$HARNESS:latest"
-  local envargs=(-e BOARD -e BOT_HANDLE -e BOARD_TOKEN) _k
-  for _k in $_FLEET_SET; do envargs+=(-e "$_k"); done
-  # run_in_container <cmd> <args...>: the harness in its image, reusable on its own for the
-  # keeper's login checks (#478). The bot's state volume is its home, where every harness keeps
-  # its session files; /work is the checkout, its working directory.
-  run_in_container() {
-    $BOT_RUNTIME run --rm -i -v "$dir:/work" -w /work \
-      -v "bot_board-$HANDLE-state:/home/bot" "${envargs[@]}" "$image" "$@"
-  }
   echo "${WORKSPACE:-${dir##*/}}" > "$STATE/busy"
   : >"$STATE/run.out"; : >"$STATE/run.err"
   # claude and copilot take the id we pick; codex and opencode pick their own, read off
@@ -930,7 +958,7 @@ run_harness() {
     claude)
       if [ ! -s "$sfile" ]; then set -- claude -p --output-format json --session-id "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}
       else                       set -- claude -p --output-format json --resume     "$sid" $BOT_CLAUDE_FLAGS ${arg[@]+"${arg[@]}"}; fi
-      if [ -n "${BOT_RUNTIME:-}" ]; then run_in_container "$@"; else "$@"; fi \
+      if [ -n "${BOT_RUNTIME:-}" ]; then container_run bot "$HARNESS" "$dir" "$@"; else "$@"; fi \
         >"$STATE/run.out" 2>"$STATE/run.err" ;;
     codex)
       if [ ! -s "$sfile" ]; then
