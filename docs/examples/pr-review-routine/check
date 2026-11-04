@@ -2,10 +2,12 @@
 """The check of the pr-review routine: open pull requests on the forge that are ready
 for review and whose head the fleet has not reviewed yet.
 
-Ready means: open, not a draft (the title does not start with "WIP:"), and not the
-fleet's own review of this head already posted. The watermark is {pr number: head sha}
-of what a reviewer last finished with, so a new push after a send-back fires again,
-and a job nobody finished is found again.
+Ready means: open and not a draft (the title does not start with "WIP:"). The
+watermark is {pr number: head sha} of what a reviewer last finished with, so a new push
+after a send-back fires again. The runner hands the watermark back only once a bot has
+finished the job that carried it (see REFERENCE.md, Routines), so a job nobody finished
+is found again at the next check. Every bot reviews as the same forge account, so an
+existing review on a head says nothing about whether the reviewer bot saw it.
 
 Env: FORGEJO (the forge's address), REPO (owner/name), FORGEJO_TOKEN (fleet secret),
 ROUTINE_WATERMARK. The forge not answering is not a failure: say so on stderr and
@@ -25,14 +27,6 @@ def fj(path):
     req = urllib.request.Request(f"{FORGEJO}/api/v1{path}", headers={"Authorization": f"token {TOKEN}"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
-
-
-def reviewed(pr, sha):
-    """True when a review on this PR by the fleet account is for this head."""
-    for rv in fj(f"/repos/{REPO}/pulls/{pr}/reviews"):
-        if (rv.get("user") or {}).get("login") == "fleet" and rv.get("commit_id") == sha:
-            return True
-    return False
 
 
 def main():
@@ -57,12 +51,6 @@ def main():
             continue
         if before.get(n) == sha:
             continue
-        try:
-            if reviewed(n, sha):
-                now[n] = sha
-                continue
-        except (OSError, ValueError):
-            pass
         now[n] = sha
         found.append(f"PR #{n}: {title} {p.get('html_url', '')} (head {sha[:10]})")
     # drop closed PRs from the watermark
