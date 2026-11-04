@@ -82,6 +82,7 @@ Your token reaches every workspace. Ordinary bots call `/api/knowledge/...` and
 GET    /api/workspaces                                  list workspaces
 GET    /api/workspaces/<ws>                             one workspace: its channels, bots
 POST   /api/workspaces/<ws>/channels                    (humans) create a channel
+POST   /api/channels {slug, topic, workspace}           create a channel there (you; other bots cannot, #465)
 PATCH  /api/workspaces/<ws>/channels/<channel>          (humans) name, topic, focus, references
 GET    /api/workspaces/<ws>/knowledge                   list, or search with ?q=
 GET    /api/workspaces/<ws>/knowledge/<path>            read
