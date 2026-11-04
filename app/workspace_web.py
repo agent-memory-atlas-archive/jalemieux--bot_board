@@ -22,6 +22,7 @@ WS_CSS = """
 .ws textarea{min-height:5em;resize:vertical}
 .ws button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 13px;font:600 12px var(--mono);cursor:pointer;justify-self:start}
 .ws button.quiet{background:var(--accent-soft);color:var(--accent)}
+.ws button.danger{background:transparent;color:#b42318;border:1px solid currentColor}
 .ws button.link{background:none;color:var(--accent);padding:0;font-weight:400;text-decoration:underline}
 .ws button:disabled{opacity:.5;cursor:default}
 .ws .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -185,6 +186,7 @@ function wsView() {
     root.appendChild(channelsSection(w));
     root.appendChild(knowledgeSection(w));
     if (w.can_manage && !w.archived) root.appendChild(settingsSection(w));
+    if (w.can_manage && w.archived && w.slug !== 'admin') root.appendChild(deleteSection(w));
   }).catch(function (e) { root.textContent = ''; root.appendChild(h('p', {'class': 'msg-err', text: e.message})); });
 }
 // The board's resident bot. The board frees stuck threads by itself; the moderator is the judgment on
@@ -247,7 +249,8 @@ function editChannel(w, c) {
     field('Focus: what a bot working a thread here should keep in mind', 'focus', 'textarea', c.focus),
     field('References into the knowledge base, one path per line; add "mandatory" to require it', 'references', 'textarea', refsText(c.references)),
     h('div', {'class': 'row'}, h('button', {type: 'submit', text: 'Save'}),
-      c.home ? null : h('button', {type: 'button', 'class': 'quiet', text: c.archived ? 'Unarchive' : 'Archive', 'data-arch': '1'})), out);
+      c.home ? null : h('button', {type: 'button', 'class': 'quiet', text: c.archived ? 'Unarchive' : 'Archive', 'data-arch': '1'}),
+      c.archived ? h('button', {type: 'button', 'class': 'quiet danger', text: 'Delete…', 'data-del': '1'}) : null), out);
   f.addEventListener('submit', function (ev) {
     ev.preventDefault();
     api('PATCH', '/api/workspaces/' + encodeURIComponent(w.slug) + '/channels/' + encodeURIComponent(c.slug),
@@ -256,8 +259,10 @@ function editChannel(w, c) {
       .then(function () { location.reload(); }).catch(function (e) { note(out, e.message); });
   });
   f.addEventListener('click', function (ev) {
+    var path = '/api/workspaces/' + encodeURIComponent(w.slug) + '/channels/' + encodeURIComponent(c.slug);
+    if (ev.target.closest('button[data-del]')) { deleteFlow(path, c.slug, '#' + c.slug, out, function () { location.reload(); }); return; }
     var b = ev.target.closest('button[data-arch]'); if (!b) return;
-    api('PATCH', '/api/workspaces/' + encodeURIComponent(w.slug) + '/channels/' + encodeURIComponent(c.slug), {archived: !c.archived})
+    api('PATCH', path, {archived: !c.archived})
       .then(function () { location.reload(); }).catch(function (e) { note(out, e.message); });
   });
   return h('details', null, h('summary', {text: 'Edit'}), f);
@@ -448,6 +453,40 @@ function settingsSection(w) {
       .then(function () { location.reload(); }).catch(function (e) { note(out, e.message); });
   });
   return h('section', null, h('h2', {text: 'Settings'}), f);
+}
+
+// Deleting (#473): only what is archived, after a warning that counts what goes, with the slug typed back.
+function deleteFlow(path, slug, label, out, done) {
+  api('GET', path + '/deletion').then(function (d) {
+    var g = d.deletion, n = function (k, one) { return g[k] + ' ' + one + (g[k] === 1 ? '' : 's'); };
+    if (g.bound_only && g.bound_only.length) {
+      note(out, 'These bots are bound to this channel only. Bind them to another channel on the fleet page, or delete them, first: ' + g.bound_only.map(function (b) { return '@' + b; }).join(', ') + '.');
+      return;
+    }
+    if (g.bots && g.bots.length) {
+      note(out, 'Move or delete its bots first: ' + g.bots.map(function (b) { return '@' + b; }).join(', ') + '. Change them under Bots, or on the fleet page.');
+      return;
+    }
+    var what = [g.channels.length > 1 ? n('channels', 'channel') : null, n('threads', 'thread'), n('messages', 'message'),
+                n('attachments', 'attachment'), g.documents !== undefined ? n('documents', 'knowledge document') : null]
+      .filter(Boolean).join(', ');
+    var typed = prompt('Delete ' + label + ' for good?\n\nThis removes ' + what + '.' +
+      (g.routines.length ? ' Routines that post there are deleted too: ' + g.routines.join(', ') + '.' : '') +
+      ' It cannot be undone.\n\nType ' + slug + ' to confirm.');
+    if (typed === null) return;
+    if (typed.trim() !== slug) { note(out, 'Not deleted: the slug you typed does not match.'); return; }
+    api('DELETE', path, {confirm: slug}).then(done).catch(function (e) { note(out, e.message); });
+  }).catch(function (e) { note(out, e.message); });
+}
+function deleteSection(w) {
+  var out = h('p'), b = h('button', {type: 'button', 'class': 'quiet danger', text: 'Delete this workspace…'});
+  b.addEventListener('click', function () {
+    deleteFlow('/api/workspaces/' + encodeURIComponent(w.slug), w.slug, 'the workspace ' + w.slug, out,
+               function () { location.href = '/workspaces'; });
+  });
+  return h('section', null, h('h2', {text: 'Delete'}),
+    h('p', {'class': 'sub', text: 'An archived workspace can be deleted with everything in it: its channels, their messages and attachments, the routines that post there and its knowledge base. Its bots must be moved or deleted first.'}),
+    b, out);
 }
 
 if (SLUG) wsView(); else listView();

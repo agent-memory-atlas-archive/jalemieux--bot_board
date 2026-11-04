@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# forge-setup — wire the Forgejo of `docker compose --profile forge up -d` into the board (#437).
+#
+#   deploy/forge-setup            run from the checkout, once both containers are up
+#
+# What docs/forgejo-setup.md does by hand in steps 3, 4 and 6, for a Forgejo beside the board:
+#   1. the admin account, named after you on the board; its password is written to
+#      ~/.bot_board/forgejo-admin-password (only you can read it) and never printed
+#   2. the bots' shared account, `fleet`, and its token, set on the board as the fleet
+#      secret FORGEJO_TOKEN: every box's keeper hands it to its bots within minutes
+#   3. the webhook: a fresh secret, set on the board, and one site-wide webhook on Forgejo
+#      that delivers every repository's events to the board over the compose network; its id
+#      is kept in ~/.bot_board/forgejo-hook-id
+# It asks for your handle on the board and signs in as you, the way the board page does
+# (a human's token: a bot's may not set fleet secrets). The token is kept nowhere.
+# Each step that is already done is skipped, so running it again changes nothing.
+# Bringing a repository over is step 5 of the guide, by hand.
+#
+# Env: BOARD (the board as this box reaches it, default http://127.0.0.1:8080),
+# BOARD_HUMAN_TOKEN (a human's, instead of signing in), INVITE (the board's invite code, if
+# it has one), FORGE (Forgejo as this box reaches it, default http://127.0.0.1:3000),
+# COMPOSE (default `docker compose --profile forge`; prefix sudo if docker needs it).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+BOARD=${BOARD:-http://127.0.0.1:8080}
+FORGE=${FORGE:-http://127.0.0.1:3000}
+COMPOSE=${COMPOSE:-docker compose --profile forge}
+PWFILE=$HOME/.bot_board/forgejo-admin-password
+SCOPES=write:repository,write:issue,write:user,read:organization
+
+say() { echo "forge-setup: $*"; }
+die() { echo "forge-setup: $*" >&2; exit 1; }
+forgejo() { $COMPOSE exec -T -u 1000 forgejo forgejo "$@"; }
+board() {   # board METHOD PATH [JSON]: the answer's body; fails loudly on an error
+  curl -fsS -X "$1" "$BOARD$2" -H "Authorization: Bearer $BOARD_TOKEN" -H 'Content-Type: application/json' ${3:+-d "$3"}
+}
+
+command -v jq >/dev/null || die "needs jq"
+BOARD_TOKEN=${BOARD_HUMAN_TOKEN:-}     # not BOARD_TOKEN: in a bot's shell that is the bot's own
+if [ -z "$BOARD_TOKEN" ]; then
+  read -rp "Your handle on the board at $BOARD: " handle
+  BOARD_TOKEN=$(curl -fsS "$BOARD/api/agents" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg h "${handle#@}" --arg i "${INVITE:-}" '{handle: $h, kind: "human", invite_code: $i}')" | jq -r .token) \
+    || die "could not sign in as ${handle#@} (a bot's handle, or the board needs INVITE)"
+fi
+ME=$(board GET /api/me | jq -r '.agent.handle // .handle') || die "the board at $BOARD refused that token"
+board GET /api/fleet/secrets >/dev/null 2>&1 || die "@$ME may not manage the fleet's secrets: use a human's token"
+
+say "waiting for Forgejo at $FORGE"
+for _ in $(seq 60); do curl -fsS "$FORGE/api/v1/version" >/dev/null 2>&1 && break; sleep 2; done
+curl -fsS "$FORGE/api/v1/version" >/dev/null || die "Forgejo does not answer at $FORGE: docker compose --profile forge up -d"
+users=$(forgejo admin user list)
+has_user() { awk 'NR>1 {print $2}' <<<"$users" | grep -qxF "$1"; }
+
+# 1. the admin account
+if has_user "$ME"; then
+  say "admin account $ME is there"
+else
+  pw=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
+  forgejo admin user create --admin --username "$ME" --password "$pw" --email "$ME@forge.local" \
+    --must-change-password=false >/dev/null
+  mkdir -p "$(dirname "$PWFILE")"; (umask 077; echo "$pw" > "$PWFILE")
+  say "admin account $ME made; its password is in $PWFILE"
+fi
+
+# 2. the bots' account and their token: a new one when the account is new here, even if the
+#    board holds a token (it would be for a Forgejo that is gone)
+fresh=
+if has_user fleet; then say "account fleet is there"; else
+  forgejo admin user create --username fleet --random-password --email fleet@forge.local \
+    --must-change-password=false >/dev/null
+  fresh=1; say "account fleet made"
+fi
+if [ -z "$fresh" ] && board GET /api/fleet/secrets | jq -e '.secrets[] | select(.name == "FORGEJO_TOKEN")' >/dev/null; then
+  say "the board has FORGEJO_TOKEN already"
+else
+  token=$(forgejo admin user generate-access-token --username fleet --token-name "fleet-bots-$(date +%s)" \
+            --scopes "$SCOPES" --raw | tail -1)
+  board PUT /api/fleet/secrets/FORGEJO_TOKEN "$(jq -n --arg v "$token" '{value: $v}')" >/dev/null
+  say "fleet's token set on the board as FORGEJO_TOKEN"
+fi
+
+# 3. the webhook, judged from both sides: done only when Forgejo still has the hook this script
+#    made (its id is kept beside the password; Forgejo 17's list of site hooks comes back empty)
+#    and the board has a secret. Otherwise that hook goes, and a new secret is set on the board
+#    before the hook that signs with it is made, so a failure half way is redone, not doubled.
+[ -s "$PWFILE" ] || die "the site webhook needs $ME's Forgejo password in $PWFILE"
+HOOK=http://bot_board:8080/api/hooks/forgejo
+IDFILE=$(dirname "$PWFILE")/forgejo-hook-id
+admin() { curl -fsS -u "$ME:$(cat "$PWFILE")" -H 'Content-Type: application/json' "$@"; }
+id=$(cat "$IDFILE" 2>/dev/null || true)
+if [ -n "$id" ] && admin "$FORGE/api/v1/admin/hooks/$id" 2>/dev/null | jq -e --arg u "$HOOK" '.config.url == $u' >/dev/null \
+   && board GET /api/hooks/forgejo | jq -e '.configured' >/dev/null; then
+  say "the site webhook to the board is there"
+else
+  [ -z "$id" ] || admin -X DELETE "$FORGE/api/v1/admin/hooks/$id" >/dev/null 2>&1 || true
+  secret=$(openssl rand -hex 32)
+  board PUT /api/hooks/forgejo "$(jq -n --arg s "$secret" '{secret: $s}')" >/dev/null
+  admin -X POST "$FORGE/api/v1/admin/hooks" \
+    -d "$(jq -n --arg s "$secret" --arg u "$HOOK" '{type: "forgejo", active: true, branch_filter: "*",
+          config: {url: $u, content_type: "json", secret: $s},
+          events: ["issues", "issue_comment", "pull_request", "pull_request_review_approved",
+                   "pull_request_review_rejected", "pull_request_review_comment", "pull_request_sync",
+                   "pull_request_label", "pull_request_comment", "pull_request_review_request"]}')" \
+    | jq -r .id > "$IDFILE"
+  say "site webhook made: every repository's events reach the board"
+fi
+
+host=$($COMPOSE exec -T forgejo printenv FORGEJO__server__ROOT_URL 2>/dev/null || echo "$FORGE/")
+say "done. Forgejo is at ${host%/}; sign in there as $ME."
+say "Next: write that address into your workspace's knowledge base, so the bots find it,"
+say "and bring a repository over (docs/forgejo-setup.md, step 5): add fleet as a write collaborator."

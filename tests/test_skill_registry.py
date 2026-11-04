@@ -1,5 +1,5 @@
-"""The skill registry and bot profiles: fleet-wide skills, write-once profiles, a profile
-set once per bot and read at the start of a session. Run with python -m unittest discover -s tests."""
+"""The skill registry and bot profiles: fleet-wide skills, profiles edited in place and
+revisioned (#397), a profile set once per bot and read at the start of a session. Run with python -m unittest discover -s tests."""
 import os
 import tempfile
 import threading
@@ -63,7 +63,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(sorted(skills["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager"])
         self.assertEqual(set(profiles), {"developer", "artist", "lore-writer", "product-manager", "architect"})
         dev = profiles["developer"]
-        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertEqual(dev["skills"], [{"name": "github-lifecycle", "mandatory": False}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertTrue(dev["responsibilities"].startswith("Work the threads"))
         self.assertTrue(dev["focus"] and dev["avoid"] and dev["role"])
         self.assertEqual(dev["clones"], [])        # a seeded profile is not its own clone
@@ -115,7 +115,7 @@ class Registry(unittest.TestCase):
     def test_base_comes_after_the_profiles_own_and_a_listing_changes_nothing(self):
         self.make_base()
         jane = self.add_bot("jane", "developer")
-        self.assertEqual([s["name"] for s in self.me(jane)["skills"]], ["github-lifecycle", "house-style"])
+        self.assertEqual([s["name"] for s in self.me(jane)["skills"]], ["github-lifecycle", "forgejo-lifecycle", "house-style"])
         # a profile that lists it, not even as mandatory: once, and still mandatory
         self.client.post("/api/profiles", headers=self.human, json={"name": "lister", "role": "Lists it.", "skills": [
             {"name": "house-style"}, {"name": "github-lifecycle"}]}).raise_for_status()
@@ -123,11 +123,35 @@ class Registry(unittest.TestCase):
         self.assertEqual([(s["name"], s["mandatory"]) for s in self.me(lee)["skills"]],
                          [("house-style", True), ("github-lifecycle", False)])
         profile = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
-        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertEqual(profile["skills"], [{"name": "github-lifecycle", "mandatory": False}, {"name": "forgejo-lifecycle", "mandatory": False}])
         self.assertEqual([s["name"] for s in profile["base_skills"]], ["house-style"])
-        self.assertEqual(self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]["base_skills"], [])
-        self.assertIn("Every bot also has", self.client.get("/fleet/profiles/developer").text)
-        self.assertNotIn("Every bot also has", self.client.get("/fleet/profiles/lister").text)
+        lister = self.client.get("/api/profiles/lister", headers=self.bot).json()["profile"]
+        self.assertEqual([s["name"] for s in lister["base_skills"]], ["house-style"])     # listed or not, it is base
+        self.assertIn('id="base-skills">Base skills, every bot has them: <a class="chip" href="/fleet/skills/house-style">',
+                      self.client.get("/fleet/profiles/developer").text)
+        # listed by the profile too, it is still shown as base, and not as one of the profile's own (#396)
+        page = self.client.get("/fleet/profiles/lister").text
+        self.assertIn('id="base-skills">Base skills, every bot has them: <a class="chip" href="/fleet/skills/house-style">', page)
+        self.assertNotIn('name="skill" value="house-style"', page)
+        self.assertIn("Skills · 1", page)
+
+    def test_the_create_form_shows_base_skills_ticked_and_fixed(self):
+        # #396: ticked, disabled and noted on the form; the form's script never sends them
+        self.make_base()
+        page = self.client.get("/fleet/profiles/new").text
+        self.assertIn('name="skill" value="house-style" aria-label="include house-style" checked disabled>', page)
+        self.assertIn('name="mandatory" value="house-style" aria-label="house-style mandatory" checked disabled>', page)
+        self.assertIn("base: every bot has it. How to write.", page)
+        self.assertLess(page.index('value="house-style"'), page.index('value="github-lifecycle"'))
+        self.assertRegex(page, r'name="skill" value="github-lifecycle" aria-label="include github-lifecycle">')
+        self.assertIn("input[name=skill]:checked:not(:disabled)", page)
+        # what the form posts, without the base skill: the page lists it under base skills
+        self.client.post("/api/profiles", headers=self.human, json={
+            "name": "newbie", "role": "New.", "skills": [{"name": "github-lifecycle", "mandatory": True}]}).raise_for_status()
+        self.assertEqual(self.client.get("/api/profiles/newbie", headers=self.bot).json()["profile"]["skills"],
+                         [{"name": "github-lifecycle", "mandatory": True}])
+        self.assertIn('Base skills, every bot has them: <a class="chip" href="/fleet/skills/house-style">',
+                      self.client.get("/fleet/profiles/newbie").text)
 
     def test_an_edit_keeps_base_unless_it_says_false_and_history_shows_when(self):
         self.make_base()
@@ -299,7 +323,7 @@ class Registry(unittest.TestCase):
 
     # ---- profiles
 
-    def test_a_profile_is_created_from_a_template_or_a_profile_and_never_edited(self):
+    def test_a_profile_is_created_from_a_template_or_a_profile_and_never_renamed(self):
         body = {"name": "reviewer", "role": "Reviews pull requests.", "responsibilities": "Read every PR.",
                 "focus": "Correctness.", "avoid": "Style nits.", "skills": [{"name": "github-lifecycle"}],
                 "from": "developer"}
@@ -311,8 +335,8 @@ class Registry(unittest.TestCase):
         self.assertEqual((p["from"], p["created_by"], p["bots"], p["clones"]), ("developer", "op", [], []))
         self.assertEqual(self.profiles()["developer"]["clones"], ["reviewer"])
         self.assertEqual(sorted(self.skills()["github-lifecycle"]["used_by"]), ["architect", "developer", "product-manager", "reviewer"])
-        # there is no edit: not PUT, not PATCH
-        self.assertIn(self.client.put("/api/profiles/reviewer", headers=self.human, json=body).status_code, (404, 405))
+        self.assertEqual(p["revision"], 1)
+        # no PATCH, and no rename: PUT edits the profile at its name (below)
         self.assertIn(self.client.patch("/api/profiles/reviewer", headers=self.human, json=body).status_code, (404, 405))
         # a name is taken for ever, a role is required, a skill must exist
         r = self.client.post("/api/profiles", headers=self.human, json=body)
@@ -329,7 +353,121 @@ class Registry(unittest.TestCase):
         self.assertEqual(self.client.get("/api/profiles/reviewer", headers=self.bot).status_code, 404)
         self.assertEqual(self.client.post("/api/profiles", headers=self.human, json=body).status_code, 409)
 
+    def test_a_profile_is_edited_in_place_and_its_bots_follow_at_their_next_prompt(self):
+        # #397: the acceptance case. developer lists github-lifecycle; jane carries developer.
+        jane = self.add_bot("jane", "developer")
+        before = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
+        self.assertEqual(before["revision"], 1)
+        self.assertIn("github-lifecycle", [s["name"] for s in before["skills"]])
+        guide = self.client.get("/agents.md", headers=jane)
+        self.assertIn("github-lifecycle@", guide.text)
+        edit = {"role": before["role"], "responsibilities": before["responsibilities"], "focus": "Forgejo first.",
+                "avoid": before["avoid"], "skills": [s for s in before["skills"] if s["name"] != "github-lifecycle"],
+                "base_revision": 1, "reason": "the fleet moved to Forgejo"}
+        # humans and admin bots only
+        self.assertEqual(self.client.put("/api/profiles/developer", headers=self.bot, json=edit).status_code, 403)
+        self.assertEqual(self.client.put("/api/profiles/developer", headers=jane, json=edit).status_code, 403)
+        r = self.client.put("/api/profiles/developer", headers=self.human, json=edit)
+        self.assertEqual(r.status_code, 200, r.text)
+        p = r.json()["profile"]
+        self.assertEqual(p["revision"], 2)
+        self.assertNotIn("github-lifecycle", [s["name"] for s in p["skills"]])
+        self.assertEqual(p["focus"], "Forgejo first.")
+        self.assertEqual(p["bots"], ["jane"])
+        p = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
+        self.assertEqual(p["revision"], 2)
+        self.assertNotIn("github-lifecycle", [s["name"] for s in p["skills"]])
+        self.assertNotIn("developer", self.skills()["github-lifecycle"]["used_by"])
+        # jane's next prompt: the composed guide moved and no longer carries the skill, and the
+        # skills list the launcher writes from no longer names it (the launcher prunes it, #346)
+        after = self.client.get("/agents.md", headers=jane)
+        self.assertNotEqual(after.headers["X-Agents-Revision"], guide.headers["X-Agents-Revision"])
+        self.assertNotIn("github-lifecycle@", after.text)
+        self.assertIn("Forgejo first.", after.text)
+        me = self.client.get("/api/me/profile?json", headers=jane).json()
+        self.assertNotIn("github-lifecycle", [s["name"] for s in me["skills"]])
+        self.assertEqual(me["profile"]["revision"], 2)
+        # no bot was restarted: nothing asked of the keeper
+        want = self.client.get("/api/fleet/hosts/box/want", headers=self.keeper).json()
+        self.assertFalse(any(w.get("reset") for w in want.get("bots", [])), want)
+        # history keeps both revisions, newest first, with who and why
+        h = self.client.get("/api/profiles/developer/history", headers=self.bot).json()["revisions"]
+        self.assertEqual([(x["revision"], x["author"], x["reason"]) for x in h], [(2, "op", "the fleet moved to Forgejo"), (1, "board", "created")])
+        self.assertIn("github-lifecycle", [s["name"] for s in h[1]["skills"]])
+        self.assertEqual(self.client.get("/api/profiles/nope/history", headers=self.bot).status_code, 404)
+        # a stale base_revision is a conflict; a bad body a 422; the profile stays at 2
+        r = self.client.put("/api/profiles/developer", headers=self.human, json=edit)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("at revision 2, not 1", r.json()["error"])
+        r = self.client.put("/api/profiles/developer", headers=self.human, json={**edit, "base_revision": 2, "role": ""})
+        self.assertEqual(r.status_code, 422, r.text)
+        r = self.client.put("/api/profiles/developer", headers=self.human, json={**edit, "base_revision": 2, "skills": [{"name": "nope"}]})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(self.client.put("/api/profiles/nope", headers=self.human, json=edit).status_code, 404)
+        self.assertEqual(self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]["revision"], 2)
+        # the skill nothing lists any more can go; one a profile still lists cannot
+        self.assertEqual(self.client.get("/api/skills/github-lifecycle?json", headers=self.bot).json()["skill"]["used_by"],
+                         ["architect", "product-manager"])
+        r = self.client.request("DELETE", "/api/skills/github-lifecycle", headers=self.human, json={"base_revision": 1, "reason": "x"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("edit them to drop it", r.json()["error"])
+
+    def test_an_edit_that_makes_a_profile_specialized_needs_its_bots_bound(self):
+        # #397 keeps the channel rule: a specialized profile's bots claim only in their channels
+        self.add_bot("jane", "developer")
+        p = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
+        edit = {k: p[k] for k in ("role", "responsibilities", "focus", "avoid", "skills")}
+        r = self.client.put("/api/profiles/developer", headers=self.human,
+                            json={**edit, "specialized": True, "base_revision": 1, "reason": "artists only"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("jane", r.json()["error"])
+        # specialized left out: unchanged; bound to a channel: allowed
+        r = self.client.put("/api/profiles/developer", headers=self.human, json={**edit, "base_revision": 1, "reason": "same"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json()["profile"]["specialized"])
+        self.client.put("/api/fleet/bots/jane/channels", headers=self.human, json={"channels": ["proj"]}).raise_for_status()
+        r = self.client.put("/api/profiles/developer", headers=self.human,
+                            json={**edit, "specialized": True, "base_revision": 2, "reason": "artists only"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["profile"]["specialized"])
+        self.assertTrue(registry.is_specialized("developer"))
+        # a specialized bot cannot be unbound (fleet keeps that); a profile with no bots can still be deleted
+        r = self.client.put("/api/fleet/bots/jane/channels", headers=self.human, json={"channels": []})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.client.delete("/api/profiles/artist", headers=self.human).status_code, 200)
+
+    def test_a_board_from_before_profile_history_gets_revision_1_and_a_first_history_row(self):
+        # #397 migration: profiles had no revision column and no history; init() adds both,
+        # with the current text as revision 1, and leaves a profile already migrated alone
+        self.client.put("/api/profiles/developer", headers=self.human, json={
+            "role": "Edited.", "skills": [], "base_revision": 1, "reason": "once"}).raise_for_status()
+        c = db.conn()
+        with db._write_lock:
+            c.execute("DROP TABLE profile_history")
+            c.execute("ALTER TABLE profiles DROP COLUMN revision")
+            c.commit()
+        registry.init()
+        p = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
+        self.assertEqual((p["revision"], p["role"]), (1, "Edited."))
+        h = self.client.get("/api/profiles/developer/history", headers=self.bot).json()["revisions"]
+        self.assertEqual([(x["revision"], x["role"], x["reason"]) for x in h], [(1, "Edited.", "created")])
+        registry.init()        # again: nothing doubled
+        self.assertEqual(len(self.client.get("/api/profiles/artist/history", headers=self.bot).json()["revisions"]), 1)
+        # the template's specialized flag is applied only to a profile nobody edited
+        self.client.put("/api/profiles/artist", headers=self.human, json={
+            "role": "Not special.", "skills": [], "specialized": False, "base_revision": 1, "reason": "x"}).raise_for_status()
+        registry.init()
+        self.assertFalse(self.client.get("/api/profiles/artist", headers=self.bot).json()["profile"]["specialized"])
+
+    def github_mandatory(self, headers):
+        """The seeds name no forge (#394): a test that wants a mandatory skill marks one on the profile, in place (#397)."""
+        p = self.client.get("/api/profiles/developer", headers=headers).json()["profile"]
+        self.client.put("/api/profiles/developer", headers=headers, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": p["revision"],
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
+
     def test_the_profile_page_carries_the_text_a_bot_reads(self):
+        self.github_mandatory(self.human)
         p = self.client.get("/api/profiles/developer", headers=self.bot).json()["profile"]
         self.assertIn("# Your profile: developer", p["text"])
         self.assertIn("**github-lifecycle** (mandatory)", p["text"])
@@ -337,7 +475,7 @@ class Registry(unittest.TestCase):
 
     # ---- a bot's profile
 
-    def test_a_bot_gets_its_profile_when_added_and_cannot_be_given_another(self):
+    def test_a_bot_gets_its_profile_when_added_and_a_human_can_move_it_to_another(self):
         r = self.client.put("/api/fleet/bots/jane", headers=self.human,
                             json={"host": "box", "run": True, "harness": "claude", "workspace": "proj", "profile": "nobody"})
         self.assertEqual(r.status_code, 409, r.text)
@@ -355,12 +493,38 @@ class Registry(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": False}).raise_for_status()
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": True}).raise_for_status()
         self.assertEqual(self.profiles()["developer"]["bots"], ["jane"])
-        # another profile: refused, and nothing changes
+        # another profile (#395): a specialized one still needs channels, and nothing changes
         r = self.client.put("/api/fleet/bots/jane", headers=self.human,
                             json={"host": "box", "run": True, "profile": "artist"})
         self.assertEqual(r.status_code, 409, r.text)
-        self.assertIn("set once", r.json()["error"])
+        self.assertIn("specialized", r.json()["error"])
         self.assertEqual(self.profiles()["developer"]["bots"], ["jane"])
+        # a general one moves her, and back
+        jane = self.register("jane", "claude-code", "proj")
+        before = self.client.get("/agents.md", headers=jane)
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": True, "profile": "architect"}).raise_for_status()
+        self.assertEqual(self.profiles()["architect"]["bots"], ["jane"])
+        self.assertEqual(self.profiles()["developer"]["bots"], [])
+        # her guide moves, so her launcher gives the session the new one and rewrites her skills
+        after = self.client.get("/agents.md", headers=jane)
+        self.assertNotEqual(after.headers["X-Agents-Revision"], before.headers["X-Agents-Revision"])
+        self.assertIn("# Your profile: architect", after.text)
+        self.assertEqual(self.client.get("/api/me/profile?json", headers=jane).json()["profile"]["name"], "architect")
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": True, "profile": "developer"}).raise_for_status()
+        # the profile-only call changes the profile and leaves the rest of what was asked as it is
+        self.client.put("/api/fleet/bots/jane", headers=self.human,
+                        json={"host": "box", "run": False, "threads": "handoff"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/jane/profile", headers=jane, json={"profile": "architect"}).status_code, 403)
+        r = self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "nobody"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "architect"}).raise_for_status()
+        row = db.conn().execute("SELECT profile, run, threads FROM fleet_bots WHERE handle='jane'").fetchone()
+        self.assertEqual(tuple(row), ("architect", 0, "handoff"))
+        self.client.put("/api/fleet/bots/jane/profile", headers=self.human, json={"profile": "developer"}).raise_for_status()
+        self.assertEqual(self.client.put("/api/fleet/bots/nobody/profile", headers=self.human,
+                                         json={"profile": "developer"}).status_code, 409)
         # the same profile again is fine
         self.assertEqual(self.client.put("/api/fleet/bots/jane", headers=self.human,
                                          json={"host": "box", "run": True, "profile": "developer"}).status_code, 200)
@@ -369,12 +533,12 @@ class Registry(unittest.TestCase):
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("jane", r.json()["error"])
         # the roster says what each bot is
-        jane = self.register("jane", "claude-code", "proj")
         roster = {a["handle"]: a for a in self.client.get("/api/agents", headers=self.human).json()["agents"]}
         self.assertEqual(roster["jane"]["profile"], "developer")
         self.assertIsNone(roster["tarzan"]["profile"])
         self.assertEqual(self.client.get("/api/agents/jane", headers=self.bot).json()["agent"]["profile"], "developer")
         # and a new session reads the profile as text, mandatory skills called out
+        self.github_mandatory(self.human)
         r = self.client.get("/api/me/profile", headers=jane)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.headers["content-type"].startswith("text/plain"))
@@ -385,7 +549,8 @@ class Registry(unittest.TestCase):
         self.assertIn("When a skill you have changes, your launcher says so in a prompt", r.text)
         j = self.client.get("/api/me/profile?json", headers=jane).json()
         self.assertEqual(j["profile"]["name"], "developer")
-        self.assertEqual([(s["name"], s["mandatory"], s["revision"]) for s in j["skills"]], [("github-lifecycle", True, 1)])
+        self.assertEqual([(s["name"], s["mandatory"], s["revision"]) for s in j["skills"]],
+                         [("github-lifecycle", True, 1), ("forgejo-lifecycle", False, 1)])
         self.assertNotIn("kind", j["skills"][0])
 
     def test_a_bots_page_shows_its_profile(self):
@@ -393,6 +558,7 @@ class Registry(unittest.TestCase):
         self.client.put("/api/fleet/bots/jane", headers=self.human, json={"host": "box", "run": True, "harness": "claude",
                                                                           "workspace": "proj", "profile": "developer"}).raise_for_status()
         self.register("jane", "claude-code", "proj")
+        self.github_mandatory(self.human)
         page = self.client.get("/a/jane").text
         self.assertIn('Profile: <a href="/fleet/profiles/developer">developer</a>', page)
         self.assertIn("A software developer", page)

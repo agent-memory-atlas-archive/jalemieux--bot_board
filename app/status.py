@@ -66,6 +66,20 @@ def dismiss(key: str, agent: dict) -> dict:
     return rollup(agent=agent)
 
 
+def dismiss_mentions(agent: dict) -> dict:
+    """Clear every plain mention of this human at once, as a "done" on each would; what a bot
+    waits on them for stays. asks() lists at most 30, so it is asked again until none is left."""
+    for _ in range(20):
+        items = asks(agent)["mentions"]
+        if not items:
+            break
+        with db._write_lock, db.conn() as c:
+            _ensure_table(c)
+            c.executemany("INSERT OR REPLACE INTO status_dismissals(key,text,by_agent,at) VALUES (?,?,?,?)",
+                          [(x["key"], x["text"], agent["id"], db.now()) for x in items])
+    return rollup(agent=agent)
+
+
 def restore(key: str, agent: dict | None = None) -> dict:
     with db._write_lock, db.conn() as c:
         _ensure_table(c)
@@ -81,7 +95,7 @@ def _split(attention: list) -> tuple[list, list]:
     rows = {r["key"]: dict(r) for r in c.execute(
         "SELECT d.key, d.at, a.handle FROM status_dismissals d LEFT JOIN agents a ON a.id=d.by_agent")}
     current = {a["key"] for a in attention}
-    gone = [k for k in rows if k not in current and not k.startswith("m")]   # m<id>: a message, see asks()
+    gone = [k for k in rows if k not in current and k[:1] not in ("m", "w")]   # m<id>, w<id>: a message, see asks()
     if gone:
         with db._write_lock, c:
             c.executemany("DELETE FROM status_dismissals WHERE key=?", [(k,) for k in gone])
@@ -191,16 +205,16 @@ def _routines(attention: list) -> list:
             attention.append(_item(f"routine {r['name']} failed: {r.get('failure') or 'see its page'}", href, "routines"))
         elif r["state"] == "enabled" and row["problem"]:
             attention.append(_item(f"routine {r['name']}: {row['problem']}", href, "routines"))
-        elif r["state"] == "paused" and not r.get("approved_by") and not row["problem"]:
-            # a version nobody has said yes to: the board asks, so it does not rest on a bot's mention (#223)
-            attention.append(_item(f"routine {r['name']} (version {r['version']}) waits for your yes"
-                                   + (" in its thread" if r.get("thread") else ""),
-                                   f"/t/{r['thread']}" if r.get("thread") else href, "routines"))
         out.append(row)
+    waiting = [r for r in rows if r.get("waiting") and not r.get("problem")]
     ups = [r for r in rows if r.get("upgrade")]
-    if ups:     # one item for all of them: they are approved in one step (#242)
-        attention.append(_item(f"{len(ups)} routine upgrade(s) to recipe version {ups[0]['upgrade']['to']} "
-                               "wait for your yes", "/routines#upgrades", "routines"))
+    if waiting or ups:
+        # versions nobody has said yes to, and drafted recipe upgrades: one item, one page, one click each (#380, #242)
+        n = len(waiting) + len(ups)
+        attention.append(_item(f"{n} routine change{'s' if n != 1 else ''} wait{'' if n != 1 else 's'} for your yes: "
+                               + ", ".join(f"{r['name']} v{r['version']}" for r in waiting)
+                               + (", " if waiting and ups else "") + ", ".join(f"{r['name']} (recipe v{r['upgrade']['to']})" for r in ups),
+                               "/routines#approvals", "routines"))
     stalled = [r["name"] for r in out if r["state"] == "enabled"]
     if stalled and (seen is None or seen > RUNNER_STALE):    # one item: it is the runner that is down
         attention.append(_item(f"{len(stalled)} enabled routine(s) ({', '.join(stalled)}) but the runner "
@@ -222,22 +236,29 @@ def _needs(meta: dict, handle: str) -> bool:
 def asks(agent: dict) -> dict:
     """What bots wait on this human for (#223). waiting: messages marked meta.needs=<handle>
     (or tagged needs-human with an @mention of them); each stays until the human posts in that
-    thread after it, its author posts meta.resolved there, or it is dismissed. mentions: the
+    thread after it, its author posts meta.resolved there, the thread is completed after it, or it
+    is dismissed. mentions: the
     other @mentions of the last MENTION_DAYS days the human has not posted after; they do not
     count on the bell."""
     c = db.conn()
     me, handle = agent["id"], agent["handle"]
     since = (datetime.now(timezone.utc) - timedelta(days=MENTION_DAYS)).isoformat(timespec="seconds")
-    gone = {r["key"] for r in c.execute("SELECT key FROM status_dismissals WHERE key LIKE 'm%'")} \
+    marks = {r["key"] for r in c.execute("SELECT key FROM status_dismissals WHERE key LIKE 'm%' OR key LIKE 'w%'")} \
         if c.execute("SELECT 1 FROM sqlite_master WHERE name='status_dismissals'").fetchone() else set()
+    gone = {k for k in marks if k[0] == "m"}          # dismissed by the human: off both lists
+    settled = {k for k in marks if k[0] == "w"}       # its thread was completed: no longer an ask (#448)
     # the last time this human posted in each thread, and where an asker said it is resolved
     mine = {r["t"]: r["last"] for r in c.execute(
         "SELECT thread_id t, MAX(id) last FROM messages WHERE agent_id=? GROUP BY thread_id", (me,))}
     def answered(m):
         return mine.get(m["thread_id"] or m["id"], 0) > m["id"]
-    def resolved(m):
+    def resolved(m):     # its asker said so, or the thread was completed after it: it blocks nobody (#448)
+        t = m["thread_id"] or m["id"]
+        if f"w{m['id']}" in settled:
+            return True
         return c.execute("SELECT 1 FROM messages WHERE thread_id=? AND id>? AND agent_id=? AND meta LIKE '%\"resolved\"%'"
-                         " AND json_extract(meta,'$.resolved')=1", (m["thread_id"] or m["id"], m["id"], m["agent_id"])).fetchone()
+                         " AND json_extract(meta,'$.resolved')=1", (t, m["id"], m["agent_id"])).fetchone() or \
+            c.execute("SELECT 1 FROM thread_completions WHERE thread_id=? AND through_id>=?", (t, m["id"])).fetchone()
     q = ("SELECT m.id, m.thread_id, m.agent_id, m.body, m.meta, m.created_at, a.handle author, b.slug channel"
          " FROM messages m JOIN agents a ON a.id=m.agent_id JOIN boards b ON b.id=m.board_id")
     waiting, seen = [], set()

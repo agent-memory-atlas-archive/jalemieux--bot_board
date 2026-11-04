@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import db
 from . import fleet as fleet_mod
+from . import registry
 from . import versions as versions_mod
 
 MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
@@ -51,21 +52,9 @@ border-radius:6px;padding:5px 9px;font:12px var(--mono)}
 .topnav .links a[aria-current]{background:var(--sel);color:var(--ink)}
 .topnav .divider{width:1px;height:22px;background:var(--line);flex:none}
 /* fleet/projects/routines: the human admin console */
-.topnav .admins{position:relative}
-.topnav .admins>summary{list-style:none;display:flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:8px;cursor:pointer;
-background:var(--human-soft);border:1px solid color-mix(in srgb,var(--human) 32%,transparent);color:var(--human);font:600 12.5px var(--mono);white-space:nowrap}
-.topnav .admins>summary::-webkit-details-marker{display:none}
-.topnav .admins>summary:hover{background:color-mix(in srgb,var(--human) 18%,var(--human-soft))}
-.topnav .admins>summary svg{flex:none}
-.topnav .admins .menu{position:absolute;top:calc(100% + 6px);right:0;width:300px;background:var(--panel);border:1px solid var(--line);
-border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.14);padding:6px;display:flex;flex-direction:column;gap:2px;z-index:20}
-.topnav .admins .menu .who{font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.07em;color:var(--dim);padding:6px 10px 4px}
-.topnav .admins .menu a{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:7px;color:var(--ink);white-space:normal}
-.topnav .admins .menu a:hover{background:var(--sel);text-decoration:none}
-.topnav .admins .menu a b{font:600 13px var(--mono)}
-.topnav .admins .menu a span{font:12px var(--sans);color:var(--dim)}
-.topnav .admins .menu a[aria-current]{background:var(--human-soft)}
-.topnav .admins .menu a[aria-current] b{color:var(--human)}
+.topnav .links a.tab{color:var(--ink)}
+.topnav .links a.tab .n{color:var(--dim)}
+.topnav .links a.x{margin-left:10px}
 .topnav .me{margin-left:auto;display:flex;align-items:center;gap:14px;font:12px var(--mono);color:var(--dim);white-space:nowrap}
 .topnav .me a{color:var(--dim)}
 .topnav .me .dot{margin-right:6px}
@@ -75,36 +64,24 @@ TOPNAV_RESPONSIVE_CSS = """@media (max-width:1100px){.topnav .links a.x{display:
 .topnav .links{display:none;position:absolute;top:48px;right:16px;flex-direction:column;background:var(--panel);
 border:1px solid var(--line);border-radius:9px;padding:4px;box-shadow:0 6px 24px rgba(0,0,0,.15);min-width:200px}
 .topnav .links.open{display:flex}
-.topnav .links a.x{display:block}
+.topnav .links a.x{display:block;margin-left:0}
 #navmore{display:inline-block}
-#whoami,.topnav .me .count{display:none}}
+#whoami{display:none}}
 #navmore{display:none;background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:4px 9px;font:12px var(--mono);cursor:pointer}
 @media (max-width:860px){#navmore{display:inline-block}}
 @media (max-width:700px){.topnav form{display:none}}"""
 
 
 
-def admin_segment(here: str = "") -> str:
-    """The operator pages behind one Manage menu: a <details>, so it opens without script;
-    a click elsewhere or Escape closes it."""
-    gear = ('<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
-            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle>'
-            '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 '
-            '1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 '
-            '1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 '
-            '9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 '
-            '1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06'
-            '.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>')
-    caret = ('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '
-             'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>')
-    cur = ' aria-current="page"'
-    items = "".join(f'<a href="{href}"{cur if href == here else ""}><b>{text}</b><span>{about}</span></a>'
-                    for href, text, about in ADMIN_LINKS)
-    return ('<details class="admins" id="manage"><summary>' + gear + "Manage" + caret + "</summary>"
-            '<nav class="menu" aria-label="Manage"><div class="who">Operators only</div>' + items + "</nav></details>"
-            "<script>(function(){var d=document.getElementById('manage');if(!d)return;"
-            "document.addEventListener('click',function(e){if(d.open&&!d.contains(e.target))d.open=false;});"
-            "document.addEventListener('keydown',function(e){if(e.key==='Escape'&&d.open){d.open=false;d.querySelector('summary').focus();}});})();</script>")
+def nav_tabs(here: str = "", running: str = "") -> str:
+    """The board and the operator pages as tabs in the top bar (thread 9918): what was the Manage
+    menu. `running` is the fleet's count, shown in its tab on the board page."""
+    out = []
+    for href, text, about in (("/", "Board", "Channels and conversations"),) + ADMIN_LINKS:
+        cur = ' aria-current="page"' if href == here else ""
+        extra = f" {running}" if href == "/fleet" and running else ""
+        out.append(f'    <a href="{href}" class="tab" title="{about}"{cur}>{text}{extra}</a>')
+    return "\n".join(out)
 
 
 def util_links(here: str = "") -> str:
@@ -153,6 +130,11 @@ padding:12px 15px;margin-bottom:9px}
 .msg .head{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;font-size:12px;
 font-family:var(--mono);color:var(--dim)}
 .msg .head .who{color:var(--ink);font-weight:600;font-size:13px}
+.msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.msg .files a.file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:6px 10px;border:1px solid var(--line);
+border-radius:8px;background:var(--panel);color:var(--ink);font:12.5px var(--sans);text-decoration:none}
+.msg .files a.file:hover{border-color:var(--accent)}
+.msg .files .sz{color:var(--dim);font:11px var(--mono)}
 .msg .head .kind{background:var(--accent-soft);color:var(--accent);
 border-radius:4px;padding:1px 6px;font-size:11px}
 .msg .body{margin-top:7px;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -243,7 +225,7 @@ def render_body(body: str) -> str:
 
 ADMIN_ALERT_JS = """
 (function () {
-  var showDismissed = false, tab = 'needs';   // needs: what waits on you and the alerts; mentions: the rest (#223)
+  var showDismissed = false;   // the bell holds alerts; what people ask of you is in the rail's Mentions (#445)
   function token() { try { var me = JSON.parse(localStorage.getItem('bb.me')); return me && me.token; } catch (err) { return null; } }
   async function act(method, path, body) {
     var t = token(), headers = {'Content-Type': 'application/json'};
@@ -285,35 +267,25 @@ ADMIN_ALERT_JS = """
   function render(st) {
     var items = (st && st.attention) || [], gone = (st && st.dismissed) || [];
     var waiting = (st && st.waiting) || [], mentions = (st && st.mentions) || [];
-    var n = items.length + waiting.length;    // mentions do not count on the bell
+    var n = items.length;    // asks and mentions are counted in the rail, not here
     var count = document.getElementById('bell-count');
     if (count) { count.textContent = n || ''; count.hidden = !n; }
+    // the board page's rail shows the asks and mentions from the same answer
+    if (st) window.dispatchEvent(new CustomEvent('bb:status', {detail: st}));
     var box = document.getElementById('inbox');
     if (box) {
       box.replaceChildren();
-      if (st && (st.waiting || st.mentions)) {    // a signed-in human: two tabs
-        var tabs = document.createElement('div'); tabs.className = 'inbox-tabs'; tabs.setAttribute('role', 'tablist');
-        [['needs', 'Needs you' + (n ? ' · ' + n : '')], ['mentions', 'Mentions' + (mentions.length ? ' · ' + mentions.length : '')]]
-          .forEach(function (t) {
-            var b = document.createElement('button'); b.type = 'button'; b.textContent = t[1]; b.setAttribute('role', 'tab');
-            b.setAttribute('aria-selected', tab === t[0] ? 'true' : 'false');
-            b.addEventListener('click', function (ev) { ev.stopPropagation(); tab = t[0]; render(st); });
-            tabs.appendChild(b);
-          });
-        box.appendChild(tabs);
-      }
-      if (tab === 'mentions' && st && st.mentions) {
-        if (mentions.length) box.appendChild(itemList(mentions));
-        else { var e0 = document.createElement('div'); e0.className = 'inbox-head'; e0.textContent = 'No mention waits for you.'; box.appendChild(e0); }
-        return;
-      }
       var h = document.createElement('div'); h.className = 'inbox-head';
-      h.textContent = n
-        ? n + (n === 1 ? ' thing needs a human' : ' things need a human')
-        : 'All clear. Nothing needs you.';
+      h.textContent = n ? n + (n === 1 ? ' alert: the fleet, workspaces and routines' : ' alerts: the fleet, workspaces and routines')
+                        : 'All clear. No alert.';
       box.appendChild(h);
-      if (waiting.length) box.appendChild(itemList(waiting, 'Waiting on you'));
-      if (items.length) box.appendChild(itemList(items, waiting.length ? 'Alerts' : ''));
+      if (items.length) box.appendChild(itemList(items, ''));
+      var asks = waiting.length + mentions.length;
+      if (asks) {
+        var to = document.createElement('a'); to.className = 'inbox-mentions'; to.href = '/mentions';
+        to.textContent = asks + (asks === 1 ? ' message names you' : ' messages name you') + (waiting.length ? ', ' + waiting.length + ' waiting on you' : '') + ': Mentions →';
+        box.appendChild(to);
+      }
       if (gone.length) {
         var t = document.createElement('button'); t.type = 'button'; t.className = 'inbox-toggle';
         t.textContent = (showDismissed ? 'hide ' : 'show ') + gone.length + ' dismissed';
@@ -362,6 +334,7 @@ ADMIN_ALERT_JS = """
       box.hidden = true; bell.setAttribute('aria-expanded', 'false');
     });
   }
+  window.bbStatusRefresh = refresh;
   refresh(); setInterval(refresh, 30000);
 })();
 """
@@ -387,9 +360,6 @@ background:var(--accent);color:#fff;font:600 10px/17px var(--mono);text-align:ce
 background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:10px 12px}
 .inbox .inbox-head{font:600 12px var(--mono);color:var(--ink);margin:0 0 6px}
 .inbox .inbox-sub{font:600 10px var(--mono);color:var(--dim);text-transform:uppercase;margin:8px 0 2px}
-.inbox .inbox-tabs{display:flex;gap:4px;margin:0 0 8px}
-.inbox .inbox-tabs button{background:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font:12px var(--mono);color:var(--dim);cursor:pointer}
-.inbox .inbox-tabs button[aria-selected=true]{background:var(--sel);color:var(--ink);border-color:var(--accent)}
 .inbox ul{list-style:none;margin:0;padding:0}
 .inbox li{display:flex;gap:10px;align-items:baseline;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px}
 .inbox li .where{font:600 10px var(--mono);color:var(--dim);text-transform:uppercase;flex:0 0 64px}
@@ -399,6 +369,7 @@ background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shad
 .inbox li .dismiss{flex:none;align-self:center;background:none;border:1px solid transparent;border-radius:6px;color:var(--dim);
 cursor:pointer;font:13px var(--mono);padding:1px 7px}
 .inbox li .dismiss:hover{border-color:var(--line);color:var(--ink);background:var(--sel)}
+.inbox .inbox-mentions{display:block;margin-top:10px;padding-top:8px;border-top:1px solid var(--line);font:12px var(--mono);color:var(--accent)}
 .inbox .inbox-toggle{margin-top:8px;background:none;border:0;padding:0;color:var(--dim);font:12px var(--mono);cursor:pointer;text-decoration:underline}
 .inbox ul.dismissed li{opacity:.65}
 .inbox ul.dismissed li .dismiss{font-size:11px}
@@ -507,11 +478,11 @@ def shell(board_name: str, title: str, content: str, here: str = "") -> str:
   <a class="brand" href="/">{e(board_name)}<span>/</span><em class="sub">bot collaboration</em></a>
   <span class="divider"></span>
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
-  <nav class="links" id="navlinks" aria-label="reference">
+  <nav class="links" id="navlinks" aria-label="pages">
+{nav_tabs(here)}
 {util_links(here)}
   </nav>
   <div class="me">
-    {admin_segment(here)}
     <span id="whoami"><a href="/">sign in on the board page to post</a></span>
     {BELL_HTML}
     <button type="button" id="navmore" aria-expanded="false" aria-controls="navlinks">menu ▾</button>
@@ -534,8 +505,12 @@ def message_html(m: dict, *, show_board: bool = True, indent: bool = False) -> s
         f'style="display:block;max-width:100%;max-height:320px" loading="lazy">'
         for a in m.get("attachments", []) if a.get("media_type", "").startswith("image/")
     )
-    attachments = " ".join(
-        f'<a href="{e(a["url"])}" data-attachment download="{e(a["name"])}">{e(a["name"])} ({a["size_bytes"]} bytes)</a>'
+    def size(n):
+        return f"{n} B" if n < 1024 else f"{round(n / 1024)} KB" if n < 1048576 else f"{n / 1048576:.1f} MB"
+    files = "".join(     # a chip under the message, as on the board page (thread 10173)
+        f'<a class="file" href="{e(a["url"])}" data-attachment download="{e(a["name"])}" title="download {e(a["name"])}">'
+        f'<span class="ic" aria-hidden="true">{"🖼" if a.get("media_type", "").startswith("image/") else "📄"}</span>'
+        f'<b>{e(a["name"])}</b><span class="sz">{size(a["size_bytes"])}</span></a>'
         for a in m.get("attachments", [])
     )
     if m.get("meta"):
@@ -553,12 +528,12 @@ def message_html(m: dict, *, show_board: bool = True, indent: bool = False) -> s
     {board}
     <span>{e(ago(m['created_at']))}</span>
   </div>
-  <div class="body">{render_body(m['body'])}{image_previews}</div>
+  <div class="body">{render_body(m['body'])}{image_previews}</div>{f'<div class="files">{files}</div>' if files else ""}
   {pickup}
   <div class="foot">
     <a href="/t/{m['thread_id'] or m['id']}#m{m['id']}">#{m['id']}</a>
     {'<span>re: #%d</span>' % m['reply_to'] if m.get('reply_to') else ''}
-    {tags}{meta_note}{attachments}
+    {tags}{meta_note}
   </div>
 </div>"""
 
@@ -612,6 +587,7 @@ button{font:inherit}
 nav.rail{background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;min-height:0;padding-bottom:14px}
 .rail h2{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
 margin:18px 16px 6px;display:flex;justify-content:space-between}
+.rail h2[hidden]{display:none}
 .rail ul{list-style:none;margin:0;padding:0 8px}
 .rail li{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;
 color:var(--dim);font-size:13.5px;line-height:1.3}
@@ -642,6 +618,11 @@ color:var(--dim);font:11.5px var(--mono);padding:2px 8px;cursor:pointer}
 .ugroup h3 button:hover,.ubar button:hover{color:var(--ink);background:var(--panel)}
 .ugroup .ctx{display:block;margin:0 0 2px;font:11.5px var(--mono);color:var(--dim);cursor:pointer;background:none;border:0;padding:0}
 .ugroup .ctx:hover{color:var(--accent)}
+.mrow{position:relative}.mrow .mdone{position:absolute;top:10px;right:18px;background:none;border:1px solid var(--line);
+border-radius:6px;padding:2px 9px;font:12px var(--mono);color:var(--dim);cursor:pointer}
+.mrow .mdone:hover{color:var(--ink);background:var(--panel)}
+.ugroup .ask{font:12.5px var(--sans);margin:2px 0 4px;color:var(--ink)}
+.ugroup .ask b{color:var(--accent);font:600 10.5px var(--mono);text-transform:uppercase;margin-right:4px}
 .ugroup .more{margin:2px 22px 0 70px;font:12px var(--mono);color:var(--dim)}
 .ubar{display:flex;align-items:center;gap:10px;margin-left:auto}
 .rail .empty{padding:4px 16px;font:12px var(--mono);color:var(--dim)}
@@ -710,6 +691,13 @@ font:600 11px var(--mono);color:var(--dim)}
 .replies{display:inline-flex;align-items:center;gap:8px;margin-top:6px;padding:3px 6px 3px 2px;border-radius:6px;
 border:1px solid transparent;cursor:pointer;font:12.5px var(--sans);background:none;color:var(--ink)}
 .replies:hover,.replies.open{border-color:var(--line);background:var(--panel)}
+@media(hover:hover){.replies.none{opacity:0}.msg:hover .replies.none,.replies.none:focus-visible,.replies.none.open{opacity:1}}
+.tcollapse{align-self:center;margin:0 -2px 0 -4px;width:20px;height:20px;padding:0;background:none;border:1px solid transparent;border-radius:5px;
+font:12px/1 var(--mono);color:var(--dim);cursor:pointer;opacity:.55}
+.tcollapse:hover,.tcollapse:focus-visible{opacity:1;border-color:var(--line);color:var(--ink);background:var(--panel)}
+.msg:hover .tcollapse{opacity:1}
+.fold.tcollapsed b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fold.tcollapsed{margin-left:61px;width:calc(100% - 77px)}    /* its caret under the chevron of an expanded thread */
 .replies .faces{display:inline-flex;margin-right:4px}
 .replies .faces b{width:20px;height:20px;border-radius:5px;background:var(--sel);border:2px solid var(--bg);
 margin-right:-6px;font:600 8.5px/16px var(--mono);text-align:center;color:var(--dim)}
@@ -739,6 +727,24 @@ aside.thread .msg:hover{background:var(--bg)}
 aside.thread .msg .av{width:28px;height:28px;font-size:9px}
 aside.thread .root{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:6px}
 aside.thread .count{padding:4px 16px 8px;font:11.5px var(--mono);color:var(--dim)}
+/* @board messages folded into one strip (#403): a viewer's choice, per browser */
+.fold{margin:4px 16px 4px 42px;width:calc(100% - 58px);display:flex;gap:10px;align-items:center;padding:5px 10px;border:1px dashed var(--line);
+border-radius:8px;color:var(--dim);font:12.5px var(--sans);cursor:pointer;background:var(--bg);text-align:left}
+.fold .what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fold:hover{border-color:var(--accent);color:var(--accent)}
+.fold b{font-weight:600;color:var(--ink)}
+.fold .last{margin-left:auto;font:11px var(--mono);white-space:nowrap}
+.fold .caret{font-size:11px}
+.fold[aria-expanded=true] .caret{transform:rotate(90deg);display:inline-block}
+.folded{display:none}.folded.open{display:block}
+aside.thread header .menu{position:relative;display:inline-block}
+aside.thread header .tools #tdisplay{font:12px var(--mono)}
+.pop{position:absolute;right:0;top:28px;width:260px;background:var(--panel);border:1px solid var(--line);border-radius:9px;
+padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:5;font:13px var(--sans);text-align:left}
+.pop[hidden]{display:none}
+.pop h4{margin:0 0 6px;font:11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.pop label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;color:var(--ink)}
+.pop .note{font:11px var(--mono);color:var(--dim);margin-top:8px}
 
 /* compose: one box under the stream, one under the thread; the human signs in once per browser */
 .compose{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 22px 12px;position:relative}
@@ -751,6 +757,26 @@ padding:4px 0;max-height:200px;overflow-y:auto;outline:none}
 .compose textarea::placeholder{color:var(--dim)}
 .compose .send{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 12px;font:600 12.5px var(--sans);cursor:pointer;flex:none}
 .compose .send:disabled{opacity:.5;cursor:default}
+.compose .attach{flex:none;position:relative;display:grid;place-items:center;width:30px;height:30px;border-radius:6px;cursor:pointer;
+font-size:15px;color:var(--dim)}
+.compose .attach:hover,.compose .attach:focus-within{background:var(--sel);color:var(--ink)}
+.compose .attach input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.compose .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.compose .box.drop{border-color:var(--accent);border-style:dashed;background:var(--accent-soft)}
+.compose .image-tools{margin-top:6px}
+.compose .chip{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:4px 4px 4px 8px;border:1px solid var(--line);
+border-radius:8px;background:var(--panel);font:12.5px var(--sans);color:var(--ink)}
+.compose .chip[hidden],.compose .chip .thumb[hidden]{display:none}
+.compose .chip .thumb{width:36px;height:36px;object-fit:cover;border-radius:5px}
+.compose .chip .image-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compose .chip .remove-image{border:0;background:none;color:var(--dim);font-size:16px;line-height:1;padding:2px 6px;border-radius:5px;cursor:pointer}
+.compose .chip .remove-image:hover{background:var(--sel);color:var(--ink)}
+.msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.msg .files a.file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+background:var(--panel);color:var(--ink);font:12.5px var(--sans);text-decoration:none}
+.msg .files a.file:hover{border-color:var(--accent);text-decoration:none}
+.msg .files a.file b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg .files .sz{color:var(--dim);font:11px var(--mono)}
 .compose .hint{display:flex;justify-content:space-between;gap:10px;margin-top:5px;font:11px var(--mono);color:var(--dim)}
 .compose .hint .err{color:var(--accent)}
 .compose .hint a{cursor:pointer}
@@ -817,7 +843,7 @@ var S = {
   unread: {}, seen: load('bb.seen', {}), open: load('bb.open', {}),
   cur: null, thread: null, cursor: INIT.stats.cursor,
   roots: [], newSince: 0, olderBefore: null, ctrl: null,
-  view: null, umsgs: {}, umore: {}
+  view: null, umsgs: {}, umore: {}, tmsgs: null
 };
 INIT.agents.forEach(function(a){ S.agents[a.handle] = a; });
 
@@ -965,16 +991,23 @@ function renderRail(){
     }).join('');
   };
   $('#channels').innerHTML = channelTree(lis);
-  $('#convs').innerHTML = lis(S.convs, true);
-  $('#nch').textContent = S.channels.reduce(function(a, b){ if (b.workspace && a.indexOf(b.workspace) < 0) a.push(b.workspace); return a; }, []).length; $('#ncv').textContent = S.convs.length;
+  var mine = function(c){ return !!ME && (c.participants || []).indexOf(ME.handle) >= 0; };
+  $('#dms').innerHTML = lis(S.convs.filter(mine), true);
+  $('#convs').innerHTML = lis(S.convs.filter(function(c){ return !mine(c); }), true);
+  $('#dmh').hidden = $('#dms').hidden = !ME;
+  $('#ndm').textContent = S.convs.filter(mine).length;
+  $('#nch').textContent = S.channels.reduce(function(a, b){ if (b.workspace && a.indexOf(b.workspace) < 0) a.push(b.workspace); return a; }, []).length; $('#ncv').textContent = S.convs.filter(function(c){ return !mine(c); }).length;
   var total = totalUnread(), uli = $('#unreadli');
   uli.className = (S.view === 'unread' ? 'active ' : '') + (total ? 'unread' : '');
   $('.badge', uli).hidden = !total; $('.badge', uli).textContent = total > 999 ? '999+' : total;
+  var mli = $('#mentionsli'), mn = mentionCount();
+  mli.hidden = !ME; mli.className = (S.view === 'mentions' ? 'active ' : '') + (mn ? 'unread' : '');
+  $('.badge', mli).hidden = !mn; $('.badge', mli).textContent = mn;
 }
 // Channels are listed by workspace: the workspace is a heading, not a channel, and
 // its channels sit under it by name (General first). A workspace is folded unless
-// opened (bb.open) or holding the open channel or something unread; folded, it shows
-// what is unread inside it. A channel outside any workspace is listed after them.
+// opened (bb.open) or holding the open channel; folded, it shows only how much is unread
+// inside it (#373). A channel outside any workspace is listed after them.
 function channelTree(lis){
   var order = [], byWs = {}, loose = [];
   S.channels.forEach(function(b){
@@ -987,7 +1020,7 @@ function channelTree(lis){
     var chans = byWs[w].slice().sort(function(a, b){ return (b.slug === w) - (a.slug === w); });   // General first
     var cur = S.cur && S.cur.slug, open = !!S.open[w], hidden = 0;
     var shown = chans.filter(function(c){
-      var keep = open || c.slug === cur || (S.unread[c.slug] && c.slug !== cur);
+      var keep = open || c.slug === cur;
       if (!keep) hidden += S.unread[c.slug] || 0;
       return keep;
     });
@@ -1007,6 +1040,7 @@ function totalUnread(){
 }
 rail.addEventListener('click', function(ev){
   if (ev.target.closest('#unreadli')) { openUnread(true); return; }
+  if (ev.target.closest('#mentionsli')) { openMentions(true); return; }
   var f = ev.target.closest('button.fold, li.ws');
   if (f) { var p = f.dataset.proj; if (S.open[p]) delete S.open[p]; else S.open[p] = 1; save('bb.open', S.open); renderRail(); return; }
   var li = ev.target.closest('li[data-slug]'); if (!li) return;
@@ -1028,6 +1062,76 @@ function refreshLists(){
 }
 
 // ---------------------------------------------------------------- stream
+// ---------------------------------------------------------------- @board messages (#403)
+// What the board itself posts into a thread (Forgejo events, sweeper notes, nudges) is useful to the
+// worker and noise to a reader. A viewer chooses, per browser: 'visible' (the default) or 'fold',
+// where consecutive @board messages fold into one strip that opens in place. A @board message that
+// mentions the viewer or waits on them (meta.needs) is never folded. Search and /t/<id> links are unaffected.
+// fold:begin
+var BOARD_PREFS = ['visible', 'fold'];
+function boardKind(m){
+  var meta = m.meta || {}, ev = meta.event || '', action = meta.action || '';
+  if (meta.kind !== 'forgejo') return 'note';
+  if (ev === 'pull_request') return action === 'closed' ? (/\bmerged\b/.test(m.body || '') ? 'merge' : 'PR closed') : 'PR';
+  if (ev === 'pull_request_sync') return 'push';
+  if (/label/.test(ev)) return 'labels';
+  if (/comment/.test(ev)) return 'comment';
+  if (/review/.test(ev)) return 'review';
+  if (ev === 'issues') return 'issue';
+  return 'event';
+}
+var KIND_PLURAL = {PR: 'PRs', push: 'pushes', labels: 'labels', comment: 'comments', review: 'reviews', issue: 'issues',
+                   merge: 'merges', note: 'notes', event: 'events', 'PR closed': 'PRs closed'};
+function foldable(m, me){
+  if (m.author !== 'board' || !m.reply_to) return false;     // the root is the thread: always a card
+  if (me && (m.mentions || []).indexOf(me) >= 0) return false;
+  if (me && m.meta && m.meta.needs === me) return false;
+  return true;
+}
+// Splits a thread's replies into segments: {msg: m} for a card, {fold: [m, ...]} for a run of @board messages.
+function foldRuns(messages, pref, me){
+  var out = [], i = 0;
+  while (i < messages.length) {
+    if (pref !== 'fold' || !foldable(messages[i], me)) { out.push({msg: messages[i]}); i++; continue; }
+    var run = [];
+    while (i < messages.length && foldable(messages[i], me)) { run.push(messages[i]); i++; }
+    out.push({fold: run});
+  }
+  return out;
+}
+function foldSummary(run){
+  var counts = {}, order = [];
+  run.forEach(function(m){ var k = boardKind(m); if (!counts[k]) { counts[k] = 0; order.push(k); } counts[k]++; });
+  return order.map(function(k){ return counts[k] + ' ' + (counts[k] === 1 ? k : KIND_PLURAL[k] || k); }).join(', ');
+}
+// fold:end
+function foldHtml(run, open){
+  return '<button type="button" class="fold" data-fold aria-expanded="' + (open ? 'true' : 'false') + '"><span class="caret" aria-hidden="true">▸</span>' +
+    '<b>' + run.length + ' from @board</b><span class="what">' + esc(foldSummary(run)) + '</span>' +
+    '<span class="last" title="' + esc(run[run.length - 1].created_at) + '">last ' + esc(when(run[run.length - 1].created_at)) + '</span></button>' +
+    '<div class="folded' + (open ? ' open' : '') + '">' + run.map(function(m){ return messageHtml(m, true); }).join('') + '</div>';
+}
+function boardPref(){ var v = load('bb.boardMsgs', 'visible'); return BOARD_PREFS.indexOf(v) >= 0 ? v : 'visible'; }
+function setBoardPref(v){
+  if (BOARD_PREFS.indexOf(v) < 0) v = 'visible';
+  save('bb.boardMsgs', v); syncBoardPref();
+  if (S.thread && S.tmsgs) renderThreadList();
+}
+function syncBoardPref(){
+  var v = boardPref();
+  document.querySelectorAll('input[data-pref=boardmsgs]').forEach(function(r){ r.checked = r.value === v; });
+}
+document.addEventListener('change', function(ev){ if (ev.target.dataset && ev.target.dataset.pref === 'boardmsgs') setBoardPref(ev.target.value); });
+document.addEventListener('click', function(ev){
+  var f = ev.target.closest('[data-fold]');
+  if (f) { var open = f.getAttribute('aria-expanded') !== 'true'; f.setAttribute('aria-expanded', open ? 'true' : 'false'); f.nextElementSibling.classList.toggle('open', open); return; }
+  var g = ev.target.closest('#tdisplay');
+  var pop = $('#tdisplaypop');
+  if (g) { pop.hidden = !pop.hidden; g.setAttribute('aria-expanded', pop.hidden ? 'false' : 'true'); return; }
+  if (pop && !pop.hidden && !ev.target.closest('#tdisplaypop')) { pop.hidden = true; $('#tdisplay').setAttribute('aria-expanded', 'false'); }
+});
+syncBoardPref();
+
 function pickupHtml(worker){
   if (!worker) return '';
   var down = (S.down || {})[worker];   // from the worker refresh: the worker is not running (#169)
@@ -1037,15 +1141,22 @@ function pickupHtml(worker){
     '"><span aria-hidden="true">👀</span> Picked up by <a href="/a/' +
     esc(worker) + '">@' + esc(worker) + '</a>' + (down ? ' · ' + esc(down) : '') + '</span>';
 }
+// an attachment as a chip under the message, not in the footer that shows only on hover (thread 10173)
+function sizeText(n){ return n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function fileChip(a){
+  return '<a class="file" href="' + esc(a.url) + '" data-attachment download="' + esc(a.name) + '" title="download ' + esc(a.name) + '">' +
+    '<span class="ic" aria-hidden="true">' + ((a.media_type || '').indexOf('image/') === 0 ? '🖼' : '📄') + '</span>' +
+    '<b>' + esc(a.name) + '</b><span class="sz">' + sizeText(a.size_bytes) + '</span></a>';
+}
 function messageHtml(m, inThread){
   var foot = m.tags.map(function(t){ return '<span class="tag">#' + esc(t) + '</span>'; }).join('');
-  var previews = '';
+  var previews = '', files = '';
   (m.attachments || []).forEach(function(a){
     if ((a.media_type || '').indexOf('image/') === 0) {
       previews += '<img class="attached-image" data-image-src="' + esc(a.url) + '" alt="' + esc(a.name) +
         '" style="display:block;max-width:100%;max-height:320px" loading="lazy">';
     }
-    foot += '<a href="' + esc(a.url) + '" data-attachment download="' + esc(a.name) + '">' + esc(a.name) + ' (' + a.size_bytes.toLocaleString() + ' bytes)</a>';
+    files += fileChip(a);
   });
   if (m.meta && Object.keys(m.meta).length) foot += '<span title="' + esc(JSON.stringify(m.meta)) + '">meta: ' + esc(Object.keys(m.meta).join(', ')) + '</span>';
   var rep = '';
@@ -1054,14 +1165,19 @@ function messageHtml(m, inThread){
     rep = '<button class="replies' + (S.thread === m.id ? ' open' : '') + '" data-thread="' + m.id + '">' +
       '<span class="faces">' + faces + '</span><span class="n">' + m.replies.count + (m.replies.count === 1 ? ' reply' : ' replies') + '</span>' +
       '<span class="last">last ' + esc(when(m.replies.last_at)) + '</span></button>';
+  } else if (!inThread && !m.reply_to) {     // a thread with no replies opens the same way (#372)
+    rep = '<button class="replies none" data-thread="' + m.id + '"><span class="n">Reply</span></button>';
   }
+  // a thread in the channel collapses to one line with the chevron on its header (#442)
+  var chev = !inThread && !m.reply_to && ME ? '<button type="button" class="tcollapse" data-collapse="' + m.id + '" aria-expanded="true"' +
+    ' title="collapse this thread" aria-label="collapse thread #' + m.id + '"><span aria-hidden="true">▾</span></button>' : '';
   return '<div class="msg' + (inThread && !m.reply_to ? ' root' : '') + (S.thread === m.id && !inThread ? ' focus' : '') + '" id="' + (inThread ? 't' : 'm') + m.id + '" data-id="' + m.id + '">' +
     av(m.author) + '<div>' +
-    '<div class="head"><a class="who" href="/a/' + esc(m.author) + '">@' + esc(m.author) + '</a>' +
+    '<div class="head">' + chev + '<a class="who" href="/a/' + esc(m.author) + '">@' + esc(m.author) + '</a>' +
     (isHuman(m.author) ? '<span class="hk" title="a person, not a bot">human</span>' : '') +
     '<span title="' + esc(m.created_at) + '">' + esc(when(m.created_at)) + '</span>' +
     '<a class="id" href="/t/' + (m.thread_id || m.id) + '">#' + m.id + '</a></div>' +
-    '<div class="body">' + body(m.body) + previews + '</div>' +
+    '<div class="body">' + body(m.body) + previews + '</div>' + (files ? '<div class="files">' + files + '</div>' : '') +
     (!m.reply_to ? '<div class="pickup" data-worker-thread="' + m.id + '">' + pickupHtml(m.worker) + '</div>' : '') +
     '<div class="pickup" data-receipt-message="' + m.id + '"></div>' +
     '<div class="foot">' + foot + '</div>' + rep + '</div></div>';
@@ -1082,6 +1198,26 @@ function renderHead(){
   document.title = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
 }
 
+// ---------------------------------------------------------------- collapsed threads (#407, #442)
+// A thread collapsed with the chevron on its header (the board's `hidden` mark, #374) keeps its place
+// in the channel as one line; the same chevron there expands it again. The mark is on the board, so it
+// holds in every browser, and the live poll leaves the thread's replies out while it is collapsed.
+// hidefold:begin
+function firstWords(text, n){
+  var w = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  return w.slice(0, n).join(' ') + (w.length > n ? '…' : '');
+}
+function hiddenSummary(m){
+  var n = m.replies && m.replies.count ? m.replies.count : 0;
+  return '#' + m.id + ' ' + firstWords(m.body, 8) + ' · ' + n + (n === 1 ? ' reply' : ' replies');
+}
+// hidefold:end
+function collapsedHtml(m){
+  return '<button type="button" class="fold tcollapsed" id="m' + m.id + '" data-expand="' + m.id + '" aria-expanded="false"' +
+    ' title="expand this thread" aria-label="expand thread #' + m.id + '"><span class="caret" aria-hidden="true">▸</span>' +
+    '<b>' + esc(hiddenSummary(m)) + '</b><span class="what">@' + esc(m.author) + '</span>' +
+    '<span class="last" title="' + esc(m.created_at) + '">' + esc(when(m.created_at)) + '</span></button>';
+}
 function renderStream(){
   var html = '';
   if (S.olderBefore) html += '<button class="older" id="older">↑ older messages</button>';
@@ -1091,7 +1227,7 @@ function renderStream(){
     var dk = dayKey(m.created_at);
     if (dk !== lastDay) { html += '<div class="day">' + esc(dayLabel(m.created_at)) + '</div>'; lastDay = dk; }
     if (!newShown && m.id > S.newSince && S.newSince > 0) { html += '<div class="newline">new</div>'; newShown = true; }
-    html += messageHtml(m, false);
+    html += m.hidden ? collapsedHtml(m) : messageHtml(m, false);
   });
   stream.innerHTML = html;
   stream.scrollTop = stream.scrollHeight;
@@ -1101,6 +1237,14 @@ stream.addEventListener('click', function(ev){
   if (older) { loadOlder(); return; }
   var mr = ev.target.closest('[data-markread]');
   if (mr) { markRead(mr.dataset.markread ? [mr.dataset.markread] : null); return; }
+  var dn = ev.target.closest('[data-done]');
+  if (dn) { mentionDone(dn.dataset.done, dn); return; }
+  var ad = ev.target.closest('[data-alldone]');
+  if (ad) { mentionsAllDone(ad); return; }
+  var cb = ev.target.closest('[data-collapse]');
+  if (cb) { setHidden(+cb.dataset.collapse, true); return; }
+  var xb = ev.target.closest('[data-expand]');
+  if (xb) { setHidden(+xb.dataset.expand, false); return; }
   var r = ev.target.closest('.replies,.ctx'); if (!r) return;
   openThread(+r.dataset.thread, true);
 });
@@ -1196,6 +1340,93 @@ function renderUnread(){
   stream.scrollTop = keep;
   renderUnreadHead();
 }
+// ---------------------------------------------------------------- mentions (#445)
+// What names this human, from GET /api/status (the bell's fetch shares it with a bb:status event):
+// first what bots marked as waiting on them, with the ask, then the other @mentions. An item leaves
+// when the human answers in its thread, its asker marks it resolved, or the human says done.
+S.status = null; S.mmsgs = {}; S.mretry = {};
+function mentionCount(){     // what the view can show: an item whose message cannot be read is left out
+  if (!S.status) return 0;
+  return (S.status.waiting || []).concat(S.status.mentions || []).filter(function(x){ return S.mmsgs[+x.key.slice(1)] !== false; }).length;
+}
+window.addEventListener('bb:status', function(ev){
+  Object.keys(S.mretry).forEach(function(id){ delete S.mmsgs[id]; }); S.mretry = {};
+  S.status = ev.detail; renderRail();
+  if (S.view === 'mentions') renderMentions();
+});
+function openMentions(push){
+  S.view = 'mentions'; S.cur = null; S.thread = null; app.classList.add('thread-closed');
+  showCompose();
+  if (push && !SOLO) history.pushState({}, '', '/mentions');
+  if (S.ctrl) S.ctrl.abort(); S.ctrl = null;
+  renderRail();
+  stream.innerHTML = '<div class="empty">loading…</div>';
+  if (!ME) { renderMentionsHead(); stream.innerHTML = '<div class="empty">Sign in to see what names you.</div>'; return; }
+  if (S.status) renderMentions();         // what the last status said, until the refresh answers
+  else renderMentionsHead();               // "loading…" until the first bb:status event
+  if (window.bbStatusRefresh) window.bbStatusRefresh();
+}
+function renderMentionsHead(){
+  var n = mentionCount();
+  head.innerHTML = '<h1>mentions</h1><div class="topic">' + (n ? n + ' message' + (n === 1 ? '' : 's') +
+    ' that name you and that you have not answered in their thread' : 'nothing names you that you have not answered') + '</div>';
+  head.appendChild(live);
+  document.title = (n ? '(' + n + ') ' : '') + 'mentions · ' + INIT.name;
+}
+function renderMentions(){
+  renderMentionsHead();
+  var st = S.status || {}, waiting = st.waiting || [], mentions = st.mentions || [], all = waiting.concat(mentions);
+  if (!all.length) { stream.innerHTML = '<div class="empty">Nothing waits on you. You are all caught up.</div>'; return; }
+  // each message is fetched once: null while it is on its way, false if it cannot be read (deleted since, or refused)
+  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !(id in S.mmsgs); });
+  if (missing.length) {
+    Promise.all(missing.map(function(id){
+      S.mmsgs[id] = null;
+      return fetch('/api/messages/' + id).then(function(r){ return r.json(); })
+        // no message in the answer is final; a failed request (offline, a 502 page) waits for the next status to try again
+        .then(function(d){ S.mmsgs[id] = d.message || false; }, function(){ S.mretry[id] = 1; });
+    })).then(function(){ renderRail(); if (S.view === 'mentions') renderMentions(); });
+    if (!stream.querySelector('.mrow')) return;     // keep "loading…" until the messages are in
+  }
+  var keep = stream.scrollTop;
+  var group = function(title, items, needs){
+    items = items.filter(function(x){ return S.mmsgs[+x.key.slice(1)]; });
+    if (!items.length) return '';
+    return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span>' +
+      (needs ? '' : '<button type="button" data-alldone="" title="clear every mention without replying; what waits on you stays">all done</button>') + '</h3>' +
+      items.map(function(x){
+        var m = S.mmsgs[+x.key.slice(1)]; if (!m) return '';
+        var tid = m.thread_id || m.id, h = messageHtml(m, true);
+        var top = (needs ? '<div class="ask"><b>needs you</b> ' + esc(x.text) + '</div>' : '') +
+          '<button class="ctx" data-thread="' + tid + '">' + (m.reply_to ? '↳ reply in thread #' : 'open thread #') + tid + ' · #' + esc(m.channel) + '</button>';
+        return '<div class="mrow">' + h.replace('<div class="body">', top + '<div class="body">') +
+          '<button type="button" class="mdone" data-done="' + esc(x.key) + '" title="clear it without replying">done</button></div>';
+      }).join('') + '</section>';
+  };
+  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false) ||
+    '<div class="empty">Nothing waits on you. You are all caught up.</div>';
+  stream.scrollTop = keep;
+}
+function mentionDone(key, b){
+  b.disabled = true;
+  fetch('/api/status/dismissed', {method: 'POST', headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
+    body: JSON.stringify({key: key})})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { b.disabled = false; alert(d.detail || ('refused: ' + r.status)); return; }
+    window.dispatchEvent(new CustomEvent('bb:status', {detail: d}));
+    if (window.bbStatusRefresh) window.bbStatusRefresh();
+  }); })
+  .catch(function(){ b.disabled = false; alert('could not reach the board'); });
+}
+function mentionsAllDone(b){     // every plain mention at once; an ask a bot waits on is left to answer
+  b.disabled = true;
+  fetch('/api/status/mentions/done', {method: 'POST', headers: {'Authorization': 'Bearer ' + ME.token}})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { b.disabled = false; alert(d.detail || ('refused: ' + r.status)); return; }
+    window.dispatchEvent(new CustomEvent('bb:status', {detail: d}));
+  }); })
+  .catch(function(){ b.disabled = false; alert('could not reach the board'); });
+}
 function markRead(slugs){
   (slugs || Object.keys(S.umsgs)).forEach(function(slug){
     var b = findEntry(slug), ms = S.umsgs[slug] || [];
@@ -1235,12 +1466,13 @@ async function openThread(id, push){
     S.thread = d.thread_id;
     if (push) history.pushState({}, '', threadUrl(d.thread_id));
     else if (SOLO) history.replaceState({}, '', threadUrl(d.thread_id));
-    tin.textContent = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · #' + d.thread_id;
+    tin.textContent = (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · #' + d.thread_id + (d.hidden ? ' · hidden' : '');
+    var hideBtn = $('#thide'); hideBtn.hidden = !ME; hideBtn.textContent = d.hidden ? 'expand' : 'collapse'; hideBtn.dataset.hidden = d.hidden ? '1' : '';
+    hideBtn.title = d.hidden ? 'expand this thread in the channel again' : 'collapse this thread to one line in the channel';
     $('#tboard').href = '/t/' + d.thread_id;
     document.title = 'thread #' + d.thread_id + ' · ' + (b.kind === 'conversation' ? 'conversation' : '#' + b.slug) + ' · ' + INIT.name;
-    plist.innerHTML = messageHtml(root, true) +
-      '<div class="count" id="tcount">' + (d.messages.length - 1) + (d.messages.length === 2 ? ' reply' : ' replies') + '</div>' +
-      d.messages.slice(1).map(function(m){ return messageHtml(m, true); }).join('');
+    S.tmsgs = d.messages;
+    renderThreadList();
     app.classList.remove('thread-closed'); showCompose();
     document.querySelectorAll('.msg.focus').forEach(function(x){ x.classList.remove('focus'); });
     document.querySelectorAll('.replies.open').forEach(function(x){ x.classList.remove('open'); });
@@ -1248,13 +1480,79 @@ async function openThread(id, push){
     plist.scrollTop = plist.scrollHeight;
   } catch (e) { alert('Could not load thread #' + id + ': ' + e.message); }
 }
+// The thread panel's list: the root, the count, then the replies, with @board runs folded when the viewer asked (#403).
+function renderThreadList(){
+  var ms = S.tmsgs || []; if (!ms.length) return;
+  var me = ME ? ME.handle : null, replies = ms.slice(1);
+  plist.innerHTML = messageHtml(ms[0], true) +
+    '<div class="count" id="tcount">' + replies.length + (replies.length === 1 ? ' reply' : ' replies') + '</div>' +
+    foldRuns(replies, boardPref(), me).map(function(seg){ return seg.fold ? foldHtml(seg.fold, false) : messageHtml(seg.msg, true); }).join('');
+  plist.scrollTop = plist.scrollHeight;
+}
+// A reply arriving in the open thread: a card, or the next message of an open or new @board strip.
+function appendToThread(m){
+  if ($('#t' + m.id)) return;
+  if (S.tmsgs) S.tmsgs.push(m);
+  var me = ME ? ME.handle : null;
+  if (boardPref() === 'fold' && foldable(m, me)) {
+    var last = plist.lastElementChild, strip = last && last.classList.contains('folded') ? last.previousElementSibling : null;
+    if (strip) {
+      last.appendChild(el(messageHtml(m, true)));
+      var run = [], ms = S.tmsgs || [m];     // the strip holds the trailing @board run of the thread
+      for (var i = ms.length - 1; i >= 0 && foldable(ms[i], me); i--) run.unshift(ms[i]);
+      strip.querySelector('b').textContent = run.length + ' from @board';
+      strip.querySelector('.what').textContent = foldSummary(run);
+      strip.querySelector('.last').textContent = 'last ' + when(m.created_at);
+    } else {
+      plist.insertAdjacentHTML('beforeend', foldHtml([m], false));
+    }
+  } else {
+    plist.appendChild(el(messageHtml(m, true)));
+  }
+  var tc = $('#tcount'); if (tc) { var n = plist.querySelectorAll('.msg').length - 1; tc.textContent = n + (n === 1 ? ' reply' : ' replies'); }
+  plist.scrollTop = plist.scrollHeight;
+}
 function closeThread(){
-  S.thread = null; app.classList.add('thread-closed');
+  S.thread = null; S.tmsgs = null; app.classList.add('thread-closed');
   document.querySelectorAll('.msg.focus').forEach(function(x){ x.classList.remove('focus'); });
   document.querySelectorAll('.replies.open').forEach(function(x){ x.classList.remove('open'); });
   if (S.cur) history.replaceState({}, '', '/c/' + S.cur.slug);
 }
 $('#tclose').addEventListener('click', closeThread);
+// Hide a thread (#374): folded into a strip in the channel for every human (#407), still in search
+// and at /t/<id>. The live poll leaves hidden threads out, so an open one fetches its own new replies.
+setInterval(function(){
+  var id = S.thread, msgs = plist.querySelectorAll('.msg'), last = msgs[msgs.length - 1];
+  if (!id || !$('#thide').dataset.hidden || !last) return;
+  fetch('/api/threads/' + id + '?hide_events=true&since=' + last.dataset.id).then(function(r){ return r.json(); }).then(function(d){
+    if (S.thread !== id) return;
+    (d.messages || []).forEach(appendToThread);
+  }).catch(function(){});
+}, 5000);
+$('#thide').addEventListener('click', function(){ setHidden(S.thread, !this.dataset.hidden); });
+// Collapse (hidden true) or expand a thread, from its chevron in the channel or the thread panel.
+// Both happen in place: the thread keeps its spot in the stream, and an open thread panel stays open.
+function setHidden(id, hidden){
+  fetch('/api/threads/' + id + '/hidden', {method: hidden ? 'PUT' : 'DELETE', headers: {'Authorization': 'Bearer ' + ME.token}})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { alert(d.detail || ('refused: ' + r.status)); return; }
+    var root = S.roots.filter(function(m){ return m.id === id; })[0];
+    if (root) {
+      root.hidden = hidden; root.hidden_by = hidden ? ME.handle : null; root.hidden_at = hidden ? new Date().toISOString() : null;
+      var top = stream.scrollTop; renderStream(); stream.scrollTop = top;
+      // the live poll left a collapsed thread's replies out: read its replies again, as the stream lists them
+      if (!hidden && S.cur) fetch('/api/messages?hide_events=true&roots=true&limit=1&channel=' + encodeURIComponent(S.cur.slug) + '&since=' + (id - 1))
+        .then(function(r){ return r.json(); }).then(function(d){
+          var m = (d.messages || [])[0], old = $('#m' + id);
+          if (!m || m.id !== id || root.hidden) return;
+          root.replies = m.replies; if (old) old.replaceWith(el(messageHtml(root, false)));
+        }).catch(function(){});
+    }
+    if (S.thread === id) openThread(id, false);
+    refreshLists();
+  }); })
+  .catch(function(){ alert('could not reach the board'); });
+}
 $('#twide').addEventListener('click', function(){
   var on = app.classList.toggle('wide'); save('bb.threadWide', on);
   $('#twide').title = on ? 'shrink thread back to the side' : 'expand thread to full width';
@@ -1284,7 +1582,7 @@ var ME = load('bb.me', null);
 if (ME) pageCookie(ME);
 var signin = $('#signin'), sform = $('#signinform');
 var afterSignin = null;   // what to do once the dialog succeeds (e.g. focus the box that was clicked)
-function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); }
+function setMe(m){ ME = m; save('bb.me', m); pageCookie(m); renderWho(); showCompose(); renderRail(); if (S.cur) renderStream(); }
 function renderWho(){
   $('#whoami').textContent = ME ? 'posting as @' + ME.handle : 'humans read · agents post';
   $('#signinbtn').textContent = ME ? 'sign out' : 'sign in to post';
@@ -1376,40 +1674,43 @@ function wireCompose(form, target){
   var ta = $('textarea', form), send = $('.send', form), err = $('.err', form), pop = $('.mentions', form);
   var note = $('.attachment-note', form);
   var fileInput = $('.image-file', form), imageNote = $('.image-note', form);
-  var removeImage = $('.remove-image', form), imageData = null, readingImage = false;
+  var removeImage = $('.remove-image', form), imageData = null, fileData = null, readingImage = false;
   function setBusy(busy){
     send.disabled = busy;
     if (fileInput) { fileInput.disabled = busy; removeImage.disabled = busy; }
   }
+  var chip = $('.chip', form), thumb = $('.thumb', form), box = $('.box', form);
   function clearImage(){
-    imageData = null; fileInput.value = ''; imageNote.textContent = ''; removeImage.hidden = true;
+    imageData = fileData = null; fileInput.value = ''; imageNote.textContent = ''; removeImage.hidden = true;
+    chip.hidden = true; thumb.hidden = true; thumb.removeAttribute('src');
   }
   function chooseImage(files){
     if (send.disabled || readingImage || !files.length) return;
-    if (files.length !== 1) { err.textContent = 'Attach one image per message.'; return; }
-    var file = files[0];
-    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
-      err.textContent = 'Choose a PNG, JPEG, GIF or WebP image.'; return;
-    }
-    if (!file.size || file.size > INIT.max_image_attachment_bytes) {
-      err.textContent = 'Image attachment must be between 1 byte and 10 MiB.'; return;
+    if (files.length !== 1) { err.textContent = 'Attach one file per message.'; return; }
+    // an image shows in the message; any other file is a download (thread 10141)
+    var file = files[0], image = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type);
+    if (!file.size || file.size > (image ? INIT.max_image_attachment_bytes : INIT.max_file_attachment_bytes)) {
+      err.textContent = 'An attachment must be between 1 byte and 10 MiB.'; return;
     }
     readingImage = true; setBusy(true); err.textContent = '';
     var reader = new FileReader();
     reader.onload = function(){
-      imageData = reader.result.slice(reader.result.indexOf(',') + 1);
-      imageNote.textContent = file.name + ' (' + file.size.toLocaleString() + ' bytes)';
-      removeImage.hidden = false;
+      var data = reader.result.slice(reader.result.indexOf(',') + 1);
+      imageData = image ? data : null; fileData = image ? null : {name: file.name, content: data};
+      imageNote.textContent = file.name + ' · ' + sizeText(file.size);
+      if (image) thumb.src = reader.result;
+      thumb.hidden = !image; chip.hidden = false; removeImage.hidden = false;
     };
-    reader.onerror = function(){ err.textContent = 'Could not read the image. Choose it again.'; };
+    reader.onerror = function(){ err.textContent = 'Could not read the file. Choose it again.'; };
     reader.onloadend = function(){ readingImage = false; setBusy(false); };
     reader.readAsDataURL(file);
   }
   if (fileInput) {
     fileInput.addEventListener('change', function(){ chooseImage(fileInput.files); });
     removeImage.addEventListener('click', clearImage);
-    form.addEventListener('dragover', function(ev){ ev.preventDefault(); });
-    form.addEventListener('drop', function(ev){ ev.preventDefault(); chooseImage(ev.dataTransfer.files); });
+    form.addEventListener('dragover', function(ev){ ev.preventDefault(); box.classList.add('drop'); });
+    form.addEventListener('dragleave', function(ev){ if (!form.contains(ev.relatedTarget)) box.classList.remove('drop'); });
+    form.addEventListener('drop', function(ev){ ev.preventDefault(); box.classList.remove('drop'); chooseImage(ev.dataTransfer.files); });
   }
   function attachmentNotice(){
     try {
@@ -1458,12 +1759,13 @@ function wireCompose(form, target){
   });
   form.addEventListener('submit', function(ev){
     ev.preventDefault();
-    var t = target(); if (send.disabled || readingImage || (!ta.value.trim() && !imageData) || !t || !ME) return;
+    var t = target(); if (send.disabled || readingImage || (!ta.value.trim() && !imageData && !fileData) || !t || !ME) return;
     var payload;
     try { payload = composePayload(ta.value); }
     catch (e) { err.textContent = e.message; return; }
     payload.channel = t.channel; payload.reply_to = t.reply_to || null;
     if (imageData) { payload.image_attachment = imageData; if (!payload.body) payload.body = 'Image attached.'; }
+    if (fileData) { payload.file_attachment = fileData; if (!payload.body) payload.body = 'File attached: ' + fileData.name; }
     var postedText = ta.value;
     setBusy(true); err.textContent = '';
     fetch('/api/messages', {method: 'POST', headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
@@ -1478,6 +1780,7 @@ function wireCompose(form, target){
         grow(ta); hidePop(); attachmentNotice();
         // The live loop renders it; nudge in case the poll is between requests.
         if (d.message && d.message.id > S.cursor) onMessage(d.message);
+        if (window.bbStatusRefresh) window.bbStatusRefresh();     // an answer takes it off Mentions
       })
       .catch(function(){ setBusy(false); err.textContent = 'could not reach the board'; });
   });
@@ -1578,13 +1881,9 @@ function onMessage(m){
         root.replies = root.replies || {count: 0, authors: []};
         root.replies.count++; root.replies.last_at = m.created_at; root.replies.last_id = m.id;
         if (root.replies.authors.indexOf(m.author) < 0) root.replies.authors.push(m.author);
-        var old = $('#m' + root.id); if (old) old.replaceWith(el(messageHtml(root, false)));
+        var old = $('#m' + root.id); if (old) old.replaceWith(el(root.hidden ? collapsedHtml(root) : messageHtml(root, false)));
       }
-      if (S.thread === m.thread_id) {
-        plist.appendChild(el(messageHtml(m, true)));
-        var tc = $('#tcount'); if (tc) { var n = plist.querySelectorAll('.msg').length - 1; tc.textContent = n + (n === 1 ? ' reply' : ' replies'); }
-        plist.scrollTop = plist.scrollHeight;
-      }
+      if (S.thread === m.thread_id) appendToThread(m);
     }
     if (atBottom) stream.scrollTop = stream.scrollHeight;
     if (document.visibilityState === 'visible') markSeen(); else S.unread[m.channel] = (S.unread[m.channel] || 0) + 1;
@@ -1618,7 +1917,6 @@ async function liveLoop(){
 setInterval(function(){
   fetch('/api/agents').then(function(r){ return r.json(); }).then(function(d){
     d.agents.forEach(function(a){ S.agents[a.handle] = a; });
-    $('#nag').textContent = d.agents.filter(function(a){ return a.presence === 'active'; }).length + ' active';
     renderRail(); if (S.cur && S.cur.kind === 'conversation') renderHead();
   }).catch(function(){});
 }, 60000);
@@ -1628,6 +1926,7 @@ function route(){
   var m = location.pathname.match(/^\/c\/([^\/]+)/), t = location.pathname.match(/^\/t\/(\d+)/);
   if (m) return openChannel(decodeURIComponent(m[1]), false);
   if (location.pathname === '/unread') return openUnread(false);
+  if (location.pathname === '/mentions') return openMentions(false);
   if (t) return openThread(+t[1], false);
   var first = S.channels.filter(function(b){ return S.unread[b.slug]; })[0] || S.channels[0];
   if (first) openChannel(first.slug, false);
@@ -1677,20 +1976,20 @@ def running_chip(r: dict | None) -> str:
         return f"{r[k]} {word}{'' if r[k] == 1 else 's'}"
     title = " · ".join([f"{n('bots', 'bot')} running ({r['working']} working)"]
                        + [n(k, w) for k, w in (("keepers", "keeper"), ("runners", "runner"), ("humans", "human")) if r[k]])
-    return (f'<span class="count" title="{e(title)}"><span class="dot active"></span>'
-            f'<a href="/fleet" id="nag">{r["bots"]} running</a></span>')
+    return f'<span class="n" title="{e(title)}">· <span id="nag">{r["bots"]} running</span></span>'
 
 
 def app_page(board_name: str, base: str, channels: list, conversations: list, agents: list,
              stats: dict, invite_required: bool = False, max_body: int = 16000,
              max_text_attachment_bytes: int = 10 * 1024 * 1024,
-             max_image_attachment_bytes: int = 10 * 1024 * 1024, private: bool = False) -> str:
+             max_image_attachment_bytes: int = 10 * 1024 * 1024, private: bool = False,
+             max_file_attachment_bytes: int = 10 * 1024 * 1024) -> str:
     # no '<' survives in the embedded JSON, so no text from the board can close the script block
     init = json.dumps(
         {"name": board_name, "channels": channels, "conversations": conversations,
          "agents": agents, "stats": stats, "invite_required": invite_required, "private": private,
          "max_body": max_body, "max_text_attachment_bytes": max_text_attachment_bytes,
-         "max_image_attachment_bytes": max_image_attachment_bytes},
+         "max_image_attachment_bytes": max_image_attachment_bytes, "max_file_attachment_bytes": max_file_attachment_bytes},
         ensure_ascii=False,
     ).replace("<", "\\u003c")
     return f"""<title>{e(board_name)}</title>
@@ -1701,12 +2000,11 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <a class="brand" href="/">{e(board_name)}<span>/</span><em class="sub">bot collaboration</em></a>
   <span class="divider"></span>
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
-  <nav class="links" id="navlinks" aria-label="reference">
+  <nav class="links" id="navlinks" aria-label="pages">
+{nav_tabs("/", running_chip(stats.get('running')))}
 {util_links()}
   </nav>
   <div class="me">
-    {admin_segment()}
-    {running_chip(stats.get('running'))}
     <span id="whoami">humans read · agents post</span>
     <button type="button" id="signinbtn">sign in to post</button>
     {BELL_HTML}
@@ -1715,9 +2013,13 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
 </header>
 <nav class="rail" id="rail">
   <ul class="views"><li id="unreadli" title="every message you have not read yet, across channels and conversations">
-    <span class="sigil u">●</span><span class="name">Unread</span><span class="badge" hidden></span></li></ul>
+    <span class="sigil u">●</span><span class="name">Unread</span><span class="badge" hidden></span></li>
+    <li id="mentionsli" hidden title="messages that name you or wait on you, until you answer in their thread">
+    <span class="sigil u">@</span><span class="name">Mentions</span><span class="badge" hidden></span></li></ul>
   <h2>Workspaces <span id="nch"></span></h2>
   <ul id="channels"></ul>
+  <h2 id="dmh" hidden title="conversations you are in">Direct messages <span id="ndm"></span></h2>
+  <ul id="dms" hidden></ul>
   <h2>Conversations <span id="ncv"></span></h2>
   <ul id="convs"></ul>
 </nav>
@@ -1729,10 +2031,10 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form class="compose" id="compose" hidden autocomplete="off">
     <ul class="mentions" hidden></ul>
     <button type="button" class="signin"><b>Sign in</b> to post here as a human: tell a bot what to do, hand out an issue, answer a question.</button>
-    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Post</button></div>
+    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><label class="attach" title="attach a file, or drop one on the box"><span aria-hidden="true">📎</span><span class="sr-only">Attach a file</span><input class="image-file" type="file"></label><button type="submit" class="send">Post</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach image <input class="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove image</button></div>
+    <div class="image-tools" hidden><span class="chip" hidden><img class="thumb" alt="" hidden><span class="image-note" role="status"></span>
+    <button type="button" class="remove-image" hidden title="remove the attachment" aria-label="remove the attachment">×</button></span></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter posts · Shift+Enter newline · @ mentions</span></div>
   </form>
 </main>
@@ -1740,7 +2042,15 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <div class="grip" id="tgrip" title="drag to resize"></div>
   <header><h2>Thread</h2><span class="in" id="tin"></span>
     <span class="tools">
+      <span class="menu"><button type="button" id="tdisplay" aria-expanded="false" aria-controls="tdisplaypop" title="how messages from @board are shown">display ▾</button>
+        <div class="pop" id="tdisplaypop" hidden>
+          <h4>Messages from @board</h4>
+          <label><input type="radio" name="boardmsgs-thread" value="visible" data-pref="boardmsgs"> Visible, like any message</label>
+          <label><input type="radio" name="boardmsgs-thread" value="fold" data-pref="boardmsgs"> Folded into one strip</label>
+          <div class="note">Yours only, in this browser. A message that mentions you or waits on you is always shown in full.</div>
+        </div></span>
       <a id="tboard" href="/" title="open in the board">open in board</a>
+      <button type="button" id="thide" hidden title="collapse this thread to one line in the channel"></button>
       <button type="button" id="twide" title="expand thread to full width">⤢</button>
       <button type="button" id="tpop" title="open thread in its own window">↗</button>
       <button type="button" id="tclose" aria-label="close thread" title="close">×</button>
@@ -1749,10 +2059,10 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <form class="compose" id="tcompose" hidden autocomplete="off">
     <ul class="mentions" hidden></ul>
     <button type="button" class="signin"><b>Sign in</b> to reply in this thread as a human.</button>
-    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><button type="submit" class="send">Reply</button></div>
+    <div class="box" hidden><textarea rows="1" placeholder=""></textarea><label class="attach" title="attach a file, or drop one on the box"><span aria-hidden="true">📎</span><span class="sr-only">Attach a file</span><input class="image-file" type="file"></label><button type="submit" class="send">Reply</button></div>
     <div class="attachment-note" role="status"></div>
-    <div class="image-tools" hidden><label>Attach image <input class="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label>
-    <span class="image-note" role="status"></span><button type="button" class="remove-image" hidden>Remove image</button></div>
+    <div class="image-tools" hidden><span class="chip" hidden><img class="thumb" alt="" hidden><span class="image-note" role="status"></span>
+    <button type="button" class="remove-image" hidden title="remove the attachment" aria-label="remove the attachment">×</button></span></div>
     <div class="hint" hidden><span class="err" role="alert"></span><span>Enter replies · Shift+Enter newline · @ mentions</span></div>
   </form>
 </aside>
@@ -1917,7 +2227,7 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
         why += f'<div class="by">{held} open thread{"s" * (held != 1)}</div>'
     group = (f'<a href="/workspaces/{e(b["workspace"])}">{e(b["workspace"])}</a>' if b.get("workspace")
              else '<span class="prob">no workspace</span>' if b.get("pool") else e((b.get("serves") or "—").rstrip("/").rsplit("/", 1)[-1]))
-    # its profile, set once when it was added: a chip to the profile page, or "none" with nothing to click
+    # its profile: a chip to the profile page, or "none" with nothing to click; a human may change it (#395)
     profile = (f'<a class="chip" href="/fleet/profiles/{e(b["profile"])}">{e(b["profile"])}</a>' if b.get("profile")
                else '<span class="dim">none</span>')
     # the channels it claims new threads in, when bound (fleet bots only; a hand-run bot has no row)
@@ -1928,6 +2238,8 @@ def _bot_row(b: dict, host: str, others: list, key: str = "") -> str:
                     else '<div class="by dim">any channel</div>')
         chans = (f'<button type="button" class="act chan-edit needs-me" data-handle="{e(b["handle"])}"'
                  f' data-workspace="{e(b.get("workspace") or "")}" data-channels="{e(", ".join(bound))}">channels…</button>')
+        chans += (f'<button type="button" class="act role-edit needs-me" data-handle="{e(b["handle"])}"'
+                  f' data-profile="{e(b.get("profile") or "")}">role…</button>')
     # last active: the keeper knows its last harness run, the board its last post
     last = max((b.get(k) or "" for k in ("last_run", "last_post")), default="")
     # a bot whose harness nobody knows was last started by hand before bin/bot recorded it
@@ -1998,15 +2310,17 @@ def _drawer(b: dict, host: str, acts: str, danger: str, question: str, k: str) -
 
 def _voice_block(b: dict) -> str:
     """A fleet bot's voice and personality in its drawer, with an Edit that turns them into fields
-    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing."""
+    (#348, jac's pick). Only a bot with a fleet row has them, so a hand-run bot shows nothing.
+    An empty one shows the fleet default the bot reads instead (#381)."""
     if not b.get("want") or b["status"] == "moved" or b.get("deleted"):
         return ""
     h, voice, personality = e(b["handle"]), b.get("voice") or "", b.get("personality") or ""
-    shown = lambda text: e(text) if text else '<span class="dim">none set</span>'
+    defaults = {"voice": registry.DEFAULT_VOICE, "personality": registry.DEFAULT_PERSONALITY}
+    shown = lambda text, which: e(text) if text else f'<span class="dim">fleet default, until set:</span> {e(defaults[which])}'
     return (f'<div class="d-voice" data-handle="{h}" data-voice="{e(voice)}" data-personality="{e(personality)}">'
             '<h4>Voice and personality <button type="button" class="act voice-edit">Edit</button></h4><div class="d-voice-two">'
-            f'<div class="quote"><b>Voice</b><span>{shown(voice)}</span></div>'
-            f'<div class="quote"><b>Personality</b><span>{shown(personality)}</span></div></div>'
+            f'<div class="quote"><b>Voice</b><span>{shown(voice, "voice")}</span></div>'
+            f'<div class="quote"><b>Personality</b><span>{shown(personality, "personality")}</span></div></div>'
             f'<p class="dim">Reaches @{h} at its next wake. A long session may keep some of its old tone; '
             'a <b>new session</b> starts clean.</p></div>')
 
@@ -2360,6 +2674,23 @@ document.addEventListener('click', function (ev) {
   .then(function (r) { return r.json().then(function (d) { if (r.ok) location.reload(); else alert(d.error || d.detail || ('refused: ' + r.status)); }); })
   .catch(function () { alert('could not reach the board'); });
 });
+// A bot's role: ask for the profile and send only that, so a move, stop or kill asked stays (#395).
+// The new guide and skills reach it at its next prompt; a new session drops the old role's context.
+document.addEventListener('click', function (ev) {
+  var b = ev.target.closest('button.role-edit'); if (!b) return;
+  if (!ME) { alert('Sign in on the board page first (the "sign in to post" button), then come back.'); return; }
+  var names = Array.prototype.map.call(document.querySelectorAll('#profiles-data option'), function (o) { return o.value; });
+  var v = prompt('The profile @' + b.dataset.handle + ' has from its next prompt.' + (names.length ? '\\nProfiles: ' + names.join(', ') : ''), b.dataset.profile);
+  if (v === null || !v.trim() || v.trim() === b.dataset.profile) return;
+  var h = {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token}, url = '/api/fleet/bots/' + encodeURIComponent(b.dataset.handle);
+  fetch(url + '/profile', {method: 'PUT', headers: h, body: JSON.stringify({profile: v.trim()})})
+  .then(function (r) { return r.json().then(function (d) {
+    if (!r.ok) { alert(d.error || d.detail || ('refused: ' + r.status)); return; }
+    if (!confirm('@' + b.dataset.handle + ' is now ' + v.trim() + '. Give it a new session too, so nothing of its old role stays in context?')) { location.reload(); return; }
+    return fetch(url + '/reset', {method: 'POST', headers: h}).then(function () { location.reload(); });
+  }); })
+  .catch(function () { alert('could not reach the board'); });
+});
 // Add a bot suggests reviving a stopped bot of the same harness and workspace instead (#168): it
 // keeps its name, sessions and claimed threads. On another machine, a bot moves here and starts.
 var REVIVE = JSON.parse((document.getElementById('revive-data') || {}).textContent || '[]');
@@ -2708,10 +3039,9 @@ body.out .fleet-page .acts,body.out .fleet-page .abtns,body.out .fleet-page .add
 .fleet-page form.newbot-top .fld b{color:var(--ink);font-weight:600;font-size:12.5px}
 .fleet-page form.newbot-top select,.fleet-page form.newbot-top input{background:var(--bg);border:1px solid var(--line);
  color:var(--ink);border-radius:6px;padding:7px 9px;font:13px var(--mono);width:100%}
-.fleet-page .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--bg)}
-.fleet-page .seg label{flex:1;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;border-left:1px solid var(--line);color:var(--ink)}
-.fleet-page .seg label:first-child{border-left:0}
-.fleet-page .seg input,.fleet-page .chan-chips input{position:absolute;opacity:0;width:0;height:0}
+.fleet-page form.newbot-top .seg{display:flex;flex-wrap:wrap;gap:1px;box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--line)}/* form.newbot-top: outranks the role form's .seg in REG_CSS, which comes later. It wraps when the names outgrow the column; the gap draws the dividers on any row */
+.fleet-page form.newbot-top .seg label{flex:1 1 auto;text-align:center;padding:6px 4px;font:12.5px var(--mono);cursor:pointer;background:var(--bg);color:var(--ink)}
+.fleet-page form.newbot-top .seg input,.fleet-page form.newbot-top .chan-chips input{position:absolute;opacity:0;width:0;height:0;padding:0;border:0}
 .fleet-page .seg label:has(input:checked){background:var(--ink);color:var(--panel)}
 .fleet-page .seg label:has(input:focus-visible),.fleet-page .chan-chips label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:-2px}
 .fleet-page .chan-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;align-items:center}
@@ -2865,6 +3195,23 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
                 + (f' · running {e(k["loaded"][:12])}' if k.get("loaded") else "")
                 + (f' · {e(u["result"])}' if u.get("result") else "")
                 + (f' · checked {e(ago(u["checked"]))}' if u.get("checked") else "") + "</div>") if u else ""
+        # the container runtime bots here run in (#479); a keeper from before reports none
+        rt = h.get("runtime") if isinstance(h.get("runtime"), dict) else {}
+        if rt:
+            rt_ok = rt.get("state") == "ok"
+            code += (f'<div class="by{"" if rt_ok else " prob"}" title="{e(rt.get("detail") or "")}">runtime '
+                     f'{e(rt.get("setting") or "host")}{"" if rt_ok else " " + e(rt.get("state") or "")}'
+                     f'{" " + e(rt["detail"]) if rt_ok and rt.get("detail") else ""}</div>')
+        # the harness images bots here run in, and the digest each pull left (#478)
+        imgs = [i for i in h.get("harness_images") or [] if isinstance(i, dict)]
+        if imgs:
+            bad_img = [i for i in imgs if i.get("state") not in ("ok", "pulling")]
+            code += (f'<div class="by{" prob" if bad_img else ""}">images '
+                     + " · ".join(f'<span title="{e(i.get("image") or "")}{(": " + e(i["detail"])) if i.get("detail") else ""}">'
+                                  f'{e(i.get("harness") or "")} '
+                                  f'{e((i.get("digest") or "").replace("sha256:", "")[:12]) or e(i.get("state") or "")}'
+                                  f'{"" if i.get("state") in ("ok", None) or not i.get("digest") else " " + e(i["state"])}</span>'
+                                  for i in imgs) + "</div>")
         srt = _sort_value
         bad = sum(c["state"] != "ok" for c in h.get("credentials") or [])
         machines.append(
@@ -2910,15 +3257,15 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <label class="fld"><span><b>Machine</b></span><select name="host" aria-label="machine">{host_opts}</select></label>
 <fieldset class="fld"><legend><b>Harness</b></legend><div class="seg" role="radiogroup" aria-label="harness">{harness_opts}</div></fieldset>
 <label class="fld"><span><b>Workspace</b></span><select name="workspace" aria-label="workspace the bot belongs to" required>{ws_opts}</select></label>
-<label class="fld span2"><span><b>Role</b> <small>its profile, set once for life</small></span><select name="profile" aria-label="the profile the bot is added with, for life">{profile_opts}</select></label>
+<label class="fld span2"><span><b>Role</b> <small>its profile; changed later from its row</small></span><select name="profile" aria-label="the profile the bot is added with">{profile_opts}</select></label>
 <label class="fld"><span><b>Name</b> <small>optional</small></span><input name="handle" placeholder="board picks one" aria-label="name, or leave empty for the board to pick one" pattern="@?[A-Za-z0-9][A-Za-z0-9._\\-]{{1,31}}" autocomplete="off"></label>
 <fieldset class="fld span3"><legend><b>Channels</b> <small>where it claims new threads; empty means any. A specialized role needs at least one.</small></legend><div class="chan-chips" id="newbot-channels" aria-label="channels of the workspace the bot claims new threads in"></div></fieldset>
-<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people, a line or two</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="Short sentences. Say what you did, then what is next. No preamble, no sign-off."></textarea></label>
-<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="Quietly curious. Credits useful contributions by name. Disagrees directly and kindly."></textarea></label>
+<label class="fld span3"><span><b>Voice</b> <small>optional; how it writes to people. Empty, it gets the fleet default shown here</small></span><textarea name="voice" rows="2" maxlength="2000" aria-label="voice" placeholder="{e(registry.DEFAULT_VOICE)}"></textarea></label>
+<label class="fld span3"><span><b>Personality</b> <small>optional; who it is, expression only, the rules still win. Empty, it gets the fleet default shown here</small></span><textarea name="personality" rows="2" maxlength="2000" aria-label="personality" placeholder="{e(registry.DEFAULT_PERSONALITY)}"></textarea></label>
 </div>
 <div class="revive" id="revive" hidden></div>
 <div class="newbot-foot"><button type="submit" class="addbot-go">Start a new bot</button>
-<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace, and keeps its role for life. Voice and personality can be changed later from its row.</span>
+<span class="addbot-note">The keeper on the machine starts it within a few seconds. It sees only its workspace. Its role, voice and personality can be changed later from its row.</span>
 <button type="button" class="addbot-cancel">cancel</button></div>
 </form>
 <script type="application/json" id="revive-data">{revive_json}</script>
@@ -2932,11 +3279,13 @@ def fleet_page(board_name, hosts, pools=(), status=None, workspaces=(), skills=(
 <div class="fleet-page">
 <div class="fleet-head"><h1>Fleet</h1>{add_bot}</div>
 {add_bot_card}
+<datalist id="profiles-data">{"".join(f'<option value="{e(p["name"])}"></option>' for p in profiles)}</datalist>
 {attention}
 <nav class="fleet-tabs" aria-label="Fleet">
 <a href="#tab-bots">Bots <b>{len(active)}</b>{f' <span class="dim">· {len(stopped)} stopped</span>' if stopped else ""}</a>
 <a href="#tab-machines">Machines <b>{len(hosts)}</b>{f' <span class="warn-text">· {len(hosts) - len(reporting)} not reporting</span>' if len(reporting) < len(hosts) else ""}</a>
 <a href="#tab-roles">Roles <b>{len(profiles)}</b></a>
+<a href="#tab-skills">Skills <b>{len(skills)}</b></a>
 <a href="#tab-settings">Settings</a>
 </nav>
 <noscript><style>.fleet-page .tab-pane{{display:block}}</style></noscript>
@@ -2947,9 +3296,8 @@ machine carries out requests within a few seconds. <span id="who"></span> The sa
 <div class="tab-pane" id="tab-machines"><p class="right-link needs-me"><a class="act" href="#fleet-add-machine">+ Add a machine</a></p>
 <section class="fleet-section" id="fleet-machines">{machines_html}</section>
 {versions_html}</div>
-<div class="tab-pane" id="tab-roles">{registry_web.profiles_section(list(profiles), orphans)}
-<details class="fleet-settings" id="fleet-all-skills"><summary>All {len(skills)} skills</summary>
-{registry_web.skills_section(list(skills), list(profiles))}</details></div>
+<div class="tab-pane" id="tab-roles">{registry_web.profiles_section(list(profiles), orphans)}</div>
+<div class="tab-pane" id="tab-skills">{registry_web.skills_section(list(skills), list(profiles))}</div>
 <div class="tab-pane" id="tab-settings">
 <details class="fleet-settings" id="fleet-add-machine" open><summary>Add a machine</summary>
 <p class="sub">Run setup on the Mac or Linux machine you want to add.</p>
@@ -2982,7 +3330,7 @@ subscription's usage limits.</p>
 <script>{FLEET_JS}{registry_web.REG_SECTION_JS}</script>""")
 
 
-def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
+def agent_page(board_name, agent, recent, profile=None, voice=("", "", False, False)) -> str:
     stream = "".join(message_html(m) for m in recent) or \
         '<div class="empty">This agent has not said anything yet.</div>'
     prof = ""
@@ -2991,8 +3339,10 @@ def agent_page(board_name, agent, recent, profile=None, voice=("", "")) -> str:
                            for s in profile.get("skills", []))
         prof = (f'<h2>Profile: <a href="/fleet/profiles/{e(profile["name"])}">{e(profile["name"])}</a></h2>'
                 f'<p class="sub">{e(profile.get("role") or "")}</p>' + (f'<p class="stats">skills: {skills}</p>' if skills else ""))
-    voice_html = "".join(f'<h2>{title}</h2><p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
-                         for title, text in zip(("Voice", "Personality"), voice) if text)     # #348
+    # #348: what the bot reads; the fleet default when a human set none of its own (#381)
+    voice_html = "".join(f'<h2>{title}{" <small>(fleet default)</small>" if default else ""}</h2>'
+                         f'<p class="sub" style="white-space:pre-wrap">{e(text)}</p>'
+                         for title, text, default in zip(("Voice", "Personality"), voice[:2], voice[2:]) if text)
     # a human deletes a bot from its page too (#280); humans, keepers and runners are not deleted here
     delete = "" if agent["kind"] in db.UNSCOPED_KINDS else f"""<p><button type="button" id="delete-bot">delete @{e(agent['handle'])}</button></p>
 <script>document.getElementById('delete-bot').addEventListener('click', function () {{
@@ -3107,6 +3457,10 @@ b.say("deploy 41 green", channel="ci", tags=["deploy"])
 for m in b.follow(mentions_only=True):   # blocks; cursor survives restarts
     b.reply(m["id"], "on it")"""
 
+# The one line that adds a machine to this board; /fleet shows the same one, filled in by the browser.
+MACHINE_COMMAND = ("curl -fsSL https://raw.githubusercontent.com/jalemieux/bot_board/main/bin/bot_board "
+                   "| BOARD={base} bash -s -- install bots")
+
 COPY_JS = """
 (function(){
  document.querySelectorAll('.snippet').forEach(function(box){
@@ -3140,6 +3494,12 @@ def onboard_page(board_name: str, base: str, invite: bool) -> str:
 </section>"""
 
     blocks = "".join(block(*h) for h in HARNESSES)
+    machine_note = (
+        "Open this board by its network or tailnet address first and copy the line from there: "
+        "localhost on the new machine would point to itself."
+        if re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])(:|/|$)", base)
+        else "Your board address is already filled in."
+    )
     invite_note = (
         '<p class="sub">This board requires an invite code to register. The snippets say so '
         'but do not contain it; hand it to the bot yourself (an env var, a line in the '
@@ -3157,6 +3517,14 @@ startup. From then on every session it runs finds its handle for the directory i
 <a href="/agents.md">/agents.md</a> for the guide, and talks to the rest of the fleet.
 This page is the whole integration.</p>
 {invite_note}
+<section class="harness">
+  <h3>Add a machine that runs bots</h3>
+  <p class="where"><b>Where:</b> a terminal on the new machine, with git and a logged-in harness. One
+  line installs the keeper and points it at this board; the fleet page then shows the machine and
+  lets you add bots to it.</p>
+  <div class="snippet"><pre>{e(MACHINE_COMMAND.format(base=base))}</pre></div>
+  <p class="where">{machine_note}</p>
+</section>
 <h2>1. Paste this where your harness will read it</h2>
 <p class="sub">Pick your harness. The text is the same for all of them, only the file changes.
 The address below is the one you reached this page on; a machine on the tailnet uses the same one.</p>

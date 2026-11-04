@@ -77,10 +77,7 @@ class ImageAttachments(unittest.TestCase):
                         self.assertEqual(found["attachments"], message["attachments"])
                         self.assertNotIn("image_attachment", response.text)
                         self.assertLess(len(response.content), main.MAX_RESPONSE_BYTES)
-                with sqlite3.connect(db.DB_PATH) as connection:
-                    self.assertEqual(connection.execute(
-                        "SELECT content FROM image_attachments WHERE message_id=?", (message["id"],)
-                    ).fetchone()[0], content)
+                self.assertEqual(Path(db.get_image_attachment(message["id"])["path"]).read_bytes(), content)
                 page = self.client.get("/search?q=Screenshot").text
                 self.assertIn(f'data-image-src="{attachment["url"]}"', page)
         self.assertEqual(self.client.get("/api/messages/999999/image").status_code, 404)
@@ -215,7 +212,9 @@ class ImageAttachments(unittest.TestCase):
             form.locator("textarea").fill("Screenshot draft")
             form.locator(".image-file").set_input_files(
                 {"name": "active.svg", "mimeType": "image/svg+xml", "buffer": b"<svg/>"})
-            form.locator(".err").filter(has_text="Choose a PNG").wait_for()
+            # an SVG is not an image here: it goes as a file, a download, never shown in the page (thread 10141)
+            form.locator(".image-note").filter(has_text="active.svg").wait_for()
+            form.locator(".remove-image").click()
             self.assertEqual(posts, [])
             page.locator("#compose").evaluate("""(form, data) => {
                 const transfer = new DataTransfer();
@@ -247,8 +246,11 @@ class ImageAttachments(unittest.TestCase):
             reply.locator(".image-file").set_input_files(
                 {"name": "reply.png", "mimeType": "image/png", "buffer": picture()})
             reply.locator(".image-note").filter(has_text="reply.png").wait_for()
+            # before posting, the chosen file shows as a chip, with a thumbnail for an image (thread 10173)
+            self.assertTrue(reply.locator(".chip").is_visible() and reply.locator(".chip .thumb").is_visible())
             reply.locator(".remove-image").click()
             self.assertEqual(reply.locator(".image-note").inner_text(), "")
+            self.assertFalse(reply.locator(".chip").is_visible())
             reply.locator(".image-file").set_input_files(
                 {"name": "reply.png", "mimeType": "image/png", "buffer": picture()})
             reply.locator(".image-note").filter(has_text="reply.png").wait_for()
@@ -259,6 +261,21 @@ class ImageAttachments(unittest.TestCase):
             self.assertEqual(messages[-1]["body"], "Image attached.")
             self.assertEqual(messages[-1]["reply_to"], root["id"])
             self.assertEqual(len(messages[-1]["attachments"]), 1)
+            # any other file goes the same way, as a file attachment with its name (thread 10141)
+            reply.locator(".image-file").set_input_files(
+                {"name": "spec.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 x"})
+            reply.locator(".image-note").filter(has_text="spec.pdf").wait_for()
+            self.assertFalse(reply.locator(".chip .thumb").is_visible(), "no thumbnail for a file that is not an image")
+            with page.expect_response(lambda r: r.request.method == "POST" and
+                                      urlsplit(r.url).path == "/api/messages"):
+                reply.locator(".send").click()
+            self.assertEqual(posts[-1]["file_attachment"], {"name": "spec.pdf", "content": base64.b64encode(b"%PDF-1.4 x").decode()})
+            self.assertNotIn("image_attachment", posts[-1])
+            messages = self.client.get(f'/api/threads/{root["id"]}', headers=self.auth).json()["messages"]
+            self.assertEqual(messages[-1]["body"], "File attached: spec.pdf")
+            chip = page.locator('#thread .files a.file[data-attachment][download="spec.pdf"]')
+            chip.wait_for()     # a chip under the message, visible without hovering (thread 10173)
+            self.assertIn("spec.pdf", chip.inner_text())
             self.assertFalse(errors, errors)
 
 

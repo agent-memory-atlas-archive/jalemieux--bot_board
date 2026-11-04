@@ -7,20 +7,30 @@ the jobs the runner fires into workspace channels, and a notice in the admin
 channel when one fails.
 
 Who may change one: a human who manages the admin workspace (or the board), or
-an admin bot, a bot of that workspace. An admin bot's enable and test need
-`approved_by`, the id of such a human's reply in the routine's thread posted
+an admin bot, a bot of that workspace. The trust boundary is the check: it is
+code that runs on the runner's box with the fleet's secrets, so a check a bot
+wrote runs only once a human approved it. The board keeps the last approved
+definition beside the current one (`approved_definition`). A version whose check
+differs from it waits (`waiting`): the board lists it on /routines with the diff
+and an Approve button, counts it in the bell, and tells the admin workspace's
+owner in the routine's thread (#380). Approve stores the yes, asks the runner for
+a test, and the routine is enabled again when the test passes, if it was enabled
+before the change. A change that leaves the check alone (the prompt, the timing,
+the name) is a new version that keeps running: no yes needed.
+
+The older way still works for an admin bot: its enable and test may cite
+`approved_by`, the id of a human manager's reply in the routine's thread posted
 after the current version was written (a new version may move the thread to
-where it is discussed), so nothing a bot wrote runs on the
-runner's box before a human said yes to it. Every change to the definition is a
-new version, paused again. The runner (the ROUTINES_HANDLE agent) reads the
-routines and reports tests and failures back; whether one runs is its state here.
+where it is discussed). Once a version is approved either way, test and enable
+need nothing more. The runner (the ROUTINES_HANDLE agent) reads the routines and
+reports tests and failures back; whether one runs is its state here.
 
 A release whose recipe writer is newer (RECIPE_VERSION) drafts an upgrade of each
 recipe routine an older one wrote: the same settings, the check and prompt this
 release writes. It is not stored, only shown with its diff (`upgrade`), and the
 routine keeps running what was approved until a human manager approves the
-upgrades they were shown, all in one step (#242). A bot cannot: that yes is the
-trust boundary for code that runs with the fleet's secrets.
+upgrades they were shown, in the same list, one or all at once (#242). A bot
+cannot: that yes is the trust boundary for code that runs with the fleet's secrets.
 
 The definition's validation is the runner's own code (bin/routines, loaded as a
 module), so both ends agree on what can run.
@@ -67,6 +77,9 @@ CREATE TABLE IF NOT EXISTS routines (
     defined_at INTEGER NOT NULL,
     thread_id INTEGER REFERENCES messages(id),
     approved_by INTEGER REFERENCES messages(id),
+    approved_definition TEXT,
+    resume INTEGER NOT NULL DEFAULT 0,
+    approving INTEGER NOT NULL DEFAULT 0,
     failure TEXT,
     test_asked INTEGER NOT NULL DEFAULT 0,
     last_test TEXT,
@@ -120,9 +133,15 @@ def init():
         c = db.conn()
         c.executescript(SCHEMA)
         have = {r[1] for r in c.execute("PRAGMA table_info(routines)")}
-        for col, ddl in (("run_asked", "INTEGER NOT NULL DEFAULT 0"), ("last_run", "TEXT")):   # #209
+        for col, ddl in (("run_asked", "INTEGER NOT NULL DEFAULT 0"), ("last_run", "TEXT"),      # #209
+                         ("approved_definition", "TEXT"), ("resume", "INTEGER NOT NULL DEFAULT 0"),  # #380
+                         ("approving", "INTEGER NOT NULL DEFAULT 0")):
             if col not in have:
                 c.execute(f"ALTER TABLE routines ADD COLUMN {col} {ddl}")
+        if "approved_definition" not in have:
+            # a board from before #380: what runs, or was said yes to, counts as approved
+            c.execute("UPDATE routines SET approved_definition=definition"
+                      " WHERE state IN ('enabled','failed') OR approved_by IS NOT NULL")
         c.commit()
 
 
@@ -181,8 +200,8 @@ def seed() -> list[str]:
             print(f"bot_board: shipped routine {name} not stored: {e}", flush=True)
             continue
         with db._write_lock, db.conn() as w:
-            w.execute("INSERT INTO routines(definition,defined_at,created_by,updated_by,created_at,updated_at)"
-                      " VALUES (?,?,?,?,?,?)", (json.dumps(r), db.cursor(), author["id"], author["id"], db.now(), db.now()))
+            w.execute("INSERT INTO routines(definition,defined_at,resume,created_by,updated_by,created_at,updated_at)"
+                      " VALUES (?,?,1,?,?,?,?)", (json.dumps(r), db.cursor(), author["id"], author["id"], db.now(), db.now()))
             w.execute("INSERT OR REPLACE INTO routines_meta(key,value) VALUES (?,?)", (key, db.now()))
         stored.append(name)
     return stored
@@ -258,6 +277,31 @@ def _stored(row: dict) -> dict:
     return cli.upgraded(json.loads(row["definition"]))
 
 
+def _approved(row: dict) -> dict | None:
+    """The definition a human last approved, as this release reads it; None when none was."""
+    return cli.upgraded(json.loads(row["approved_definition"])) if row.get("approved_definition") else None
+
+
+def _waiting(row: dict) -> bool:
+    """Does this version need a human's yes: its check is not the approved one (#380)."""
+    ok = _approved(row)
+    return ok is None or ok["check"] != _stored(row)["check"]
+
+
+def _changed(old: dict | None, new: dict) -> str:
+    """One line on what a version changes against the approved one: `check (3 lines), prompt, every`."""
+    if old is None:
+        return "new"
+    out = []
+    for k in ("check", "prompt"):
+        if old.get(k) != new.get(k):
+            n = sum(1 for line in difflib.unified_diff((old.get(k) or "").splitlines(), (new.get(k) or "").splitlines(),
+                                                       lineterm="", n=0) if line[:1] in "+-" and line[:3] not in ("+++", "---"))
+            out.append(f"{k} ({n} line{'s' if n != 1 else ''})")
+    out += [k for k in FIELDS + ("recipe_version",) if k not in ("check", "prompt") and old.get(k) != new.get(k)]
+    return ", ".join(out) or "nothing"
+
+
 def describe(row: dict, full: bool = True) -> dict:
     d = _stored(row)
     test = json.loads(row["last_test"]) if row["last_test"] else None
@@ -267,7 +311,13 @@ def describe(row: dict, full: bool = True) -> dict:
            "test_pending": row["test_asked"] > (test or {}).get("for", 0), "test_asked": row["test_asked"],
            "last_test": test, "run_pending": row["run_asked"] > (ran or {}).get("for", 0),
            "run_asked": row["run_asked"], "last_run": ran, "problem": cli.problem_with(d),
-           "created_at": row["created_at"], "updated_at": row["updated_at"]}
+           "created_at": row["created_at"], "updated_at": row["updated_at"],
+           "approving": row["approving"] > (test or {}).get("for", 0)}
+    if _waiting(row):
+        # a version whose check no human has approved: shown on /routines with the diff and Approve (#380)
+        ok = _approved(row)
+        out["waiting"] = {"changed": _changed(ok, d), "diff": _diff(ok, d) if ok else "", "resume": bool(row["resume"]),
+                          "by": (db.get_agent_by_id(row["updated_by"]) or {}).get("handle")}
     up = _upgrade(d)
     if up and row["state"] != "deleted":
         out["upgrade"] = {"from": d["recipe_version"], "to": up["recipe_version"], "diff": _diff(d, up)}
@@ -286,11 +336,12 @@ def _upgrade(d: dict) -> dict | None:
     return None if cli.problem_with(up) else up
 
 
-def _diff(old: dict, new: dict) -> str:
-    """What an upgrade changes, as a unified diff of the prompt and then the check."""
+def _diff(old: dict, new: dict, was: str = "approved", now: str = "this version") -> str:
+    """What a version changes, as a unified diff of the prompt and then the check."""
+    if "recipe_version" in old and "recipe_version" in new and old["recipe_version"] != new["recipe_version"]:
+        was, now = f"recipe v{old['recipe_version']}", f"recipe v{new['recipe_version']}"
     return "".join(line for k in ("prompt", "check") for line in difflib.unified_diff(
-        (old[k] + "\n").splitlines(True), (new[k] + "\n").splitlines(True), f"{k} (recipe v{old['recipe_version']})",
-        f"{k} (recipe v{new['recipe_version']})"))
+        (old[k] + "\n").splitlines(True), (new[k] + "\n").splitlines(True), f"{k} ({was})", f"{k} ({now})"))
 
 
 def list_routines(full: bool = True) -> list[dict]:
@@ -348,40 +399,94 @@ def _thread(mid: int | None) -> int | None:
     return m["thread_id"] or m["id"]
 
 
+def _owner() -> dict | None:
+    """The human the board asks for a yes: the admin workspace's owner."""
+    try:
+        return db.get_agent_by_id(workspaces.find(ADMIN_PROJECT)["owner_id"])
+    except KeyError:
+        return None
+
+
+def _say(row: dict, body: str, meta: dict) -> dict | None:
+    """The board's own line in the routine's thread, if it has one: the ask for a yes and
+    what came of it. Posted as the board, so it does not rest on a bot being awake (#380)."""
+    from . import progress
+    root = row["thread_id"] and db.get_message(row["thread_id"])
+    if not root:
+        return None
+    try:
+        return db.post_message(root["channel"], progress.board_agent()["id"], body, reply_to=root["id"],
+                               meta={**meta, "routine": row["id"], "version": row["version"]})
+    except (PermissionError, KeyError, ValueError) as e:      # an archived or closed thread: the bell still asks
+        print(f"routines: could not post in thread {root['id']}: {e}", flush=True)
+        return None
+
+
+def _ask(rid: int, agent: dict) -> None:
+    """A version a bot stored waits for a human: tell the owner where to approve it, in the thread
+    and in their inbox. A human's own version needs no note: they are on the page already."""
+    row = _row(rid)
+    if is_operator(agent) or not _waiting(row):
+        return
+    r = describe(row, full=False)
+    who = _owner()
+    at = "@" + who["handle"] + " " if who else ""
+    _say(row, f"{at}version {row['version']} of routine `{r['name']}` ({r['waiting']['changed']}) waits for your yes. "
+              f"Approve it on /routines#approvals: the runner tests it" +
+              (" and it is enabled again" if row["resume"] else ", then it can be enabled") + ".",
+         {"needs": who["handle"], "ask": f"approve version {row['version']} of routine {r['name']} on /routines#approvals"}
+         if who else {})
+
+
 def create(data: dict, agent: dict) -> dict:
-    """A new routine, paused. `thread`: the message where it was asked for, whose thread holds the yes."""
+    """A new routine, paused, waiting for a human's yes; it comes on once approved and tested.
+    `thread`: the message where it was asked for."""
     _require_switch(agent)
     r = _definition(data)
     thread = _thread(data.get("thread"))
     with db._write_lock, db.conn() as c:
-        rid = c.execute("INSERT INTO routines(definition,defined_at,thread_id,created_by,updated_by,created_at,updated_at)"
-                        " VALUES (?,?,?,?,?,?,?)", (json.dumps(r), db.cursor(), thread, agent["id"], agent["id"],
-                                                  db.now(), db.now())).lastrowid
+        # resume: asked for to run, so it comes on by itself once approved and its test passed
+        rid = c.execute("INSERT INTO routines(definition,defined_at,thread_id,resume,created_by,updated_by,created_at,updated_at)"
+                        " VALUES (?,?,?,1,?,?,?,?)", (json.dumps(r), db.cursor(), thread, agent["id"], agent["id"],
+                                                    db.now(), db.now())).lastrowid
+    _ask(rid, agent)
     return get(rid)
 
 
 def update(rid: int, data: dict, agent: dict) -> dict:
-    """A new version of the definition, paused until it is enabled again.
+    """A new version of the definition. One that changes the check is paused until a human approves
+    it, and comes back on by itself when they do, if it was on; one that leaves the check alone
+    keeps the state and the yes it has (#380).
 
     `thread`: the message where this version is discussed, whose thread then holds the yes (#205).
     """
     _require_switch(agent)
     row = _row(rid)
-    r = _definition(data, _stored(row))
+    old = _stored(row)
+    r = _definition(data, old)
     thread = _thread(data.get("thread")) or row["thread_id"]
+    same = r["check"] == old["check"] and not _waiting(row)
     with db._write_lock, db.conn() as c:
         # a test asked for the old version is dropped with it: the runner never tests a definition
         # nobody has seen (test_pending is test_asked past the last test's `for`)
-        c.execute("UPDATE routines SET definition=?, version=version+1, defined_at=?, thread_id=?, state='paused',"
-                  " approved_by=NULL, failure=NULL, test_asked=COALESCE(json_extract(last_test,'$.for'),0),"
-                  " updated_by=?, updated_at=? WHERE id=?",
-                  (json.dumps(r), db.cursor(), thread, agent["id"], db.now(), rid))
+        if same:
+            c.execute("UPDATE routines SET definition=?, approved_definition=?, version=version+1, defined_at=?, thread_id=?,"
+                      " test_asked=COALESCE(json_extract(last_test,'$.for'),0), approving=0, updated_by=?, updated_at=?"
+                      " WHERE id=?", (json.dumps(r), json.dumps(r), db.cursor(), thread, agent["id"], db.now(), rid))
+        else:
+            c.execute("UPDATE routines SET definition=?, version=version+1, defined_at=?, thread_id=?, state='paused',"
+                      " resume=CASE WHEN state='enabled' THEN 1 ELSE resume END,"
+                      " approved_by=NULL, failure=NULL, test_asked=COALESCE(json_extract(last_test,'$.for'),0), approving=0,"
+                      " updated_by=?, updated_at=? WHERE id=?",
+                      (json.dumps(r), db.cursor(), thread, agent["id"], db.now(), rid))
+    _ask(rid, agent)
     return get(rid)
 
 
 def _approval(row: dict, agent: dict, approved_by: int | None, action: str) -> int | None:
-    """The human's yes an admin bot's enable or test rests on; a human operator needs none."""
-    if is_operator(agent):
+    """The human's yes an admin bot's enable or test rests on; a human operator needs none, and
+    neither does anyone once the version's check is the approved one."""
+    if is_operator(agent) or not _waiting(row):
         return approved_by
     yes = db.get_message(approved_by) if approved_by else None
     author = yes and db.get_agent_by_handle(yes["author"])
@@ -395,17 +500,30 @@ def _approval(row: dict, agent: dict, approved_by: int | None, action: str) -> i
 
 
 def act(rid: int, action: str, agent: dict, approved_by: int | None = None) -> dict:
-    """enable, pause, test, run or delete. run: the runner checks an enabled routine on its
-    next pass as if `every` had passed, and fires a real job if there is work. It needs no
-    approval: it runs the version already enabled (#209)."""
+    """approve, enable, pause, test, run or delete. approve: a human manager's yes to a waiting
+    version, from /routines (#380): the runner tests it, and `report` enables it when the test
+    passes if it was enabled before the change. enable approves too, and runs it now. run: the
+    runner checks an enabled routine on its next pass as if `every` had passed, and fires a real
+    job if there is work. It needs no approval: it runs the version already enabled (#209)."""
     _require_switch(agent)
     row = _row(rid)
     sets, args = [], []
-    if action == "enable":
+    if action == "approve":
+        if not is_operator(agent):
+            raise PermissionError(f"only a human who manages the `{ADMIN_PROJECT}` workspace approves a routine")
+        if not _waiting(row):
+            raise ValueError(f"version {row['version']} of routine {rid} is approved already")
         problem = cli.problem_with(_stored(row))
         if problem:
             raise ValueError(f"this definition cannot run: {problem}")
-        sets, args = ["state='enabled'", "failure=NULL", "approved_by=?"], [_approval(row, agent, approved_by, action)]
+        sets = ["approved_definition=definition", "test_asked=test_asked+1", "approving=test_asked+1"]
+    elif action == "enable":
+        problem = cli.problem_with(_stored(row))
+        if problem:
+            raise ValueError(f"this definition cannot run: {problem}")
+        sets = ["state='enabled'", "failure=NULL", "approved_by=COALESCE(?, approved_by)", "approved_definition=definition",
+                "resume=0", "approving=0"]
+        args = [_approval(row, agent, approved_by, action)]
     elif action == "test":
         _approval(row, agent, approved_by, action)
         sets = ["test_asked=test_asked+1"]
@@ -414,7 +532,7 @@ def act(rid: int, action: str, agent: dict, approved_by: int | None = None) -> d
             raise ValueError("only an enabled routine runs now: enable it first")
         sets = ["run_asked=run_asked+1"]
     elif action == "pause":
-        sets = ["state='paused'"]
+        sets = ["state='paused'", "resume=0"]
     elif action == "delete":
         sets = ["state='deleted'"]
     else:
@@ -425,6 +543,16 @@ def act(rid: int, action: str, agent: dict, approved_by: int | None = None) -> d
                             (*args, agent["id"], db.now(), rid, row["version"])).rowcount
     if not changed:
         raise ValueError(f"routine {rid} changed while you were acting on version {row['version']}: read it again")
+    if action in ("approve", "enable") and _waiting(row):
+        # the record of the yes, in the thread where the bot asked; the inbox ask it answers is closed with it
+        said = _say(row, f"Version {row['version']} approved by {agent['handle']}. " +
+                    ("The runner tests it now" + (", then it is enabled again." if row["resume"] else
+                     "; it stays paused until someone enables it.") if action == "approve" else "Enabled."),
+                    {"resolved": True})
+        if said:
+            with db._write_lock, db.conn() as c:
+                c.execute("UPDATE routines SET approved_by=COALESCE(approved_by, ?) WHERE id=? AND version=?",
+                          (said["id"], rid, row["version"]))
     return {"deleted": True, "id": rid} if action == "delete" else get(rid)
 
 
@@ -451,8 +579,9 @@ def approve_upgrades(data: dict, agent: dict) -> dict:
                 left.append({"id": rid, "why": "no such routine" if not row else "changed since you looked"
                              if row["version"] != version else "nothing to upgrade"})
                 continue
-            c.execute("UPDATE routines SET definition=?, version=version+1, defined_at=?, updated_by=?, updated_at=?"
-                      " WHERE id=?", (json.dumps(up), db.cursor(), agent["id"], db.now(), row["id"]))
+            c.execute("UPDATE routines SET definition=?, approved_definition=?, version=version+1, defined_at=?,"
+                      " updated_by=?, updated_at=? WHERE id=?",
+                      (json.dumps(up), json.dumps(up), db.cursor(), agent["id"], db.now(), row["id"]))
             done.append(row["id"])
     return {"upgraded": done, "left": left}
 
@@ -465,13 +594,29 @@ def report(rid: int, data: dict, agent: dict) -> dict:
     if not is_runner(agent):
         raise PermissionError(f"only the runner (@{cli.ME}) reports on routines")
     row = _row(rid)
+    test = data.get("test") if isinstance(data.get("test"), dict) else None
+    # the test a human's Approve asked for, on the version they approved: it decides what comes next (#380)
+    approving = test and row["approving"] and test.get("for") == row["approving"] \
+        and test.get("version", row["version"]) == row["version"]
     with db._write_lock, db.conn() as c:
-        if isinstance(data.get("test"), dict):
-            c.execute("UPDATE routines SET last_test=? WHERE id=?", (json.dumps({**data["test"], "at": db.now()}), rid))
+        if test:
+            c.execute("UPDATE routines SET last_test=? WHERE id=?", (json.dumps({**test, "at": db.now()}), rid))
+        if approving:
+            back = test.get("ok") and row["resume"] and row["state"] == "paused" and not cli.problem_with(_stored(row))
+            c.execute("UPDATE routines SET approving=0" + (", state='enabled', failure=NULL, resume=0" if back else "")
+                      + " WHERE id=? AND version=?", (rid, row["version"]))
         if isinstance(data.get("run"), dict):
             c.execute("UPDATE routines SET last_run=? WHERE id=?", (json.dumps({**data["run"], "at": db.now()}), rid))
         if data.get("failed"):
             # Only the version it ran: a definition changed since then is not failed by it.
             c.execute("UPDATE routines SET state='failed', failure=? WHERE id=? AND version=? AND state='enabled'",
                       (str(data["failed"])[:2000], rid, data.get("version", row["version"])))
+    if approving:
+        if not test.get("ok"):
+            what = f"Test of version {row['version']} failed: {test.get('error') or 'see /routines#r=' + str(rid)} " \
+                   "It stays paused; a fix is a new version."
+        else:
+            what = f"Test of version {row['version']} ok, " + ("found work. " if test.get("work") else "no work right now. ") \
+                   + ("Enabled again." if back else "It stays paused until someone enables it on /routines.")
+        _say(row, what, {})
     return get(rid)

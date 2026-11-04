@@ -1,8 +1,10 @@
 """The routines page: what recurring work exists, and a way to run, pause, enable or delete it.
 
 Routines are stored on the board (app/routines.py) and asked for in a
-conversation with the admin bot, which stores, tests and enables them. This page
-reads GET /api/routines; its writes are Run now, Pause and Enable (POST /api/routines/{id}/run,
+conversation with the admin bot, which stores them. A version whose check no human
+has approved waits at the top of this page, with recipe upgrades, for one click
+(#380). The page reads GET /api/routines; its writes are Approve (POST /api/routines/{id}/approve
+and /api/routines/upgrades/approve), Run now, Pause and Enable (POST /api/routines/{id}/run,
 /pause and /enable) and Delete (DELETE /api/routines/{id}),
 with the identity the board page keeps in this browser (localStorage bb.me).
 Data from the API is only ever put on the page as text, never as HTML.
@@ -33,6 +35,9 @@ ROUTINES_CSS = """
 .rt button:disabled{opacity:.5;cursor:default}
 .rt .row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-end}
 .rt .note{font-size:12px;color:var(--dim)}
+.rt .wait{border-top:1px solid var(--line);padding:8px 0 4px}
+.rt .wait .row{align-items:center}.rt .wait .row a{font-weight:600}
+.rt #approvals .row h3{margin:0;flex:1}
 .rt .msg-ok{color:var(--good);font-size:13px}.rt .msg-err{color:var(--accent);font-size:13px;white-space:pre-wrap}
 .rt .prob{color:var(--accent);font-size:13px;white-space:pre-wrap;margin:6px 0}
 .rt pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 10px}
@@ -160,9 +165,9 @@ function list() {
     h('p', {'class': 'sub'}, 'Recurring work. A check script runs on a timer at no cost; only when it finds work does a message go to the workspace channel for a bot to claim. ',
       'To get a new routine, or to change one, say what you want in the channel of the ',
       h('a', {href: '/workspaces/' + encodeURIComponent(ADMIN_PROJECT), text: ADMIN_PROJECT + ' workspace'}),
-      ': the admin bot works it out with you there, tests it once you agree, and switches it on.'));
+      ': the admin bot works it out with you there and stores it; you approve it here, and the board tests it and switches it on.'));
   var rs = data.routines || [];
-  upgrades(rs.filter(function (r) { return r.upgrade; }));
+  approvals(rs.filter(function (r) { return r.waiting && !r.problem; }), rs.filter(function (r) { return r.upgrade; }));
   if (!rs.length) add(root, h('div', {'class': 'empty', text: 'No routine yet.'}));
   else add(root, h('table', null,
     h('thead', null, h('tr', null, ['routine', 'state', 'fires in', 'every', 'jobs', 'asked in'].map(function (t) { return h('th', {text: t}); }))),
@@ -179,30 +184,62 @@ function list() {
     }))));
 }
 
-// ---- recipe upgrades: one yes for all of them (#242) ------------------------------
-function upgrades(ups) {
-  if (!ups.length) return;
-  var to = ups[0].upgrade.to, out = h('div', {role: 'status', 'aria-live': 'polite'});
-  add(root, h('section', {id: 'upgrades'}, h('h3', {text: ups.length + ' routine upgrade(s) wait for your yes'}),
-    h('p', {'class': 'note', text: 'This release writes recipe checks and prompts as version ' + to + '. Each routine below ' +
-      'keeps its settings and keeps running what was approved until you approve; then it runs the check and prompt shown here, ' +
-      'in the state it is in now.'}),
-    ups.map(function (r) {
-      return h('details', null, h('summary', null, h('a', {href: '#r=' + r.id, text: r.name || ('#' + r.id)}),
-        ' (version ' + r.version + ', recipe v' + r.upgrade.from + ' → v' + r.upgrade.to + ')'), h('pre', {text: r.upgrade.diff}));
+// ---- what waits for a yes: versions a bot stored, and recipe upgrades (#380, #242) ----
+// One list, one Approve per item, Approve all at the top. A version's Approve has the runner
+// test it, and the board enables it again when the test passes if it was on before the change.
+function approvals(waiting, ups) {
+  if (!waiting.length && !ups.length) return;
+  var to = ups.length ? ups[0].upgrade.to : null, out = h('div', {role: 'status', 'aria-live': 'polite'});
+  var n = waiting.length + ups.length;
+  function approveVersion(r) {
+    return api('POST', '/api/routines/' + encodeURIComponent(r.id) + '/approve').then(function (res) {
+      return res.ok ? null : (r.name || '#' + r.id) + ': ' + why(res);
+    });
+  }
+  function approveUpgrades(list) {
+    if (!list.length) return Promise.resolve(null);
+    var shown = {}; list.forEach(function (r) { shown[r.id] = r.version; });
+    return api('POST', '/api/routines/upgrades/approve', {recipe_version: to, routines: shown}).then(function (res) {
+      if (!res.ok) return why(res);
+      var left = res.data.left || [];
+      return left.length ? 'left as they were: ' + left.map(function (x) { return '#' + x.id + ' (' + x.why + ')'; }).join(', ') : null;
+    });
+  }
+  function after(btn, problems) {
+    btn.disabled = false;
+    problems = problems.filter(Boolean);
+    status(out, !problems.length, problems.length ? problems.join('; ') : 'Approved. The runner tests each one within about a minute; the thread says what came of it.');
+    load();
+  }
+  function item(r, what, resume, diff, approve) {
+    return h('div', {'class': 'wait'},
+      h('div', {'class': 'row'}, h('a', {href: '#r=' + r.id, text: r.name || ('#' + r.id)}), h('span', {'class': 'note', text: what}),
+        badge(r.state || '?', r.state), resume ? h('span', {'class': 'note', text: 'on again once the test passes'}) : null,
+        ME ? h('button', {type: 'button', 'class': 'quiet', text: 'Approve', onclick: function (ev) {
+          var btn = ev.currentTarget; btn.disabled = true;
+          approve().then(function (p) { after(btn, [p]); });
+        }}) : null),
+      diff ? h('details', null, h('summary', {text: 'diff'}), h('pre', {text: diff})) : null,
+      r.thread ? h('div', {'class': 'note'}, 'asked in ', thread(r.thread)) : null);
+  }
+  add(root, h('section', {id: 'approvals'},
+    h('div', {'class': 'row'}, h('h3', {text: n + ' routine change' + (n === 1 ? '' : 's') + ' wait' + (n === 1 ? 's' : '') + ' for your yes'}),
+      ME && n > 1 ? h('button', {type: 'button', text: 'Approve all', onclick: function (ev) {
+        var btn = ev.currentTarget; btn.disabled = true;
+        Promise.all(waiting.map(approveVersion).concat([approveUpgrades(ups)])).then(function (ps) { after(btn, ps); });
+      }}) : null),
+    h('p', {'class': 'note', text: 'A check is code that runs on the runner\'s box with the fleet\'s credentials, so a new one waits for you. ' +
+      'Approving has the runner test it; a routine that was on comes back on when the test passes, one that was paused stays paused until you enable it. ' +
+      'Changes to a prompt or a setting never wait.'}),
+    waiting.map(function (r) {
+      var w = r.waiting;
+      return item(r, 'version ' + r.version + (w.by ? ' by @' + w.by : '') + ': ' + w.changed, w.resume, w.diff, function () { return approveVersion(r); });
     }),
-    ME ? h('button', {type: 'button', text: 'Approve all', onclick: function (ev) {
-      var shown = {}; ups.forEach(function (r) { shown[r.id] = r.version; });
-      var btn = ev.currentTarget; btn.disabled = true;
-      api('POST', '/api/routines/upgrades/approve', {recipe_version: to, routines: shown}).then(function (res) {
-        btn.disabled = false;
-        if (!res.ok) { status(out, false, why(res)); return; }
-        var left = res.data.left || [];
-        status(out, !left.length, 'Upgraded ' + (res.data.upgraded || []).length + '.' + (left.length ? ' Left as they were: ' +
-          left.map(function (x) { return '#' + x.id + ' (' + x.why + ')'; }).join(', ') + '.' : ''));
-        load();
-      });
-    }}) : h('p', {'class': 'note', text: 'Sign in as a manager of the ' + ADMIN_PROJECT + ' workspace to approve.'}), out));
+    ups.map(function (r) {
+      return item(r, 'recipe upgrade v' + r.upgrade.from + ' → v' + r.upgrade.to + ': this release writes the check and prompt again, settings kept',
+        false, r.upgrade.diff, function () { return approveUpgrades([r]); });
+    }),
+    ME ? null : h('p', {'class': 'note', text: 'Sign in as a manager of the ' + ADMIN_PROJECT + ' workspace to approve.'}), out));
 }
 
 // ---- one routine -----------------------------------------------------------------
@@ -212,7 +249,9 @@ function detail(r) {
     r.about ? h('p', {'class': 'sub', text: r.about}) : null);
   if (r.problem) add(root, h('p', {'class': 'prob', text: 'Invalid, so it never runs: ' + r.problem}));
   if (r.upgrade) add(root, h('p', {'class': 'note'}, 'An upgrade to recipe version ' + r.upgrade.to + ' waits for your yes: ',
-    h('a', {href: '#upgrades', text: 'see it with the others'}), '.'));
+    h('a', {href: '#approvals', text: 'see it with the others'}), '.'));
+  if (r.waiting && !r.problem) add(root, h('p', {'class': 'prob'}, 'Version ' + r.version + ' (' + r.waiting.changed + ') waits for your yes' +
+    (r.approving ? ', and the runner is testing it now.' : ': '), r.approving ? null : h('a', {href: '#approvals', text: 'approve it with the others'}), '.'));
   if (r.failure) add(root, h('p', {'class': 'prob', text: 'Failed: ' + r.failure + (r.state === 'failed' ? ' It runs again once enabled again.' : '')}));
 
   var sec = h('section', null,
@@ -225,7 +264,7 @@ function detail(r) {
       h('dt', {text: 'done within'}), h('dd', {text: fmtDur(r.done_timeout)}),
       h('dt', {text: 'sent again'}), h('dd', {text: (r.resends != null ? r.resends : '?') + ' time(s) before it counts as failed'}),
       r.skill ? [h('dt', {text: 'needs skill'}), h('dd', {text: r.skill})] : null),
-    h('p', {'class': 'note'}, 'To change or test it, ask the admin bot', r.thread ? [' in ', thread(r.thread, 'the thread it came from')] : null, '.'));
+    h('p', {'class': 'note'}, 'To change it, ask the admin bot', r.thread ? [' in ', thread(r.thread, 'the thread it came from')] : null, '.'));
   add(root, sec);
   if (ME) {
     var out = h('div', {role: 'status', 'aria-live': 'polite'});
@@ -292,10 +331,10 @@ function testResult(r) {
 }
 
 function recipeView(r) {
-  var rc = r.recipe;
+  var rc = r.recipe, forge = rc.forgejo ? rc.forgejo + '/' + rc.repo : 'https://github.com/' + rc.repo;
   return h('section', null, h('h3', {text: 'What it does'}),
     h('dl', null,
-      h('dt', {text: 'watches'}), h('dd', null, h('a', {href: 'https://github.com/' + rc.repo + '/issues', text: rc.repo}),
+      h('dt', {text: 'watches'}), h('dd', null, h('a', {href: forge + '/issues', text: rc.repo + (rc.forgejo ? ' on Forgejo' : '')}),
         rc.after ? ', opened after ' + when(rc.after) : ', including the backlog', ', ' + rc.batch + ' at a time'),
       h('dt', {text: 'skips'}), h('dd', {text: [rc.unassigned ? 'assigned' : '', rc.no_linked_pr ? 'linked to a PR' : '',
         rc.skip_labels.length ? 'labelled ' + rc.skip_labels.join(', ') : ''].filter(Boolean).join(' · ') || 'nothing'}),
@@ -307,7 +346,7 @@ function recipeView(r) {
     (r.items || []).length ? [h('h3', {text: 'Announced'}), h('table', null,
       h('thead', null, h('tr', null, ['issue', 'where', 'announced', 'replies', 'held by', 'their last post'].map(function (t) { return h('th', {text: t}); }))),
       h('tbody', null, r.items.map(function (i) {
-        return h('tr', null, h('td', null, h('a', {href: 'https://github.com/' + rc.repo + '/issues/' + i.number, text: '#' + i.number})),
+        return h('tr', null, h('td', null, h('a', {href: forge + '/issues/' + i.number, text: '#' + i.number})),
           h('td', null, thread(i.id, '#' + i.channel)), h('td', {'class': 'note', text: when(i.created_at)}),
           h('td', {'class': 'mono', text: String(i.replies)}),
           h('td', {'class': 'note', text: i.worker ? i.worker + ' since ' + when(i.worker_claimed_at) : 'nobody'}),

@@ -1225,7 +1225,7 @@ for line in sys.stdin.read().splitlines():
         meta=message.get("meta") or {}
         if uid in delivered or message["author"]==handle or meta.get("launcher")=="bin/bot":
             continue
-        print("\t".join([uid,message["board"],tid,message["author"],"reply",message["body"].replace("\n","\\n")]))
+        print("\t".join([uid,message["board"],tid,message["author"],"reply",(message["body"]+"".join("\n[attachment: %s, %s bytes: fetch $BOARD%s with your token]"%(a["name"].replace("\t"," "),a["size_bytes"],a["url"]) for a in message.get("attachments") or [])).replace("\n","\\n")]))
         delivered.add(uid)
 ' "$BOARD" "$TOKFILE" "$STATE" "$HANDLE" "$SEEN"
 }
@@ -1273,10 +1273,13 @@ for m in messages:
     threads.add(str(tid))
     if meta.get("done") is True or m.get("completed_through") or m.get("worker"):
         continue
+    # a mention is for that agent, unless every one mentioned is stopped, away or never claims:
+    # the same rule as the live pickup (#216, #453)
     if m.get("mentions") and handle.lower() not in [h.lower() for h in m["mentions"]]:
-        continue
+        if set(m["mentions"])-{u["mention"] for u in m.get("unreachable",[])}:
+            continue
     why="backlog item" if meta.get("routine_item") and m["id"]==tid else "backlog"
-    out.append("\t".join([str(m["id"]),ch,str(tid),m["author"],why,m["body"].replace("\n","\\n")]))
+    out.append("\t".join([str(m["id"]),ch,str(tid),m["author"],why,(m["body"]+"".join("\n[attachment: %s, %s bytes: fetch $BOARD%s with your token]"%(a["name"].replace("\t"," "),a["size_bytes"],a["url"]) for a in m.get("attachments") or [])).replace("\n","\\n")]))
 with open(os.path.join(state,"backlog.next"),"w") as output:
     output.write(str(next_before))
 with open(threads_path,"w") as output:
@@ -1328,7 +1331,7 @@ for m in msgs:
         if reachable or meta.get("done") is True or m.get("worker"): continue
         why="new item" if meta.get("routine_item") and m.get("reply_to") is None else "new thread"
     else: continue
-    print("\t".join([str(m["id"]),m["board"],str(tid),m["author"],why,m["body"].replace("\n","\\n")]))
+    print("\t".join([str(m["id"]),m["board"],str(tid),m["author"],why,(m["body"]+"".join("\n[attachment: %s, %s bytes: fetch $BOARD%s with your token]"%(a["name"].replace("\t"," "),a["size_bytes"],a["url"]) for a in m.get("attachments") or [])).replace("\n","\\n")]))
 print(hi,file=sys.stderr)' "$HANDLE" "$SEEN" "$STATE/all.json" 2>"$STATE/seen.tmp"
   SEEN=$(cat "$STATE/seen.tmp"); echo "$SEEN" > "$STATE/seen"
 }

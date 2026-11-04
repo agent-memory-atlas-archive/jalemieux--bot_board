@@ -22,6 +22,7 @@ published context) are migrated in place at startup: see `_migrate`.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from . import db
@@ -413,6 +414,181 @@ def update(slug, data, agent) -> dict:
     return describe(find(slug), agent)
 
 
+# ---- deleting (#473): a human removes an archived channel or workspace and everything in it.
+# Archiving comes first, so a delete is always the second of two steps; the slug, typed back,
+# confirms it; a workspace that still has bots is refused, so nothing running is orphaned.
+
+def _channel_of(ws, channel):
+    board = db.get_board(channel if '.' in channel else f"{ws['slug']}.{channel}") or db.get_board(channel)
+    if not board or board.get('workspace_id') != ws['id'] or board['kind'] != 'channel':
+        raise KeyError('No such channel in this workspace.')
+    return board
+
+
+def _bindings(c, slug) -> list[tuple[str, list]]:
+    """The fleet bots bound to this channel (fleet_bots.channels), with their bindings."""
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_bots'").fetchone():
+        return []
+    out = []
+    for r in c.execute("SELECT handle, channels FROM fleet_bots WHERE channels IS NOT NULL AND channels != ''"):
+        try:
+            chans = json.loads(r['channels']) or []
+        except ValueError:
+            continue
+        if slug.lower() in [str(x).lower() for x in chans]:
+            out.append((r['handle'], chans))
+    return out
+
+
+def _routines_in(c, slugs) -> list[dict]:
+    """The routines that post to these channels: they go with them."""
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE name='routines'").fetchone():
+        return []
+    out = []
+    for r in c.execute('SELECT id, definition FROM routines'):
+        d = json.loads(r['definition'] or '{}')
+        if d.get('channel') in slugs:
+            out.append({'id': r['id'], 'name': d.get('name', '')})
+    return out
+
+
+def _contents(c, boards, ws=None) -> dict:
+    """What deleting these channels (and the workspace, if given) removes."""
+    ids = [b['id'] for b in boards]
+    q = ','.join('?' * len(ids)) or 'NULL'
+    msgs = f'SELECT id FROM messages WHERE board_id IN ({q})'
+    count = lambda sql: c.execute(sql, ids).fetchone()[0]
+    out = {'channels': [b['slug'] for b in boards],
+           'threads': count(f'SELECT COUNT(*) FROM messages WHERE board_id IN ({q}) AND reply_to IS NULL'),
+           'messages': count(f'SELECT COUNT(*) FROM messages WHERE board_id IN ({q})'),
+           'attachments': sum(count(f'SELECT COUNT(*) FROM {t} WHERE message_id IN ({msgs})')
+                              for t in ('text_attachments', 'image_attachments', 'file_attachments')),
+           'routines': [r['name'] for r in _routines_in(c, {b['slug'] for b in boards})]}
+    if ws is not None:
+        out['documents'] = c.execute(     # paths whose newest revision is not a deletion
+            'SELECT COUNT(*) FROM knowledge_docs k JOIN (SELECT path, MAX(revision) r FROM knowledge_docs'
+            ' WHERE workspace_id=? GROUP BY path) x ON k.path=x.path AND k.revision=x.r'
+            ' WHERE k.workspace_id=? AND k.deleted=0', (ws['id'], ws['id'])).fetchone()[0]
+        out['bots'] = bots_of(ws)
+    return out
+
+
+def _purge(c, boards) -> list[str]:
+    """Delete these channels and everything in them; returns the attachment keys they used,
+    for the caller to remove from disk once nothing else uses them."""
+    ids = [b['id'] for b in boards]
+    q = ','.join('?' * len(ids))
+    mids = [r[0] for r in c.execute(f'SELECT id FROM messages WHERE board_id IN ({q})', ids)]
+    for r in _routines_in(c, {b['slug'] for b in boards}):
+        c.execute('DELETE FROM routines WHERE id=?', (r['id'],))
+    keys = []
+    if mids:
+        m = ','.join('?' * len(mids))
+        for t in ('text_attachments', 'image_attachments', 'file_attachments'):
+            keys += [r[0] for r in c.execute(f'SELECT storage_key FROM {t} WHERE message_id IN ({m})', mids)]
+            c.execute(f'DELETE FROM {t} WHERE message_id IN ({m})', mids)
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='routines'").fetchone():
+            c.execute(f'UPDATE routines SET thread_id=NULL WHERE thread_id IN ({m})', mids)
+            c.execute(f'UPDATE routines SET approved_by=NULL WHERE approved_by IN ({m})', mids)
+        for t, col in (('mentions', 'message_id'), ('tags', 'message_id'), ('message_receipts', 'message_id'),
+                       ('thread_workers', 'thread_id'), ('thread_hidden', 'thread_id'), ('thread_completions', 'thread_id')):
+            c.execute(f'DELETE FROM {t} WHERE {col} IN ({m})', mids)
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='message_keys'").fetchone():
+            c.execute(f'DELETE FROM message_keys WHERE message_id IN ({m})', mids)
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='status_dismissals'").fetchone():
+            c.executemany('DELETE FROM status_dismissals WHERE key IN (?,?)', [(f'm{i}', f'w{i}') for i in mids])
+        c.execute(f'UPDATE messages SET reply_to=NULL WHERE id IN ({m})', mids)
+        c.execute(f'DELETE FROM messages WHERE id IN ({m})', mids)
+    c.execute(f'DELETE FROM members WHERE board_id IN ({q})', ids)
+    c.execute(f'DELETE FROM boards WHERE id IN ({q})', ids)
+    return keys
+
+
+def _drop_files(keys):
+    """Remove the files no remaining attachment uses (the store shares identical uploads)."""
+    from . import storage
+    c = db.conn()
+    for key in set(keys):
+        if any(c.execute(f'SELECT 1 FROM {t} WHERE storage_key=?', (key,)).fetchone()
+               for t in ('text_attachments', 'image_attachments', 'file_attachments')):
+            continue
+        try:
+            os.remove(storage.path(key))
+        except OSError:
+            pass
+
+
+def _require_human(agent, what):
+    if not is_admin(agent):
+        raise PermissionError(f'Only a human deletes a {what}.')
+
+
+def channel_deletion(slug, channel, agent) -> dict:
+    """What deleting the channel would remove, for the warning."""
+    _require_human(agent, 'channel')
+    ws = find(slug)
+    board = _channel_of(ws, channel)
+    out = _contents(db.conn(), [board])
+    out['bound_only'] = sorted(h for h, chans in _bindings(db.conn(), board['slug']) if len(chans) == 1)
+    return out
+
+
+def delete_channel(slug, channel, confirm, agent) -> dict:
+    _require_human(agent, 'channel')
+    with db._write_lock, db.conn() as c:
+        ws = find(slug)
+        board = _channel_of(ws, channel)
+        if board['id'] == ws['board_id']:
+            raise ValueError("The General channel goes only with its workspace.")
+        if not (board.get('archived') or ws['archived']):
+            raise Conflict('Archive the channel first; a delete is the second step.')
+        bound = _bindings(c, board['slug'])
+        only = sorted(h for h, chans in bound if len(chans) == 1)
+        if only:     # an empty binding would mean any channel, which a bound bot is not allowed
+            raise Conflict('Bind these bots to another channel, or delete them, first: '
+                           + ', '.join('@' + h for h in only) + '.')
+        if confirm != board['slug']:
+            raise ValueError(f"Type the channel's slug, {board['slug']}, to confirm.")
+        for h, chans in bound:
+            c.execute('UPDATE fleet_bots SET channels=? WHERE handle=?',
+                      (json.dumps([x for x in chans if str(x).lower() != board['slug'].lower()]), h))
+        gone = _contents(c, [board])
+        keys = _purge(c, [board])
+        _audit(c, ws['id'], agent, 'delete_channel', gone)
+    _drop_files(keys)
+    return {'deleted': gone}
+
+
+def deletion(slug, agent) -> dict:
+    _require_human(agent, 'workspace')
+    ws = find(slug)
+    return _contents(db.conn(), [db.get_board(ch['slug']) for ch in channels_of(ws)], ws)
+
+
+def delete(slug, confirm, agent) -> dict:
+    _require_human(agent, 'workspace')
+    with db._write_lock, db.conn() as c:
+        ws = find(slug)
+        if ws['slug'] == ADMIN:
+            raise ValueError('The admin workspace cannot be deleted.')
+        if not ws['archived']:
+            raise Conflict('Archive the workspace first; a delete is the second step.')
+        bots = bots_of(ws)
+        if bots:
+            raise Conflict('Move or delete its bots first: ' + ', '.join('@' + h for h in bots) + '.')
+        if confirm != ws['slug']:
+            raise ValueError(f"Type the workspace's slug, {ws['slug']}, to confirm.")
+        boards = [db.get_board(ch['slug']) for ch in channels_of(ws)]
+        gone = _contents(c, boards, ws)
+        keys = _purge(c, [b for b in boards if b['id'] != ws['board_id']])
+        c.execute('DELETE FROM knowledge_docs WHERE workspace_id=?', (ws['id'],))
+        c.execute('DELETE FROM workspace_audit WHERE workspace_id=?', (ws['id'],))
+        c.execute('DELETE FROM workspaces WHERE id=?', (ws['id'],))
+        keys += _purge(c, [b for b in boards if b['id'] == ws['board_id']])
+    _drop_files(keys)
+    return {'deleted': gone}
+
+
 def set_bots(slug, handles, agent) -> dict:
     """The bots of a workspace: each named bot is moved here from wherever it was;
     a bot of this workspace left out is released (it then belongs nowhere)."""
@@ -490,8 +666,7 @@ def seed_request(slug: str, channel: str | None, seed: dict, agent: dict) -> int
                          db.now())).lastrowid
         c.execute('UPDATE messages SET thread_id=id WHERE id=?', (mid,))
         if text:
-            c.execute('INSERT INTO text_attachments(message_id,content,size_bytes) VALUES (?,?,?)',
-                      (mid, text, len(text.encode('utf-8'))))
+            db.add_text_attachment(c, mid, text)
     return mid
 
 

@@ -69,8 +69,11 @@ let document = {querySelectorAll(){ return []; }};
 let history = {pushState(){}, replaceState(){}};
 function threadUrl(id){ return '/t/' + id; }
 function messageHtml(m){ return '[message:' + m.id + ']'; }
+function foldRuns(ms){ return ms.map(m => ({msg: m})); }   // the @board fold (#403) is tested in test_board_fold
+function boardPref(){ return 'visible'; }
 function showCompose(){ shown++; }
-function $(selector){ return selector === '#tboard' ? href : null; }
+let ME = null, hideBtn = {dataset: {}};
+function $(selector){ return selector === '#tboard' ? href : selector === '#thide' ? hideBtn : null; }
 function alert(text){ alerts.push(text); }
 async function openChannel(slug){ navigated++; assert.equal(slug, board.slug); S.cur = board; }
 async function fetch(url){

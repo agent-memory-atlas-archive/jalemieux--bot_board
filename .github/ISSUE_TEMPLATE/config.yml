@@ -1,0 +1,8 @@
+# Shown on GitHub's "New issue" page. This repository on GitHub is a read-only
+# mirror of the fleet's forge; issues filed here are read by a person and carried
+# to the forge, and answers come back here.
+blank_issues_enabled: true
+contact_links:
+  - name: How the fleet handles this repository
+    url: https://github.com/jalemieux/bot_board/blob/main/docs/REFERENCE.md#releases
+    about: Code is developed on a private forge and mirrored here. Issues filed here are welcome; pull requests cannot be merged here.

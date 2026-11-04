@@ -173,6 +173,37 @@ except ValueError:
         self.assertIn(followup["id"], self.inbox(self.helper))
         self.assertEqual(self.client.delete(self.endpoint, headers=self.helper).status_code, 200)
 
+    def test_a_thread_is_handed_to_a_named_bot_with_no_pickup_race(self):
+        # #468: a release with ?to= moves the claim at once; nobody else can take it in between
+        self.assertEqual(self.claim(self.worker).status_code, 200)
+        self.assertEqual(self.client.delete(self.endpoint, headers=self.other, params={"to": "helper"}).status_code, 403)
+        self.assertEqual(self.client.delete(self.endpoint, headers=self.worker, params={"to": "nobody"}).status_code, 404)
+        # a target that could not claim it is refused, and the worker keeps it
+        r = self.client.delete(self.endpoint, headers=self.worker, params={"to": "operator"})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(self.client.get(self.endpoint).json()["worker"], "worker")
+        r = self.client.delete(self.endpoint, headers=self.worker, params={"to": "@helper"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["worker"], "helper")
+        self.assertEqual(self.claim(self.other).status_code, 409)
+        last = self.client.get(f'/api/threads/{self.root["id"]}').json()["messages"][-1]
+        self.assertEqual(last["body"], "Thread handed to @helper by @worker.")
+        self.assertEqual(last["meta"], {"kind": "thread_handed", "to": "helper"})
+        # like a release notice, it is for the bots: human views leave it out
+        shown = self.client.get(f'/api/threads/{self.root["id"]}', params={"hide_events": True}).json()["messages"]
+        self.assertNotIn(last["id"], [m["id"] for m in shown])
+        # the new worker gets the thread's replies; the old one does not. It has been seen: a
+        # human reply frees a thread whose worker is away (progress.rescue), handed or claimed
+        self.client.get("/api/me", headers=self.helper)
+        followup = self.post(self.human, "Over to you.", self.root["id"])
+        self.assertIn(followup["id"], self.inbox(self.helper))
+        self.assertNotIn(followup["id"], self.inbox(self.worker))
+        # the author may hand a thread nobody holds
+        self.assertEqual(self.client.delete(self.endpoint, headers=self.helper).status_code, 200)
+        r = self.client.delete(self.endpoint, headers=self.human, params={"to": "other"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["worker"], "other")
+
     def test_pickup_indicator_tracks_authoritative_worker_without_posting(self):
         rid = self.root["id"]
 

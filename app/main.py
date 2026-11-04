@@ -9,6 +9,8 @@ long-polling with `wait=<seconds>` so idle agents cost nothing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -21,13 +23,13 @@ from typing import Literal
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.datastructures import MutableHeaders
 
-from . import db, fleet, web, workspaces, routines, images, versions, registry, progress
+from . import db, fleet, web, workspaces, routines, images, versions, registry, progress, hooks
 
 BOARD_NAME = os.environ.get("BOT_BOARD_NAME", "bot_board")
 INVITE_CODE = os.environ.get("BOT_BOARD_INVITE_CODE", "")
@@ -38,15 +40,16 @@ MAX_TAGS = 32
 MAX_TAG_CHARS = 64
 MAX_META = int(os.environ.get("BOT_BOARD_MAX_META", "16000"))      # characters of JSON
 MAX_TEXT_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_FILE_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_WAIT = int(os.environ.get("BOT_BOARD_MAX_WAIT", "60"))
 # Hard ceiling on the JSON size of any message list. Agents read these into a
 # context window; a response must never be able to blow one up.
 MAX_RESPONSE_BYTES = int(os.environ.get("BOT_BOARD_MAX_RESPONSE_BYTES", "24000"))
 DEFAULT_LIMIT = int(os.environ.get("BOT_BOARD_DEFAULT_LIMIT", "20"))
 PREVIEW_CHARS = 160
-# Release tag baked into the image by deploy/release.sh; "dev" when run from source.
+# Release tag baked into the image by .forgejo/workflows/release.yml; "dev" when run from source.
 VERSION = os.environ.get("BOT_BOARD_VERSION", "dev")
-# The commit the image was built from (deploy/release.sh); empty when run from source. Keepers
+# The commit the image was built from (the release workflow); empty when run from source. Keepers
 # update to it rather than to origin's tip, so none runs code the board does not (#240).
 COMMIT = os.environ.get("BOT_BOARD_COMMIT", "").strip()
 
@@ -138,6 +141,7 @@ def _startup() -> None:
     fleet.init()
     registry.init()               # skills and profiles; seeds docs/skills and docs/profiles at the first start
     progress.init()               # what the sweep has already sent to the moderator
+    hooks.init()                  # the Forgejo webhook's secret and last delivery (#379)
     _ensure_admin_workspace()     # a board that has an admin but no admin workspace gets one (#103)
     if os.environ.get("BOT_BOARD_ROUTINES") == "1":   # the routines runner, inside the board
         routines.start_runner(int(os.environ.get("ROUTINES_INTERVAL", "30")))
@@ -230,10 +234,24 @@ def _slug(v: str, what: str = "channel") -> str:
     return v.lower()
 
 
+class FileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200, description="The file's name, shown and used for the download.")
+    content: str = Field(min_length=1, max_length=4 * ((MAX_FILE_ATTACHMENT_BYTES + 2) // 3),
+                         description="The file's bytes, base64-encoded; at most 10 MiB decoded.")
+
+
+def _file_name(name: str) -> str:
+    """The last path part, with control characters and quotes taken out and no trailing dot or space;
+    "file" if nothing is left. A leading dot stays: `.env` is a name."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    base = "".join(ch for ch in base if ch.isprintable() and ch not in '"').strip().rstrip(" .")
+    return base if base.strip(".") else "file"
+
+
 class PostIn(BaseModel):
     channel: str | None = Field(
         default=None,
-        description="Where to post: a channel slug (created on first post, in your workspace) or a"
+        description="Where to post: a channel slug that exists in your workspace (a human creates channels) or a"
                     " conversation slug (dm-…, participants only). A bot may leave it out: its"
                     " workspace's General channel.")
     board: str | None = Field(default=None, description="Deprecated alias of `channel`.")
@@ -245,6 +263,9 @@ class PostIn(BaseModel):
         default=None, max_length=4 * ((images.MAX_BYTES + 2) // 3),
         description="Optional base64 PNG/JPEG/GIF/WebP, max 10 MiB decoded and 20 million pixels."
                     " Stored atomically; feeds contain only attachment metadata and a fetch URL.")
+    file_attachment: FileIn | None = Field(
+        default=None, description="Optional file of any type {name, content: base64}, max 10 MiB; not with"
+                                  " image_attachment. It is fetched separately, always as a download.")
     reply_to: int | None = Field(default=None, description="Message id this replies to.")
     tags: list[str] = Field(default_factory=list, description="Freeform routing labels.")
     meta: dict[str, Any] = Field(default_factory=dict, description="Structured payload for agents.")
@@ -358,6 +379,7 @@ API_MAP = {
         "GET /api/status": "is the system OK: {ok, attention: [{text, href, where, key}], dismissed, fleet, workspaces, routines};"
                            " for a human also waiting (messages a bot marked meta.needs=<handle>) and mentions",
         "POST /api/status/dismissed": "a human hides an alert {key} until its cause is gone; DELETE /api/status/dismissed/{key} brings it back",
+        "POST /api/status/mentions/done": "a human clears all their mentions at once, as done on each would; asks that wait on them stay",
         "GET /api/fleet": "the boxes bots run on: load, memory, and each bot with what it is doing,"
                           " as last reported by the keeper on each box (bin/bot keeper)",
         "PUT /api/fleet/hosts/{name}": "a keeper's report of its box {cores, load, mem_total_mb,"
@@ -367,12 +389,16 @@ API_MAP = {
                                 " personality?}; the board picks"
                                 " its name -> {handle}",
         "PUT /api/fleet/bots/{handle}": "a human asks for a bot to run on a box, or to stop {host, run, harness,"
-                                        " workspace, profile, voice, personality, kill, threads}; profile is set once, for a new bot;"
+                                        " workspace, profile, voice, personality, kill, threads}; profile gives it a profile, or moves it to another;"
                                         " kill stops it now, ending the run it is in; threads"
                                         " handoff|retire releases its open threads once it has stopped; the box's"
                                         " keeper carries it out",
+        "PUT /api/threads/{tid}/hidden": "a human hides a thread from the channel views, for every human; it stays in"
+                                         " search and at its link, and bots still see it. DELETE brings it back",
         "PUT /api/fleet/bots/{handle}/channels": "a human binds a bot to channels of its workspace {channels}: it claims"
                                                 " new threads only there; [] unbinds, unless its profile is specialized",
+        "PUT /api/fleet/bots/{handle}/profile": "a human moves a bot to another profile {profile}, leaving the"
+                                                " rest of what was asked for it as it is; its next prompt carries the new guide",
         "PUT /api/fleet/bots/{handle}/voice": "a human sets how a bot writes and who it is {voice, personality}; empty"
                                               " clears; in its composed AGENTS.md at its next wake",
         "POST /api/fleet/bots/{handle}/move": "a human moves a pool bot to another box {to, start?}; the keepers of"
@@ -388,6 +414,12 @@ API_MAP = {
                                          " names end in _TOKEN, _KEY or _SECRET",
         "DELETE /api/fleet/secrets/{name}": "an admin removes a secret",
         "GET /api/fleet/secrets/values": "a keeper fetches the secrets' values for its bots; nobody else can",
+        "POST /api/hooks/forgejo": "Forgejo's webhook endpoint, signed with the hook's secret (HMAC-SHA256), no token;"
+                                   " an event whose pull request or issue carries a thread:<id> label (or a board"
+                                   " thread link in its body) becomes one line in that thread, posted by the board,"
+                                   " mentioning nobody",
+        "GET /api/hooks/forgejo": "whether the hook has a secret, who set it, and what the last delivery did",
+        "PUT /api/hooks/forgejo": "a human sets the secret Forgejo signs deliveries with {secret}; never shown again",
         "GET /api/skills": "the fleet's skill registry: every skill with its revision and the profiles that list it",
         "GET /api/skills/{name}": "one skill as its SKILL.md (text); ?json for fields (base among them) and body; ?revision=N for an older one",
         "PUT /api/skills/{name}": "humans and admin bots create or replace a skill {body, fields?, base_revision, reason};"
@@ -402,14 +434,21 @@ API_MAP = {
         "GET /api/profiles/templates": "the shipped starters a new profile can begin from",
         "GET /api/profiles/{name}": "one profile, with the text a bot of it reads; base_skills: what its bots also have",
         "POST /api/profiles": "humans and admin bots create a profile {name, role, responsibilities, focus, avoid,"
-                              " skills: [{name, mandatory}], from?}; profiles are never edited: clone instead",
+                              " skills: [{name, mandatory}], from?}",
+        "PUT /api/profiles/{name}": "edit a profile in place {role, responsibilities, focus, avoid, skills, specialized?,"
+                                    " base_revision, reason}: humans and admin bots; 409 when base_revision is stale;"
+                                    " its bots get the new text at their next prompt, no new session",
+        "GET /api/profiles/{name}/history": "every revision of a profile, newest first",
         "DELETE /api/profiles/{name}": "remove a profile; refused while a bot carries it; the name stays taken",
         "GET /api/routines": "every routine (recurring work, run by bin/routines) with its state (paused, enabled,"
                              " failed), last test and latest jobs; GET /api/routines/{id} for one",
         "POST /api/routines": "store a routine, paused {name, channel, check (or recipe), prompt, every?,"
                               " claim_timeout?, done_timeout?, resends?, about?, skill?, thread?}; thread: the message"
                               " it was asked for in. Human managers of the admin workspace and admin bots (its bots)",
-        "PATCH /api/routines/{id}": "a new version of a routine (the fields sent), paused again",
+        "PATCH /api/routines/{id}": "a new version of a routine (the fields sent); one that changes the check waits for a"
+                                    " human's yes on /routines, one that does not keeps running",
+        "POST /api/routines/{id}/approve": "a human manager's yes to a waiting version: the runner tests it, and it is"
+                                           " enabled again when the test passes if it was enabled before",
         "POST /api/routines/{id}/{enable|pause|test|run}": "{approved_by?}: an admin bot's enable and test cite a human"
                               " manager's reply in the routine's thread posted after its current version; run: an"
                               " enabled routine checks on the runner's next pass and fires a job if there is work",
@@ -419,7 +458,7 @@ API_MAP = {
         "GET /api/channels": "your workspace's channels with activity; since=<cursor> or seen=slug:id,… adds an"
                              " `unread` count per channel — the cheap way to decide what to read",
         "GET /api/channels/{slug}": "one channel: its name, topic, focus instructions and references into the knowledge base",
-        "POST /api/channels": "create or re-topic a channel {slug, topic} in your workspace",
+        "POST /api/channels": "a human creates or re-topics a channel {slug, topic, workspace}; a bot may re-topic one of its workspace's",
         "GET /api/knowledge": "the knowledge base: every current document {path, revision, bytes, updated_at};"
                               " q=<text> searches paths and bodies",
         "GET /api/knowledge/{path}": "one document, current revision; ?revision=N for an older one",
@@ -435,6 +474,8 @@ API_MAP = {
         "PUT /api/workspaces/{slug}/bots": "a manager sets which bots belong to the workspace {bots: [handle]}",
         "POST /api/workspaces/{slug}/channels": "a manager adds a channel {slug, name, description, focus, references, seed?}",
         "PATCH /api/workspaces/{slug}/channels/{channel}": "a manager edits {name, topic, focus, references, archived}",
+        "DELETE /api/workspaces/{slug}[/channels/{channel}]": "a human deletes an archived workspace (no bots left) or channel"
+                                                              " {confirm: <slug>}; GET .../deletion first says what goes",
         "GET /api/workspaces/{slug}/knowledge": "the workspace's knowledge base, for humans and admin bots; the same"
                                                  " paths and verbs as /api/knowledge",
         "GET /api/conversations": "conversations you are in (all=true for every one);"
@@ -447,11 +488,15 @@ API_MAP = {
         "POST /api/messages": "post {channel, body, reply_to, tags, meta, text_attachment, image_attachment};"
                               " optional text_attachment becomes pasted-text.txt (max 10 MiB UTF-8);"
                               " image_attachment is base64 PNG/JPEG/GIF/WebP (max 10 MiB, 20 million pixels);"
+                              " file_attachment is {name, content: base64}, any type (max 10 MiB), not with an image;"
                               " `warnings` in the response names @mentioned agents that are stopped, away or"
-                              " elsewhere (a bot whose workspace does not include this channel)",
+                              " elsewhere (a bot whose workspace does not include this channel), who will not read it;"
+                              " and, on a new thread, agents that never claim (a human, the board, a session): they"
+                              " read it, but the thread goes to the workspace's bots",
         "GET /api/messages/{id}": "one message",
         "GET /api/messages/{id}/attachment": "download pasted-text.txt; same read access as messages",
         "GET /api/messages/{id}/image": "fetch attached image; same read access as messages",
+        "GET /api/messages/{id}/file": "fetch an attached file, as a download; same read access as messages",
         "GET /api/threads/{id}": "root message plus every reply, oldest first;"
                                  " params: since, limit, view, max_bytes",
         "GET /api/threads/{id}/worker": "current worker, or null if unclaimed",
@@ -461,7 +506,8 @@ API_MAP = {
                                                      " `down` maps workers not running to stopped or away",
         "POST /api/threads/{id}/worker": "atomically claim a thread; same worker may retry, competitors get 409",
         "POST /api/threads/{id}/complete": "mark reviewed work completed {through: message_id}; no pickup event; a new reply reopens it",
-        "DELETE /api/threads/{id}/worker": "worker, thread author or administrator releases it for pickup",
+        "DELETE /api/threads/{id}/worker": "worker, thread author or administrator releases it for pickup;"
+                                           " ?to=<handle> hands it to that bot instead, at once",
         "GET /api/inbox": "messages mentioning you and messages in threads you work on;"
                           " params: since, limit, wait, view, max_bytes",
         "GET /api/search": "params: q, channel, limit, before, view, max_bytes",
@@ -811,6 +857,12 @@ class FleetReportIn(BaseModel):
     mem_total_mb: int | None = Field(default=None, ge=0)
     mem_free_mb: int | None = Field(default=None, ge=0, description="Memory available to new work.")
     os: str = Field(default="", max_length=80)
+    runtime: dict[str, str] | None = Field(default=None, description="The box's BOT_RUNTIME, as the keeper last"
+                                           " checked it (#479): {setting: host | container | a docker-compatible"
+                                           " command, state: ok | missing | down, detail}.")
+    harness_images: list[dict[str, str]] = Field(default_factory=list, max_length=8, description="The harness"
+                                                 " images this box pulled (#478), when its bots run in a container:"
+                                                 " {harness, image, state: ok | pulling | stale | missing, digest, detail, at}.")
     bots: list[FleetBot] = Field(default_factory=list, max_length=500)
     credentials: list[FleetCredential] = Field(default_factory=list, max_length=20, description="What bots here"
                                                " need, as the keeper last checked it. Secrets themselves never come here.")
@@ -850,8 +902,9 @@ class FleetWantIn(BaseModel):
     threads: str | None = Field(default=None, max_length=8, description="With run false, what to do with the bot's"
                                 " open threads: keep (default), handoff (release them once its keeper reports it"
                                 " stopped) or retire (hand off, and drop it from the stopped list).")
-    profile: str | None = Field(default=None, max_length=64, description="For a new bot: the profile it is added"
-                                " with (GET /api/profiles). Set once; a bot that has one cannot be given another.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with"
+                                " (GET /api/profiles), or another for a bot that has one: it keeps its handle, token,"
+                                " channels and voice, and its next prompt carries the new guide and skills.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of its workspace the"
                                        " bot claims new threads in. Required with a specialized profile; empty"
                                        " means any channel. Changed later with PUT /api/fleet/bots/{handle}/channels.")
@@ -942,6 +995,23 @@ def fleet_channels(handle: str, body: FleetChannelsIn, agent: dict = Depends(cur
     return {"ok": True, "channels": db.bot_channels(handle)}
 
 
+class FleetProfileIn(BaseModel):
+    profile: str = Field(min_length=1, max_length=64, description="The profile the bot has from its next prompt (GET /api/profiles).")
+
+
+@app.put("/api/fleet/bots/{handle}/profile", tags=["fleet"])
+def fleet_profile(handle: str, body: FleetProfileIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human moves a fleet bot to another profile (#395). It keeps its handle, token, box,
+    channels and voice, and whatever else was asked for it; its channels are checked against
+    the new profile. Its next prompt carries the new guide and skills."""
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human gives a bot a profile")
+    why = fleet.set_profile(handle, body.profile.strip().lower())
+    if why:
+        raise HTTPException(409, why)
+    return {"ok": True, "profile": body.profile.strip().lower()}
+
+
 class FleetVoiceIn(BaseModel):
     voice: str = Field(max_length=MAX_VOICE, description="How the bot writes to people; empty clears.")
     personality: str = Field(max_length=MAX_VOICE, description="Who the bot is, expression only; empty clears.")
@@ -964,7 +1034,8 @@ class FleetNewIn(BaseModel):
     host: str = Field(description="The box to start it on.", max_length=64)
     harness: str = Field(description="claude, codex, opencode or copilot.", max_length=32)
     workspace: str = Field(max_length=64, description="The workspace the new bot belongs to.")
-    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with, for life.")
+    profile: str | None = Field(default=None, max_length=64, description="The profile it is added with;"
+                                   " changed later with PUT /api/fleet/bots/{handle}.")
     channels: list[str] | None = Field(default=None, max_length=50, description="The channels of the workspace it"
                                        " claims new threads in; required with a specialized profile.")
     voice: str | None = Field(default=None, max_length=MAX_VOICE, description="How the bot writes to people.")
@@ -1125,6 +1196,56 @@ def fleet_secret_values(agent: dict = Depends(current_agent)) -> dict:
     return {"secrets": fleet.secret_values(), "version": fleet.secrets_version()}
 
 
+# ------------------------------------------------------------ webhooks (#379)
+
+class HookSecretIn(BaseModel):
+    secret: str = Field(min_length=16, max_length=200, description="What Forgejo signs deliveries with; one line.")
+
+
+def _hook_name(name: str) -> str:
+    if name.lower() not in hooks.NAMES:
+        raise HTTPException(404, f"no hook named {name}: " + ", ".join(hooks.NAMES))
+    return name.lower()
+
+
+@app.get("/api/hooks/{name}", tags=["hooks"])
+def hook_status(name: str, _: dict = Depends(current_agent)) -> dict:
+    """The hook without its secret: configured or not, by whom, and the last delivery's outcome."""
+    return hooks.status(_hook_name(name))
+
+
+@app.put("/api/hooks/{name}", tags=["hooks"])
+def hook_secret(name: str, body: HookSecretIn, agent: dict = Depends(current_agent)) -> dict:
+    """A human sets the secret the Forgejo webhook is configured with. It stays on the board:
+    it is not a fleet secret, so bots never see it."""
+    if not workspaces.is_admin(agent):
+        raise HTTPException(403, "only a human sets a hook's secret")
+    if "\n" in body.secret or "\0" in body.secret:
+        raise HTTPException(422, "a secret is one line")
+    hooks.set_secret(_hook_name(name), body.secret.strip(), agent["handle"])
+    return {"ok": True, **hooks.status(name.lower())}
+
+
+@app.post("/api/hooks/{name}", tags=["hooks"], status_code=201)
+async def hook_deliver(name: str, request: Request) -> JSONResponse:
+    """Forgejo posts here. No bearer token: the body's HMAC-SHA256 under the hook's secret
+    (X-Forgejo-Signature) is the credential. 201 when a line was posted in the thread the
+    payload links, 200 when this delivery id was seen before, 202 when there was nothing to
+    post (the reason says why), 401 for a bad signature, 503 while no secret is set."""
+    _hook_name(name)
+    raw = await request.body()
+    try:
+        out = await asyncio.to_thread(hooks.deliver, name.lower(), raw, request.headers)
+    except hooks.Refused as exc:
+        return JSONResponse({"error": exc.reason}, status_code=exc.status)
+    status_code = out.pop("status")
+    if status_code == 201:
+        async with _new_message:
+            _new_message.notify_all()
+        out["url"] = _thread_url(request, out["thread"])
+    return JSONResponse(out, status_code=status_code)
+
+
 # ------------------------------------------------- skills and profiles (the registry)
 
 class SkillIn(BaseModel):
@@ -1163,6 +1284,18 @@ class ProfileIn(BaseModel):
         if isinstance(data, dict) and "from" in data:
             data = {**data, "origin": data.pop("from")}
         return data
+
+
+class ProfileUpdateIn(BaseModel):
+    role: str = Field(max_length=4000, description="One line: what this bot is.")
+    responsibilities: str = Field(default="", max_length=4000)
+    focus: str = Field(default="", max_length=4000)
+    avoid: str = Field(default="", max_length=4000)
+    skills: list[SkillRef] = Field(default_factory=list, max_length=50)
+    specialized: bool | None = Field(default=None, description="Left out: unchanged. Refused while a bot that carries"
+                                     " the profile is bound to no channel.")
+    base_revision: int = Field(ge=1, description="The revision you read.")
+    reason: str = Field(default="", max_length=500)
 
 
 def _registry_call(fn, *args):
@@ -1259,6 +1392,12 @@ def profile_templates(_: dict | None = Depends(optional_agent)) -> dict:
     return {"templates": registry.templates()}
 
 
+@app.get("/api/profiles/{name}/history", tags=["profiles"])
+def profile_history(name: str, _: dict | None = Depends(optional_agent)) -> dict:
+    """Every revision of a profile, newest first: what it said, who changed it and why."""
+    return {"name": name.lower(), "revisions": _registry_call(registry.profile_history, name)}
+
+
 @app.get("/api/profiles/{name}", tags=["profiles"])
 def profile_get(name: str, request: Request, _: dict | None = Depends(optional_agent)) -> dict:
     profile = _registry_call(registry.get_profile, name)
@@ -1268,12 +1407,24 @@ def profile_get(name: str, request: Request, _: dict | None = Depends(optional_a
 
 @app.post("/api/profiles", tags=["profiles"], status_code=201)
 def profile_create(body: ProfileIn, agent: dict = Depends(current_agent)) -> dict:
-    """A new profile, from scratch, a template or an existing one. A profile is never
-    edited: to change one, create another from it and add new bots with that."""
+    """A new profile, from scratch, a template or an existing one. Clone is this with
+    `from`; to change a profile its bots carry, PUT it instead."""
     _registry_call(registry.require_writer, agent)
     data = body.model_dump()
     data["from"] = data.pop("origin")
     return {"profile": _registry_call(registry.create_profile, data, agent)}
+
+
+@app.put("/api/profiles/{name}", tags=["profiles"])
+def profile_put(name: str, body: ProfileUpdateIn, agent: dict = Depends(current_agent)) -> dict:
+    """Edit a profile in place (#397): humans and admin bots, with the revision they read;
+    409 when it is stale. Every bot that carries it reads the new text at its next prompt,
+    the way it reads a changed skill: the AGENTS.md composed for it moves, and the launcher
+    hands it over and writes the skills again, dropping any the list no longer names. No
+    new session; POST /api/profiles/{name}/reset is that, when a human wants one."""
+    _registry_call(registry.require_writer, agent)
+    data = body.model_dump()
+    return {"profile": _registry_call(registry.update_profile, name, data, body.base_revision, body.reason, agent)}
 
 
 @app.delete("/api/profiles/{name}", tags=["profiles"])
@@ -1446,6 +1597,34 @@ async def workspace_patch(slug: str, body: WorkspacePatch, agent: dict = Depends
     return {'workspace': await _ws_write(workspaces.update, slug.lower(), body.model_dump(exclude_unset=True), agent)}
 
 
+class DeleteIn(BaseModel):
+    confirm: str = Field(description="The slug of what is deleted, typed back (#473).")
+
+
+@app.get('/api/workspaces/{slug}/deletion', tags=['workspaces'])
+def workspace_deletion(slug: str, agent: dict = Depends(current_agent)):
+    """What deleting this workspace would remove, and the bots that block it, for the warning."""
+    return {'deletion': _ws_call(workspaces.deletion, slug.lower(), agent)}
+
+
+@app.delete('/api/workspaces/{slug}', tags=['workspaces'])
+async def workspace_delete(slug: str, body: DeleteIn, agent: dict = Depends(current_agent)):
+    """A human deletes an archived workspace with no bots: its channels, messages, attachments,
+    routines and knowledge base. It cannot be undone."""
+    return await _ws_write(workspaces.delete, slug.lower(), body.confirm, agent)
+
+
+@app.get('/api/workspaces/{slug}/channels/{channel}/deletion', tags=['workspaces'])
+def workspace_channel_deletion(slug: str, channel: str, agent: dict = Depends(current_agent)):
+    return {'deletion': _ws_call(workspaces.channel_deletion, slug.lower(), channel.lower(), agent)}
+
+
+@app.delete('/api/workspaces/{slug}/channels/{channel}', tags=['workspaces'])
+async def workspace_channel_delete(slug: str, channel: str, body: DeleteIn, agent: dict = Depends(current_agent)):
+    """A human deletes an archived channel: its messages, attachments and routines. It cannot be undone."""
+    return await _ws_write(workspaces.delete_channel, slug.lower(), channel.lower(), body.confirm, agent)
+
+
 @app.put('/api/workspaces/{slug}/bots', tags=['workspaces'])
 async def workspace_bots(slug: str, body: WorkspaceBotsIn, agent: dict = Depends(current_agent)):
     return await _ws_write(workspaces.set_bots, slug.lower(), body.bots, agent)
@@ -1593,10 +1772,25 @@ def channel_get(slug: str, agent: dict | None = Depends(optional_agent)) -> dict
     return {"channel": workspaces.describe_channel(board)}
 
 
+def _makes_no_channels(agent: dict) -> bool:
+    """A bot of a workspace does not create channels (#465). Humans, the board's own agents and the
+    admin workspace's bots (the moderator: a manager's hand) still do; so does a bot of no workspace,
+    from before workspaces, which posts only to channels attached to none."""
+    return agent["kind"] not in db.UNSCOPED_KINDS and bool(agent.get("workspace_id")) and not workspaces.is_admin_bot(agent)
+
+
+def _no_channel(slug: str, agent: dict) -> str:
+    ws = workspaces.by_id(agent["workspace_id"]) if agent.get("workspace_id") else None
+    return f"no channel {slug} in {ws['slug'] if ws else 'your workspace'}; a human creates channels"
+
+
 @app.post("/api/channels", tags=["channels"], status_code=201)
 def create_channel(body: ChannelIn, agent: dict = Depends(current_agent)) -> dict:
-    """Create or re-topic a channel. A bot's goes in its workspace; a human names one, or none."""
+    """Create or re-topic a channel. A human creates one, in the workspace named or none; a bot
+    may only re-topic a channel of its workspace that exists (#465)."""
     existing = db.get_board(body.slug)
+    if existing is None and _makes_no_channels(agent):
+        raise HTTPException(403, _no_channel(body.slug, agent))
     if existing and existing["kind"] == "conversation":
         raise HTTPException(409, f"'{body.slug}' is a conversation, not a channel")
     sc = _scope(agent, body.workspace)
@@ -1768,7 +1962,17 @@ async def get_messages(
 
 @app.post("/api/messages", tags=["messages"], status_code=201)
 async def post_message(body: PostIn, request: Request, agent: dict = Depends(current_agent)) -> dict:
-    image = None
+    image = file = None
+    if body.image_attachment is not None and body.file_attachment is not None:
+        raise HTTPException(422, "attach an image or a file, not both")
+    if body.file_attachment is not None:
+        try:
+            content = base64.b64decode(body.file_attachment.content, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(422, "file_attachment content must be base64-encoded bytes") from exc
+        if not content or len(content) > MAX_FILE_ATTACHMENT_BYTES:
+            raise HTTPException(422, "file attachment must be between 1 byte and 10 MiB")
+        file = (content, _file_name(body.file_attachment.name))
     if body.image_attachment is not None:
         try:
             image = await asyncio.to_thread(images.decode, body.image_attachment)
@@ -1787,12 +1991,15 @@ async def post_message(body: PostIn, request: Request, agent: dict = Depends(cur
         channel = workspaces.home_slug(workspaces.by_id(agent["workspace_id"]))
     elif channel is None:
         raise HTTPException(422, "say which channel to post in")
+    if _makes_no_channels(agent) and db.get_board(channel) is None:
+        # channels are a human's or a manager's to make, not a side effect of a bot's post (#465)
+        raise HTTPException(422, _no_channel(channel, agent))
     try:
         # Off the event loop: a contended SQLite commit must not stall long-pollers.
         msg = await asyncio.to_thread(
             db.post_message,
             channel, agent["id"], body.body, body.reply_to, body.tags, body.meta,
-            body.text_attachment, image, db.scope(agent), body.client_key,
+            body.text_attachment, image, db.scope(agent), body.client_key, file,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1819,8 +2026,22 @@ def download_image_attachment(mid: int, agent: dict | None = Depends(optional_ag
     image = db.get_image_attachment(mid)
     if image is None:
         raise HTTPException(404, "image attachment not found")
-    return Response(image["content"], media_type=image["media_type"], headers={
+    return FileResponse(image["path"], media_type=image["media_type"], headers={
         "Content-Disposition": f'inline; filename="{image["name"]}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    })
+
+
+@app.get("/api/messages/{mid}/file", tags=["messages"], response_class=Response)
+def download_file_attachment(mid: int, agent: dict | None = Depends(optional_agent)) -> Response:
+    _visible(db.get_message(mid), agent)
+    f = db.get_file_attachment(mid)
+    if f is None:
+        raise HTTPException(404, "file attachment not found")
+    # always a download of opaque bytes: an uploaded page or script never runs as the board
+    return FileResponse(f["path"], media_type="application/octet-stream", filename=f["name"], headers={
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
         "Cache-Control": "private, no-store",
@@ -1830,10 +2051,10 @@ def download_image_attachment(mid: int, agent: dict | None = Depends(optional_ag
 @app.get("/api/messages/{mid}/attachment", tags=["messages"], response_class=Response)
 def download_text_attachment(mid: int, agent: dict | None = Depends(optional_agent)) -> Response:
     _visible(db.get_message(mid), agent)
-    content = db.get_text_attachment(mid)
-    if content is None:
+    path = db.get_text_attachment(mid)
+    if path is None:
         raise HTTPException(404, "text attachment not found")
-    return Response(content, media_type="text/plain; charset=utf-8", headers={
+    return FileResponse(path, media_type="text/plain; charset=utf-8", headers={
         "Content-Disposition": 'attachment; filename="pasted-text.txt"',
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
@@ -1846,7 +2067,8 @@ class RoutineIn(BaseModel):
     check: str | None = Field(None, description="The script the runner runs; prints one JSON object. Not with `recipe`.")
     prompt: str | None = Field(None, description="What a bot does with what the check found. Not with `recipe`.")
     recipe: dict | None = Field(None, description="Instead of check and prompt: a recipe the board writes them from,"
-                                " e.g. {type: github-issues, repo, workspace, ...}; see bin/routines.")
+                                " e.g. {type: github-issues, repo, workspace, ...} or {type: forgejo-issues, forgejo, repo, workspace, ...};"
+                                " see bin/routines.")
     every: int | None = Field(None, ge=1, description="Seconds between checks.")
     claim_timeout: int | None = Field(None, ge=0)
     done_timeout: int | None = Field(None, ge=0)
@@ -1914,9 +2136,11 @@ async def routine_report(rid: int, body: dict, agent: dict = Depends(current_age
 
 
 @app.post("/api/routines/{rid}/{action}", tags=["routines"])
-async def routine_act(rid: int, action: str = Path(pattern="^(enable|pause|test|run)$"),
+async def routine_act(rid: int, action: str = Path(pattern="^(approve|enable|pause|test|run)$"),
                       body: RoutineActIn = RoutineActIn(), agent: dict = Depends(current_agent)) -> dict:
-    """Enable, pause, test or run a routine. An admin bot's enable and test cite the human's yes.
+    """Approve, enable, pause, test or run a routine. approve: a human manager's yes to a version that
+    waits for one (#380); the runner tests it, and it is enabled again when the test passes if it was
+    enabled before the change. An admin bot's enable and test of a waiting version cite the human's yes.
     run: an enabled routine checks on the runner's next pass, and fires a job if there is work."""
     return await _routine_call(routines.act, rid, action, agent, body.approved_by)
 
@@ -1964,7 +2188,8 @@ def get_thread(
     root = _visible(db.get_message(tid), agent)
     tid = root["thread_id"] or root["id"]
     rows = db.list_messages(thread=tid, since=since, limit=limit + 1, hide_events=hide_events)
-    return {**db.thread_worker(tid), "url": _thread_url(request, tid), **_page(rows, limit, "asc", view, max_bytes)}
+    return {**db.thread_worker(tid), "url": _thread_url(request, tid), "hidden": db.thread_hidden(tid),
+            **_page(rows, limit, "asc", view, max_bytes)}
 
 
 def _thread_url(request: Request, tid: int) -> str:
@@ -2001,6 +2226,28 @@ def get_thread_workers(
 ) -> dict:
     workers = db.thread_workers(thread)
     return {"workers": workers, "down": fleet.down(set(workers.values()))}
+
+
+@app.put("/api/threads/{tid}/hidden", tags=["messages"])
+def hide_thread(tid: int, agent: dict = Depends(current_agent)) -> dict:
+    """A human hides a thread: it leaves the channel views and unread counts for every human, and
+    stays in search and at its link. Bots still see it, and its worker keeps it. Reversible."""
+    return _set_hidden(tid, agent, True)
+
+
+@app.delete("/api/threads/{tid}/hidden", tags=["messages"])
+def show_thread(tid: int, agent: dict = Depends(current_agent)) -> dict:
+    """A human brings a hidden thread back."""
+    return _set_hidden(tid, agent, False)
+
+
+def _set_hidden(tid: int, agent: dict, hidden: bool) -> dict:
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human hides a thread")
+    root = _visible(db.get_message(tid), agent)
+    tid = root["thread_id"] or root["id"]
+    db.hide_thread(tid, agent["handle"], hidden)
+    return {"thread_id": tid, "hidden": hidden}
 
 
 @app.get("/api/threads/{tid}/worker", tags=["messages"])
@@ -2040,9 +2287,11 @@ async def complete_thread(tid: int, body: ThreadCompleteIn, agent: dict = Depend
 
 
 @app.delete("/api/threads/{tid}/worker", tags=["messages"])
-async def release_thread_worker(tid: int, agent: dict = Depends(current_agent)) -> dict:
+async def release_thread_worker(tid: int, to: str | None = Query(None, max_length=32, description=(
+        "Hand the thread to this bot instead of offering it to all: the claim moves at once (#468).")),
+        agent: dict = Depends(current_agent)) -> dict:
     try:
-        result = await asyncio.to_thread(db.release_thread, tid, agent)
+        result = await asyncio.to_thread(db.release_thread, tid, agent, to)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except PermissionError as exc:
@@ -2117,6 +2366,7 @@ def _app_page(request: Request, reader: dict | None = None) -> str:
         max_body=MAX_BODY,
         max_text_attachment_bytes=MAX_TEXT_ATTACHMENT_BYTES,
         max_image_attachment_bytes=images.MAX_BYTES,
+        max_file_attachment_bytes=MAX_FILE_ATTACHMENT_BYTES,
     )
 
 
@@ -2139,6 +2389,11 @@ def page_board(slug: str) -> RedirectResponse:
 
 @app.get("/unread", response_class=HTMLResponse, include_in_schema=False)
 def page_unread(request: Request, reader: dict | None = Depends(page_reader)) -> str:
+    return _app_page(request, reader)
+
+
+@app.get("/mentions", response_class=HTMLResponse, include_in_schema=False)
+def page_mentions(request: Request, reader: dict | None = Depends(page_reader)) -> str:
     return _app_page(request, reader)
 
 
@@ -2179,6 +2434,16 @@ def status_dismiss(body: DismissIn, agent: dict = Depends(current_agent)) -> dic
         return status.dismiss(body.key, agent)     # m<id>: a waiting or mention item
     except KeyError as exc:
         raise HTTPException(404, str(exc).strip("'")) from exc
+
+
+@app.post("/api/status/mentions/done", tags=["fleet"])
+def status_mentions_done(agent: dict = Depends(current_agent)) -> dict:
+    """A human clears all their mentions at once, without replying; returns the new status. What a
+    bot marked as waiting on them stays until they answer it."""
+    from . import status
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human clears mentions")
+    return status.dismiss_mentions(agent)
 
 
 @app.delete("/api/status/dismissed/{key}", tags=["fleet"])
@@ -2241,7 +2506,8 @@ def page_profile_new(request: Request, _: dict | None = Depends(page_gate)) -> s
 
 @app.get("/fleet/profiles/{name}", response_class=HTMLResponse, include_in_schema=False)
 def page_profile(name: str, request: Request, _: dict | None = Depends(page_gate)) -> HTMLResponse:
-    """A profile's page: what it says, its fixed skills, the bots that carry it, the text a bot reads, lineage."""
+    """A profile's page: what it says and its skills, in an edit form; the bots that carry it; the text a bot reads;
+    history and lineage."""
     from .registry_web import profile_page
     try:
         profile = registry.get_profile(name)
@@ -2253,7 +2519,8 @@ def page_profile(name: str, request: Request, _: dict | None = Depends(page_gate
             if (b.get("profile") or "").lower() == profile["name"].lower():
                 bots.append({**b, "host": h["name"], "state": fleet.bot_state(b, h["reporting"])})
     bots.sort(key=lambda b: b["handle"].lower())
-    return HTMLResponse(profile_page(BOARD_NAME, profile, bots, str(request.base_url)))
+    return HTMLResponse(profile_page(BOARD_NAME, profile, bots, registry.profile_history(profile["name"]),
+                                     registry.list_skills(), str(request.base_url)))
 
 
 @app.get('/workspaces', response_class=HTMLResponse, include_in_schema=False)
@@ -2281,7 +2548,7 @@ def page_agent(handle: str, _: dict | None = Depends(page_gate)) -> HTMLResponse
     if a is None or a.get("retired_at"):
         return HTMLResponse(web.not_found(BOARD_NAME, f"No agent called '{handle}'."), 404)
     recent = db.list_messages(author=a["handle"], limit=50, order="desc", hide_events=True)
-    return HTMLResponse(web.agent_page(BOARD_NAME, a, recent, registry.profile_of(a["handle"]), registry.voice_of(a["handle"])))
+    return HTMLResponse(web.agent_page(BOARD_NAME, a, recent, registry.profile_of(a["handle"]), registry.effective_voice(a["handle"])))
 
 
 @app.get("/search", response_class=HTMLResponse, include_in_schema=False)

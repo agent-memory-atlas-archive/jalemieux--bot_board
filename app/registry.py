@@ -6,11 +6,13 @@ its harness loads skills from and tells it when one changes. A workspace is a co
 fence, not an ability fence, so skills are not scoped to one.
 
 A profile is a role: name, role line, responsibilities, focus, avoid, and the skills
-that come with it, some mandatory. Profiles are write-once: created, cloned, deleted,
-never edited, so a bot's role cannot drift under it. A bot gets its profile when a
-human adds it (fleet_bots.profile) and keeps it for life; a new session reads it with
+that come with it, some mandatory. A profile is edited in place and revisioned the way a
+skill is (#397): the current text is the row in `profiles`, every revision is a row in
+`profile_history`, and a name is never reused. A bot gets its profile when a human adds
+it (fleet_bots.profile), and a human may move it to another (#395); a new session reads it with
 GET /api/me/profile. Nothing is pushed into a running session: the launcher polls, and
-skills_revision() is what it compares.
+the composed AGENTS.md (identity_text) is what it compares, so an edit reaches a bot at
+its next prompt.
 
 The files under docs/skills/ and docs/profiles/ are seed: loaded once, at the first
 start of a board without a registry; after that the board is the source of truth.
@@ -60,6 +62,21 @@ CREATE TABLE IF NOT EXISTS profiles (
     created_at TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS profile_history (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE,
+    revision INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT '',
+    responsibilities TEXT NOT NULL DEFAULT '',
+    focus TEXT NOT NULL DEFAULT '',
+    avoid TEXT NOT NULL DEFAULT '',
+    skills TEXT NOT NULL DEFAULT '[]',
+    specialized INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    author_id INTEGER REFERENCES agents(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(name, revision)
+);
 CREATE TABLE IF NOT EXISTS registry_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -76,13 +93,21 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(profiles)")}
         if "specialized" not in cols:
             c.execute("ALTER TABLE profiles ADD COLUMN specialized INTEGER NOT NULL DEFAULT 0")
+        # revision: moves at every edit (#397); a board from before had every profile at 1
+        if "revision" not in cols:
+            c.execute("ALTER TABLE profiles ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
         # a board seeded before the flag existed, or before its template carried it: the profile seeded
-        # from a template takes the template's word, since a profile is never edited (board thread 8378).
+        # from a template takes the template's word while nobody has edited it (board thread 8378).
         # Every start, as the column may predate the flag on the template.
         for t in templates():
             if t.get("specialized"):
                 c.execute("UPDATE profiles SET specialized=1 "
-                          "WHERE name=? AND lower(origin)=lower(name) AND specialized=0", (t["name"],))
+                          "WHERE name=? AND lower(origin)=lower(name) AND specialized=0 AND revision=1", (t["name"],))
+        # a profile from before history was kept: its current text is its first revision
+        c.execute("INSERT INTO profile_history(name,revision,role,responsibilities,focus,avoid,skills,specialized,reason,"
+                  "author_id,created_at) SELECT name,revision,role,responsibilities,focus,avoid,skills,specialized,"
+                  "'created',created_by,created_at FROM profiles p"
+                  " WHERE NOT EXISTS (SELECT 1 FROM profile_history h WHERE h.name=p.name)")
         c.commit()
     adopt_github_skills()
     seed()
@@ -274,15 +299,15 @@ def put_skill(name: str, body: str, fields: dict | None, base_revision: int, rea
 
 
 def delete_skill(name: str, base_revision: int, reason: str, agent: dict | None) -> dict:
-    """Refused while a profile lists the skill: a profile cannot be edited to drop it,
-    so clone the profiles without it first. Refused while it is base too: every bot has it."""
+    """Refused while a profile lists the skill: edit the profiles to drop it first.
+    Refused while it is base too: every bot has it."""
     name = _check_name(name)
     if _is_base(name):
         raise Conflict(f"{name} is a base skill, so every bot has it: make it profile-only first")
     users = used_by().get(name, [])
     if users:
         raise Conflict(f"{name} is listed by the profile{'s' * (len(users) != 1)} {', '.join(users)}:"
-                       " clone them without it, delete the old ones, then delete the skill")
+                       " edit them to drop it, then delete the skill")
     with db._write_lock, db.conn() as c:
         current = current_revision(name)
         if not current:
@@ -350,7 +375,7 @@ def _profile(row, bots: dict | None = None, clones: dict | None = None) -> dict:
     out = {"name": row["name"], "role": row["role"], "responsibilities": row["responsibilities"],
            "focus": row["focus"], "avoid": row["avoid"], "skills": json.loads(row["skills"] or "[]"),
            "from": row["origin"], "created_by": row["creator"] or "board", "created_at": row["created_at"],
-           "specialized": bool(row["specialized"])}
+           "specialized": bool(row["specialized"]), "revision": row["revision"]}
     key = row["name"].lower()
     out["bots"] = (bots if bots is not None else bots_by_profile()).get(key, [])
     out["clones"] = (clones if clones is not None else _clones()).get(key, [])
@@ -423,28 +448,93 @@ def _clean_skills(skills) -> list[dict]:
     return out
 
 
-def create_profile(data: dict, agent: dict | None) -> dict:
-    """A new profile, from scratch, a template or an existing profile (`from`). A name
-    that exists, or once existed, is refused: bots name their profile for life."""
-    name = _check_name(data.get("name", ""))
+def _clean_fields(data: dict) -> dict:
     fields = {k: str(data.get(k) or "").strip() for k in FIELDS}
     if not fields["role"]:
         raise ValueError("a profile needs a role: one line, what this bot is")
     for k in FIELDS:
         if len(fields[k]) > 4000:
             raise ValueError(f"{k} exceeds 4000 characters")
+    return fields
+
+
+def _record(c, name: str, revision: int, fields: dict, skills: list, specialized: bool, reason: str,
+            agent: dict | None, at: str) -> None:
+    c.execute("INSERT INTO profile_history(name,revision,role,responsibilities,focus,avoid,skills,specialized,reason,"
+              "author_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+              (name, revision, fields["role"], fields["responsibilities"], fields["focus"], fields["avoid"],
+               json.dumps(skills), int(specialized), (reason or "")[:500], agent["id"] if agent else None, at))
+
+
+def create_profile(data: dict, agent: dict | None) -> dict:
+    """A new profile, from scratch, a template or an existing profile (`from`). A name
+    that exists, or once existed, is refused: bots name their profile for life."""
+    name = _check_name(data.get("name", ""))
+    fields = _clean_fields(data)
     skills = _clean_skills(data.get("skills"))
     origin = str(data.get("from") or "").strip().lower()
     specialized = data.get("specialized") is True
     with db._write_lock, db.conn() as c:
         if c.execute("SELECT 1 FROM profiles WHERE name=?", (name,)).fetchone():
-            raise Conflict(f"the profile name {name} is taken: profiles are never edited or renamed,"
+            raise Conflict(f"the profile name {name} is taken: profiles are never renamed,"
                            " and a deleted one keeps its name. Pick another")
+        now = db.now()
         c.execute("INSERT INTO profiles(name,role,responsibilities,focus,avoid,skills,origin,created_by,created_at,"
-                  "specialized) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  "specialized,revision) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
                   (name, fields["role"], fields["responsibilities"], fields["focus"], fields["avoid"],
-                   json.dumps(skills), origin, agent["id"] if agent else None, db.now(), int(specialized)))
+                   json.dumps(skills), origin, agent["id"] if agent else None, now, int(specialized)))
+        _record(c, name, 1, fields, skills, specialized, str(data.get("reason") or "created"), agent, now)
     return get_profile(name)
+
+
+def _unbound_bots(name: str) -> list[str]:
+    """The bots that carry the profile and are bound to no channel: what a specialized
+    profile cannot have (fleet._channels_problem keeps a bot from starting that way)."""
+    try:
+        rows = db.conn().execute("SELECT handle, channels FROM fleet_bots WHERE lower(profile)=? ORDER BY handle",
+                                 (name.lower(),)).fetchall()
+    except db.sqlite3.OperationalError:
+        return []
+    return [r["handle"] for r in rows if not json.loads(r["channels"] or "[]")]
+
+
+def update_profile(name: str, data: dict, base_revision: int, reason: str, agent: dict | None) -> dict:
+    """Edit a profile in place (#397): role, responsibilities, focus, avoid, skills and
+    specialized (left out: unchanged). `base_revision` is the revision the writer read;
+    anything else is a Conflict. The bots that carry it get the new text at their next
+    prompt, through the AGENTS.md the board composes for them; no new session."""
+    current = get_profile(name)
+    name = current["name"]
+    fields = _clean_fields(data)
+    skills = _clean_skills(data.get("skills"))
+    specialized = current["specialized"] if data.get("specialized") is None else data.get("specialized") is True
+    if specialized:
+        unbound = _unbound_bots(name)
+        if unbound:
+            raise Conflict(f"{name} cannot be specialized while {', '.join(unbound)} carr{'y' if len(unbound) != 1 else 'ies'}"
+                           " it bound to no channel: bind them to channels of their workspace first (the fleet page)")
+    with db._write_lock, db.conn() as c:
+        row = c.execute("SELECT revision FROM profiles WHERE name=? AND deleted=0", (name,)).fetchone()
+        if row is None:
+            raise KeyError(f"no profile named {name}")
+        if base_revision != row["revision"]:
+            raise Conflict(f"{name} is at revision {row['revision']}, not {base_revision}: read it again, merge, and retry")
+        revision, now = row["revision"] + 1, db.now()
+        c.execute("UPDATE profiles SET role=?, responsibilities=?, focus=?, avoid=?, skills=?, specialized=?, revision=?"
+                  " WHERE name=?", (fields["role"], fields["responsibilities"], fields["focus"], fields["avoid"],
+                                    json.dumps(skills), int(specialized), revision, name))
+        _record(c, name, revision, fields, skills, specialized, reason, agent, now)
+    return get_profile(name)
+
+
+def profile_history(name: str, limit: int = 50) -> list[dict]:
+    """Every revision of a profile, newest first, the first one included."""
+    get_profile(name)     # KeyError for an unknown or deleted profile
+    rows = db.conn().execute("SELECT h.*, a.handle author FROM profile_history h LEFT JOIN agents a ON a.id=h.author_id"
+                             " WHERE h.name=? ORDER BY h.revision DESC LIMIT ?", ((name or "").strip(), limit)).fetchall()
+    return [{"revision": r["revision"], "role": r["role"], "responsibilities": r["responsibilities"], "focus": r["focus"],
+             "avoid": r["avoid"], "skills": json.loads(r["skills"] or "[]"), "specialized": bool(r["specialized"]),
+             "reason": r["reason"], "author": r["author"] or "board", "updated_at": r["created_at"]} for r in rows]
 
 
 def delete_profile(name: str, agent: dict | None) -> dict:
@@ -460,14 +550,12 @@ def delete_profile(name: str, agent: dict | None) -> dict:
     return {"name": name, "deleted": True}
 
 
-def profile_problem(handle: str, profile: str, current: str | None) -> str | None:
-    """Why a bot cannot be given this profile: no such profile, or it already has one."""
+def profile_problem(profile: str) -> str | None:
+    """Why a bot cannot be given this profile: there is no such profile."""
     try:
         get_profile(profile)
     except KeyError:
         return f"no profile named {profile}"
-    if current and current.lower() != profile.lower():
-        return f"{handle} has the profile {current}, and a profile is set once: retire {handle} and add a new bot"
     return None
 
 
@@ -526,9 +614,8 @@ def resolve(profile: dict | None) -> list[dict]:
 
 
 def also_has(profile: dict) -> list[dict]:
-    """The base skills a profile does not list itself: what its bots have that it does not bring."""
-    own = {s["name"].lower() for s in profile.get("skills", [])}
-    return [s for s in resolve(profile) if s["name"] not in own]
+    """The base skills its bots have, listed by the profile or not: they are never the profile's to give (#396)."""
+    return [s for s in resolve(profile) if s["base"]]
 
 
 def _tag(skill: dict) -> str:
@@ -547,13 +634,36 @@ NO_PROFILE = ("You have no profile. The guide you just read is all there is: wor
               "given, in your workspace, as it says.\n")
 
 
+# What every bot reads when a human has not given it a voice or a personality of its own (#381,
+# jac). A text set on /fleet replaces the default for that field only; clearing it brings the
+# default back. The voice is jac's rule for prose; the personality is professional.
+DEFAULT_VOICE = ("Write so a sentence resolves left to right with nothing left open. One idea per sentence."
+                 " Put a modifier next to the thing it modifies; never let one dangle until a later noun. When a"
+                 " sentence announces a list, the list follows at once. Keep code references (function names,"
+                 " file paths, flags) out of prose sentences: give them their own short sentence, or put them"
+                 " after the prose. Prefer two plain sentences over one sentence with a subordinate clause.")
+DEFAULT_PERSONALITY = ("Professional. You are courteous and direct, and you treat humans and other bots as"
+                       " colleagues. You answer what was asked, say what you did and what you did not do, and"
+                       " give a reason only when it changes what the reader does. No filler, no flattery, no"
+                       " jokes in work threads, no exclamation marks. When you disagree, say so plainly, once,"
+                       " with your reason, and then follow the decision.")
+
+
 def voice_of(handle: str) -> tuple[str, str]:
-    """A fleet bot's voice and personality (#348), empty when it has none or is hand-run."""
+    """A fleet bot's own voice and personality (#348), as a human set them: empty when it has
+    none or is hand-run. effective_voice fills the empty ones with the fleet default."""
     try:
         row = db.conn().execute("SELECT voice, personality FROM fleet_bots WHERE handle=?", (handle,)).fetchone()
     except db.sqlite3.OperationalError:
         return "", ""
     return (row["voice"] or "", row["personality"] or "") if row else ("", "")
+
+
+def effective_voice(handle: str) -> tuple[str, str, bool, bool]:
+    """What the bot reads (#381): its own voice and personality, each replaced by the fleet
+    default when empty, and for each whether it is the default."""
+    voice, personality = voice_of(handle)
+    return voice or DEFAULT_VOICE, personality or DEFAULT_PERSONALITY, not voice, not personality
 
 
 def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
@@ -590,12 +700,12 @@ def identity_text(agent: dict, base: str = "", used: int = 0) -> str:
         for key, title in (("responsibilities", "Responsibilities"), ("focus", "Focus"), ("avoid", "Avoid")):
             if profile.get(key):
                 lines += [f"### {title}", "", profile[key].strip(), ""]
-    voice, personality = voice_of(agent["handle"])
-    if voice:
-        lines += ["## Your voice", "", "How you write to people.", "", voice, ""]
-    if personality:
-        lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
-                  " always win, and it is never a reason to post more.", "", personality, ""]
+    voice, personality, voice_default, personality_default = effective_voice(agent["handle"])
+    default_note = " This is the fleet's default; a human can give you your own on /fleet."
+    lines += ["## Your voice", "", "How you write to people." + (default_note if voice_default else ""), "", voice, ""]
+    lines += ["## Your personality", "", "Who you are, in expression only: task rules, ownership and accuracy"
+              " always win, and it is never a reason to post more." + (default_note if personality_default else ""),
+              "", personality, ""]
     skills = resolve(profile)
     if skills:
         lines += ["## Your skills", "",

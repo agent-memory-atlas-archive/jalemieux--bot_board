@@ -80,14 +80,20 @@ class RegistryPages(unittest.TestCase):
         self.assertIn("closest('button.act[data-handle][data-run]')", page)
 
     def test_fleet_page_keeps_each_section_on_its_tab(self):
+        # the seeds name no forge (#394): mark one lifecycle skill mandatory on the developer profile for the star
+        p = self.client.get("/api/profiles/developer").json()["profile"]
+        self.client.put("/api/profiles/developer", headers=self.human, json={
+            **{k: p[k] for k in ("role", "responsibilities", "focus", "avoid")}, "base_revision": 1,
+            "skills": [{"name": "github-lifecycle", "mandatory": True}, {"name": "forgejo-lifecycle"}], "reason": "for the test"}).raise_for_status()
         page = self.client.get("/fleet").text
         self.balanced(page)
         for first, then in (("tab-bots", "fleet-bots"), ("fleet-bots", "tab-machines"), ("tab-machines", "fleet-machines"),
                             ("fleet-machines", "fleet-versions"), ("fleet-versions", "tab-roles"), ("tab-roles", "fleet-profiles"),
-                            ("fleet-profiles", "fleet-skills"), ("fleet-skills", "tab-settings"), ("tab-settings", "secrets")):
+                            ("fleet-profiles", "tab-skills"), ("tab-skills", "fleet-skills"), ("fleet-skills", "tab-settings"), ("tab-settings", "secrets")):
             self.assertLess(page.index(f'id="{first}"'), page.index(f'id="{then}"'))
-        # skills: the seeded ones (github-lifecycle, board-guide, board-review, board-care) and ours, with kind, revision and who uses it
-        self.assertIn("Skills · 5", page)
+        # skills: the seeded ones (github-lifecycle, forgejo-lifecycle, board-guide, board-review, board-care) and ours,
+        # with kind, revision and who uses it
+        self.assertIn("Skills · 6", page)
         self.assertIn('href="/fleet/skills/github-lifecycle"', page)
         self.assertIn('href="/fleet/skills/release-notes"', page)
         self.assertIn("Notes &lt;for&gt; a tag.", page)
@@ -125,7 +131,11 @@ class RegistryPages(unittest.TestCase):
         self.assertIn('<select name="profile"', page)
         self.assertIn('<option value="">none</option>', page)
         self.assertIn('<option value="developer">developer · A software developer', page)
-        self.assertIn("keeps its role for life", page)
+        self.assertIn("Its role, voice and personality can be changed later from its row.", page)
+        # and offers to move it to another profile (#395)
+        self.assertIn('class="act role-edit needs-me" data-handle="jane"', page)
+        self.assertIn('<datalist id="profiles-data"><option value="', page)
+        self.assertIn('<option value="developer"></option>', page)
         self.assertIn("f.elements.profile.value", page)
 
     def test_skill_page_edits_previews_and_lists_history_and_users(self):
@@ -166,17 +176,25 @@ class RegistryPages(unittest.TestCase):
         self.assertNotIn('data-rev="2">restore', page)
         self.assertIn("shorter", page)
 
-    def test_profile_page_is_read_only_and_shows_bots_text_and_lineage(self):
+    def test_profile_page_edits_in_place_and_shows_bots_text_history_and_lineage(self):
         r = self.client.get("/fleet/profiles/developer")
         self.assertEqual(r.status_code, 200)
         page = r.text
         self.balanced(page)
         self.assertIn("<h1>developer</h1>", page)
         self.assertIn('href="/fleet/profiles/new?from=developer">Clone</a>', page)
+        # #397: an edit form with what it says and its skills, saved as the next revision with a reason
+        self.assertIn('<form class="card reg-form" id="profile-edit"', page)
         self.assertIn("<h2>What it says</h2>", page)
-        self.assertIn("<dt>responsibilities</dt>", page)
-        self.assertIn("Skills · 1", page)
-        self.assertIn("★ mandatory", page)
+        self.assertIn('<textarea name="responsibilities"', page)
+        self.assertIn("Skills · 2", page)      # github-lifecycle and forgejo-lifecycle
+        self.assertIn('name="skill" value="github-lifecycle" aria-label="include github-lifecycle" checked>', page)
+        self.assertIn('name="mandatory" value="github-lifecycle" aria-label="github-lifecycle mandatory"> read', page)   # neither is mandatory on the seed (#394)
+        self.assertIn('name="skill" value="release-notes" aria-label="include release-notes">', page)
+        self.assertIn('name="reason" required', page)
+        self.assertIn("Save as rev 2", page)
+        self.assertIn("History · 1", page)
+        self.assertIn('"revision": 1', page)
         self.assertIn("Bots with this profile · 1", page)
         self.assertIn('<a href="/a/jane">@jane</a>', page)
         self.assertIn('class="reset" data-handle="jane"', page)
@@ -185,8 +203,22 @@ class RegistryPages(unittest.TestCase):
         self.assertIn("from the shipped developer template", page)
         self.assertIn('data-name="developer" disabled>Delete this profile</button>', page)
         self.assertIn("Not while 1 bot carries it.", page)
-        self.assertEqual(page.count("<form"), 1)        # only the shell's search form: nothing to edit
+        self.assertEqual(page.count("<form"), 2)        # the shell's search form and the edit form
         self.assertEqual(self.client.get("/fleet/profiles/nope").status_code, 404)
+        # saved: the page shows the new revision, the dropped skill unticked, and the history grown
+        self.client.put("/api/profiles/developer", headers=self.human, json={
+            "role": "A developer, on Forgejo.", "skills": [{"name": "forgejo-lifecycle", "mandatory": True}],
+            "base_revision": 1, "reason": "Forgejo cutover"}).raise_for_status()
+        page = self.client.get("/fleet/profiles/developer").text
+        self.balanced(page)
+        self.assertIn("Save as rev 3", page)
+        self.assertIn('"revision": 2', page)
+        self.assertIn("A developer, on Forgejo.", page)
+        self.assertIn('name="skill" value="github-lifecycle" aria-label="include github-lifecycle">', page)
+        self.assertIn("Skills · 1", page)
+        self.assertIn("History · 2", page)
+        self.assertIn("Forgejo cutover", page)
+        self.assertIn("rev 2 · ", page)
         # a clone appears in the lineage of both
         self.client.post("/api/profiles", headers=self.human, json={
             "name": "developer-2", "role": "Dev two", "skills": [{"name": "release-notes"}], "from": "developer"}).raise_for_status()

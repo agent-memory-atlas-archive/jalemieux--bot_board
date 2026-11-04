@@ -42,8 +42,10 @@ its thread with meta {"done": true}. One job per routine is open at a time, so
 however fast the check runs, a routine costs at most one bot run at a time.
 
 A routine can also be written as a recipe (`recipe`) instead of a check of its
-own. The one recipe now, `github-issues`, watches a repository's open issues that
-nobody has taken and routes each to a channel of a workspace: its check and its
+own. The recipes, `github-issues` and `forgejo-issues` (the same for a repository
+on Forgejo, read through its API with the fleet's FORGEJO_TOKEN, #401), watch a
+repository's open issues that nobody has taken and route each to a channel of a
+workspace: its check and its
 prompt are written from the recipe (recipe_check, recipe_prompt), and stored, so
 what a human approves is what runs. Issues a label rule places are announced by
 the runner without a bot; the rest go out as one job, a few at a time, for a bot
@@ -171,11 +173,13 @@ def problem_with(routine):
 # 4: the watermark is {sent, orphaned}; an issue whose bot:<handle> owner is not running goes out
 #    again, once per owner, and a person assigned (not the bots' shared account) has it (#227).
 # 5: GitHub out of reach is no work this pass, not a failed routine; the next pass tries again (#293).
-RECIPE_VERSION = 5
-RECIPE_DEFAULTS = {"unassigned": True, "no_linked_pr": True, "skip_labels": ["claimed", "in-progress"],
+# 6: forgejo-issues, the same recipe for a repository on Forgejo, with the `forgejo` setting (#401).
+RECIPE_VERSION = 6
+RECIPE_DEFAULTS = {"forgejo": "", "unassigned": True, "no_linked_pr": True, "skip_labels": ["claimed", "in-progress"],
                    "batch": 5, "after": "", "rules": [], "remind_after": 7200, "reminds": 3, "escalate": "",
                    "stale_after": 86400}
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+FORGE_RE = re.compile(r"https?://[^/\s]+(/[^\s]*[^/\s])?")
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
 
 
@@ -183,6 +187,8 @@ def recipe_of(data):
     """A recipe with every setting present: what is stored and what the code is taken from."""
     rc = {"type": data.get("type"), "repo": data.get("repo"), "workspace": data.get("workspace") or data.get("project")}
     rc.update({k: data.get(k, v) for k, v in RECIPE_DEFAULTS.items()})
+    if isinstance(rc["forgejo"], str):
+        rc["forgejo"] = rc["forgejo"].strip().rstrip("/")
     if isinstance(rc["rules"], list):     # rules written before workspaces said group, not channel
         rc["rules"] = [{"label": x["label"], "channel": x["group"]} if isinstance(x, dict) and set(x) == {"label", "group"}
                        else x for x in rc["rules"]]
@@ -209,8 +215,10 @@ def upgraded(routine):
 
 def recipe_problem(rc):
     """Why a recipe cannot run, or ''."""
-    if rc.get("type") != "github-issues":
-        return "the recipe `type` must be github-issues"
+    if rc.get("type") not in ("github-issues", "forgejo-issues"):
+        return "the recipe `type` must be github-issues or forgejo-issues"
+    if not isinstance(rc.get("forgejo"), str) or (rc["type"] == "forgejo-issues" and not FORGE_RE.fullmatch(rc["forgejo"])):
+        return "the recipe `forgejo` must be the Forgejo address (http://forge.example.ts.net:3000)"
     if not isinstance(rc.get("repo"), str) or not REPO_RE.fullmatch(rc["repo"]):
         return "the recipe `repo` must be owner/name"
     if not isinstance(rc.get("workspace"), str) or not NAME_RE.fullmatch(rc["workspace"]):
@@ -256,14 +264,166 @@ def owner_label(labels):
     return next((l[4:] for l in labels if l.startswith("bot:") and len(l) > 4), "")
 
 
+def on_forgejo(rc):
+    return rc.get("type") == "forgejo-issues"
+
+
+def forge_name(rc):
+    return "Forgejo" if on_forgejo(rc) else "GitHub"
+
+
+def forgejo_get(rc, path):
+    """One page of the recipe's Forgejo API, and whether a next page follows. The token is the
+    fleet's FORGEJO_TOKEN, from the secrets the board gives the runner, else the environment."""
+    token = {**os.environ, **secrets()}.get("FORGEJO_TOKEN", "")
+    req = urllib.request.Request(rc["forgejo"] + "/api/v1" + path, headers={"Authorization": "token " + token})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r), 'rel="next"' in (r.headers.get("Link") or "")
+
+
+def forgejo_pages(rc, path):
+    page, out = 1, []
+    while True:
+        got, more = forgejo_get(rc, f"{path}{'&' if '?' in path else '?'}limit=50&page={page}")
+        out += got
+        if not more or page >= 200:
+            return out
+        page += 1
+
+
+_LOGINS = {}
+
+
+def shared_login(rc):
+    """The login every bot shares on the recipe's forge: its assignment says nothing about who."""
+    if not on_forgejo(rc):
+        return bots_login()
+    if rc["forgejo"] not in _LOGINS:
+        try:
+            _LOGINS[rc["forgejo"]] = forgejo_get(rc, "/user")[0].get("login", "")
+        except (OSError, ValueError):
+            return ""
+    return _LOGINS[rc["forgejo"]]
+
+
+def forgejo_issue(rc, number):
+    """An issue on Forgejo, in the shape `gh issue view` gives chase(): Forgejo's list has no
+    linked pull requests, so the open PRs whose body references #<number> stand in."""
+    i = forgejo_get(rc, f"/repos/{rc['repo']}/issues/{number}")[0]
+    prs = [p for p in forgejo_pages(rc, f"/repos/{rc['repo']}/pulls?state=open")
+           if re.search(rf"#{number}\b", p.get("body") or "")]
+    return {"state": str(i.get("state", "")).upper(), "title": i.get("title", ""), "url": i.get("html_url", ""),
+            "labels": i.get("labels") or [], "assignees": i.get("assignees") or [], "updatedAt": i.get("updated_at") or "",
+            "closedByPullRequestsReferences": [{"number": p["number"]} for p in prs]}
+
+
+def forge_take(rc, n, old=""):
+    """How the thread worker takes an issue on Forgejo as its own: both labels by id, as the
+    forgejo-lifecycle skill shows, and a stopped owner's label off."""
+    return (f"The thread worker labels the issue as its own on Forgejo: `bot:<your handle>` and `thread:<this "
+            f"thread's id>`, by label id through `POST /repos/{rc['repo']}/issues/{n}/labels` (the forgejo-lifecycle "
+            "skill, steps 0 and 1)" + (f", and removes `bot:{old}`." if old else "."))
+
+
+FORGEJO_CHECK = r"""#!/usr/bin/env python3
+# Written from the routine's recipe: edit the recipe, not this.
+# Open issues in __REPO__ on __FORGEJO__ that nobody has taken and this routine has not announced.
+import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+from datetime import datetime, timezone
+cfg, forgejo, repo = json.loads(__CFG__), __FORGEJO_JSON__, __REPO_JSON__
+token = os.environ.get("FORGEJO_TOKEN", "")
+
+def get(path):     # one page of the API, and whether a next page follows
+    req = urllib.request.Request(forgejo + "/api/v1" + path, headers={"Authorization": "token " + token})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r), 'rel="next"' in (r.headers.get("Link") or "")
+
+def pages(path):
+    page, out = 1, []
+    while True:
+        got, more = get(f"{path}&limit=50&page={page}")
+        out += got
+        if not more or page >= 200:
+            return out
+        page += 1
+
+try:
+    me = get("/user")[0]["login"]     # the account every bot shares: its assignment says nothing
+    issues = pages(f"/repos/{repo}/issues?state=open&type=issues")
+    pulls = pages(f"/repos/{repo}/pulls?state=open") if cfg["no_linked_pr"] else []
+except urllib.error.HTTPError as e:
+    if e.code in (502, 503, 504):
+        print(json.dumps({"work": False, "note": f"Forgejo answered {e.code}, retrying next pass"}))
+        sys.exit(0)
+    sys.exit(f"Forgejo answered {e.code} for {e.url.split('/api/v1', 1)[-1]}: {e.read()[:300].decode(errors='replace')}")
+except OSError as e:
+    print(json.dumps({"work": False, "note": f"Forgejo unreachable ({e}), retrying next pass"}))
+    sys.exit(0)
+linked = {int(n) for p in pulls for n in re.findall(r"#(\d+)\b", p.get("body") or "")}
+running = {}
+def owner_runs(h):     # the board's word on a bot:<handle> owner; unsure counts as running
+    if h not in running:
+        try:
+            with urllib.request.urlopen(os.environ["BOARD"] + "/api/agents/" + urllib.parse.quote(h), timeout=20) as r:
+                running[h] = json.load(r)["agent"].get("running", True)
+        except urllib.error.HTTPError as e:
+            running[h] = e.code != 404       # a handle the board does not know runs nowhere
+        except Exception:
+            running[h] = True
+    return running[h]
+def utc(t):     # Forgejo's times carry a zone; `after` is UTC text
+    try:
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, AttributeError):
+        return t or ""
+mark = json.loads(os.environ.get("ROUTINE_WATERMARK") or "[]")
+sent = set(mark if isinstance(mark, list) else mark.get("sent", []))
+orphaned = {} if isinstance(mark, list) else dict(mark.get("orphaned", {}))
+skip = set(cfg["skip_labels"])
+rules = {r["label"]: r["channel"] for r in cfg["rules"]}
+new = []
+for i in sorted(issues, key=lambda i: i["number"]):
+    labels = [l["name"] for l in i.get("labels") or []]
+    if skip & set(labels):
+        continue
+    channel = next((rules[l] for l in labels if l in rules), "")
+    item = {"number": i["number"], "title": i["title"], "url": i["html_url"], "labels": labels, "channel": channel}
+    owner = next((l[4:] for l in labels if l.startswith("bot:") and len(l) > 4), "")
+    if cfg["unassigned"] and owner:
+        if not owner_runs(owner) and orphaned.get(str(i["number"])) != owner:
+            new.append({**item, "orphan_of": owner})     # its owner stopped: offer it again, once
+        continue
+    if i["number"] in sent or (cfg["after"] and utc(i.get("created_at")) <= cfg["after"]):
+        continue
+    if (cfg["unassigned"] and any(a["login"] != me for a in i.get("assignees") or [])) or \
+            (cfg["no_linked_pr"] and i["number"] in linked):
+        continue
+    new.append(item)
+batch = new[:cfg["batch"]]
+print(json.dumps({"work": bool(batch),
+                  "found": [f"#{i['number']} {i['title']} {i['url']}" + (f" (rule: {i['channel']})" if i["channel"] else "")
+                            for i in batch] + ([f"and {len(new) - len(batch)} more after these"] if len(new) > len(batch) else []),
+                  "items": batch,
+                  "watermark": {"sent": sorted(sent | {i["number"] for i in batch}),
+                                "orphaned": {**orphaned, **{str(i["number"]): i["orphan_of"] for i in batch if i.get("orphan_of")}}}}))
+"""
+
+
 def recipe_check(rc):
     """The check a github-issues recipe runs: open issues nobody has taken and the routine
     has not announced yet, `batch` at a time. The watermark is {"sent": [numbers announced],
     "orphaned": {number: owner}} (a bare list, from version 2, is read as `sent`). With
     `unassigned`, an issue is taken while the bot its bot:<handle> label names is running, or
     while a person (any login but the bots' shared account) is assigned to it. An issue whose
-    labelled owner is not running goes out again, once per owner, whatever `sent` and `after` say."""
+    labelled owner is not running goes out again, once per owner, whatever `sent` and `after` say.
+    A forgejo-issues recipe reads Forgejo's API instead, with the fleet's FORGEJO_TOKEN, in python3
+    alone: Forgejo out of reach, or answering 502 to 504, is no work this pass; any other error
+    (a refused token, a missing repository) stops the routine."""
     cfg = {k: rc[k] for k in ("unassigned", "no_linked_pr", "skip_labels", "batch", "after", "rules")}
+    if on_forgejo(rc):
+        return (FORGEJO_CHECK.replace("__REPO__", rc["repo"]).replace("__FORGEJO__", rc["forgejo"])
+                .replace("__CFG__", json.dumps(json.dumps(cfg, sort_keys=True)))
+                .replace("__FORGEJO_JSON__", json.dumps(rc["forgejo"])).replace("__REPO_JSON__", json.dumps(rc["repo"])))
     return f"""#!/bin/sh
 # Written from the routine's recipe: edit the recipe, not this.
 # Open issues in {rc['repo']} that nobody has taken and this routine has not announced.
@@ -328,9 +488,12 @@ PY
 
 
 def recipe_prompt(rc):
-    return (f"Route each GitHub issue below, from {rc['repo']}, to the channel of this workspace "
+    where, read = ((f"from {rc['repo']} on Forgejo", f"`GET {rc['forgejo']}/api/v1/repos/{rc['repo']}/issues/<n>` with "
+                    "`Authorization: token $FORGEJO_TOKEN`, or its link") if on_forgejo(rc)
+                   else (f"from {rc['repo']}", f"`gh issue view <n> -R {rc['repo']}`"))
+    return (f"Route each {forge_name(rc)} issue below, {where}, to the channel of this workspace "
             f"it belongs to. The channels and what each is for are at GET /api/channels, and "
-            f"GET /api/channels/<slug> gives one's focus; read the issue (`gh issue view <n> -R {rc['repo']}`) when the "
+            f"GET /api/channels/<slug> gives one's focus; read the issue ({read}) when the "
             "title is not enough. Issues marked with a rule already have their channel: keep it.\n\n"
             "Do not announce the issues yourself and do not assign anyone: the runner posts each one in its "
             "channel and follows it up. Reply in this thread with `meta` "
@@ -343,7 +506,7 @@ def recipe_summary(rc):
     taken = (["a running bot's bot:<handle> label or a person is on it"] * rc["unassigned"]
              + ["a pull request is linked to it"] * rc["no_linked_pr"])
     taken += [f"it is labelled {', '.join(rc['skip_labels'])}"] * bool(rc["skip_labels"])
-    lines = [f"- Watches open issues in {rc['repo']}"
+    lines = [f"- Watches open issues in {rc['repo']}" + (f" on {rc['forgejo']}" if on_forgejo(rc) else "")
              + (f" opened after {rc['after']}" if rc["after"] else "")
              + (f", skipping any where {' or '.join(taken)}" if taken else "")
              + f"; each is announced once, {rc['batch']} at a time.",
@@ -653,10 +816,11 @@ class Runner:
                     + (f"Routed to {group}: {why}.\n" if channel != home and why else
                        f"Routed to {group}.\n" if channel != home else "No channel fits it, so it is here.\n")
                     + (f"Its owner, {i['orphan_of']}, is not running, so it is free: its branch, pull request and "
-                       f"comments on GitHub hold the work so far.\n" if i.get("orphan_of") else "")
-                    + f"The thread worker labels the issue as its own: `gh issue edit {i['number']} -R {rc['repo']} "
-                    f"--add-label bot:<your handle>` (`gh label create` it first if the repo has none)"
-                    + (f", and removes `bot:{i['orphan_of']}`." if i.get("orphan_of") else "."))
+                       f"comments on {forge_name(rc)} hold the work so far.\n" if i.get("orphan_of") else "")
+                    + (forge_take(rc, i["number"], i.get("orphan_of", "")) if on_forgejo(rc) else
+                       f"The thread worker labels the issue as its own: `gh issue edit {i['number']} -R {rc['repo']} "
+                       f"--add-label bot:<your handle>` (`gh label create` it first if the repo has none)"
+                       + (f", and removes `bot:{i['orphan_of']}`." if i.get("orphan_of") else ".")))
             m = self.board.post(channel, body, meta={"routine": r["id"], "name": r["name"],
                                                      "routine_item": {"repo": rc["repo"], "number": i["number"]}})
             items_st[str(i["number"])] = {"msg": m["id"], "channel": channel, "sent_at": time.time(), "reminds": 0,
@@ -691,11 +855,12 @@ class Runner:
         labelled = owner_label([l["name"] for l in issue.get("labels") or []]) == holder
         m = self.board.post(item["channel"], (
             f"Issue to take again: #{n} {issue.get('title', '')}\n{issue.get('url', '')}\n\n"
-            f"It was {holder}'s, who {why}, so it is free: its branch, pull request and comments on GitHub hold "
+            f"It was {holder}'s, who {why}, so it is free: its branch, pull request and comments on {forge_name(rc)} hold "
             f"the work so far (the old thread is message {item['msg']}).\n"
-            f"The thread worker labels the issue as its own: `gh issue edit {n} -R {rc['repo']} --add-label "
-            f"bot:<your handle>" + (f" --remove-label bot:{holder}" if labelled else "")
-            + "` (`gh label create` it first if the repo has none)."),
+            + (forge_take(rc, n, holder if labelled else "") if on_forgejo(rc) else
+               f"The thread worker labels the issue as its own: `gh issue edit {n} -R {rc['repo']} --add-label "
+               f"bot:<your handle>" + (f" --remove-label bot:{holder}" if labelled else "")
+               + "` (`gh label create` it first if the repo has none).")),
             meta={"routine": r["id"], "name": r["name"], "routine_item": {"repo": rc["repo"], "number": n}})
         item.update(msg=m["id"], sent_at=time.time(), looked_at=time.time(), reminds=0, orphan_of=holder)
         item.pop("escalated", None)
@@ -712,16 +877,16 @@ class Runner:
                 item["escalated"] = True
             item["number"], item["looked_at"] = int(number), time.time()
             try:
-                issue = json.loads(subprocess.run(
+                issue = forgejo_issue(rc, number) if on_forgejo(rc) else json.loads(subprocess.run(
                     ["gh", "issue", "view", number, "-R", rc["repo"], "--json",
                      "state,title,url,labels,assignees,updatedAt,closedByPullRequestsReferences"],
                     capture_output=True, text=True, timeout=60, check=True).stdout)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                continue        # GitHub unreachable: look again on a later pass
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                continue        # the forge unreachable: look again on a later pass
             if issue["state"] != "OPEN":
                 item["over"] = "closed"
                 self.log(r, f"#{number}: closed")
-            elif any(a["login"] != bots_login() for a in issue.get("assignees") or []):
+            elif any(a["login"] != shared_login(rc) for a in issue.get("assignees") or []):
                 item["held"] = "a person is assigned"
             else:
                 holder, seen = self.holder(item, issue)

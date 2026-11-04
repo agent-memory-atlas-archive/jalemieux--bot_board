@@ -27,6 +27,8 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
+from . import storage
+
 DB_PATH = os.environ.get("BOT_BOARD_DB", "/data/bot_board.db")
 
 MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
@@ -96,6 +98,12 @@ CREATE TABLE IF NOT EXISTS thread_workers (
 );
 CREATE INDEX IF NOT EXISTS idx_thread_workers_agent ON thread_workers(agent_id, thread_id);
 
+CREATE TABLE IF NOT EXISTS thread_hidden (
+    thread_id INTEGER PRIMARY KEY REFERENCES messages(id),
+    hidden_by TEXT NOT NULL,
+    hidden_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS thread_completions (
     thread_id INTEGER PRIMARY KEY REFERENCES messages(id),
     through_id INTEGER NOT NULL REFERENCES messages(id),
@@ -113,14 +121,21 @@ CREATE TABLE IF NOT EXISTS message_receipts (
 
 CREATE TABLE IF NOT EXISTS text_attachments (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-    content    TEXT NOT NULL,
+    storage_key TEXT NOT NULL,
     size_bytes INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS image_attachments (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    content BLOB NOT NULL,
+    storage_key TEXT NOT NULL,
     media_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS file_attachments (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    storage_key TEXT NOT NULL,
     name TEXT NOT NULL,
     size_bytes INTEGER NOT NULL
 );
@@ -196,9 +211,35 @@ def init() -> None:
                 c.execute(f"ALTER TABLE boards ADD COLUMN {col} {ddl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id, kind)")
         c.commit()
+        _attachments_to_files(c)
     from . import workspaces, routines
     workspaces.init()
     routines.init()
+
+
+def _attachments_to_files(c: sqlite3.Connection) -> None:
+    """Move attachments stored in the database to the file store, one row at a time (#390).
+    A crash loses nothing: a row without a key still has its content, and the next start goes on."""
+    moved = False
+    for table in ("text_attachments", "image_attachments"):
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if "content" not in cols:
+            continue
+        if "storage_key" not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN storage_key TEXT")
+            c.commit()
+        for row in c.execute(f"SELECT message_id FROM {table} WHERE storage_key IS NULL").fetchall():
+            content = c.execute(f"SELECT CAST(content AS BLOB) FROM {table} WHERE message_id=?",
+                                (row["message_id"],)).fetchone()[0]
+            c.execute(f"UPDATE {table} SET storage_key=? WHERE message_id=?",
+                      (storage.write(content), row["message_id"]))
+            c.commit()
+        c.execute(f"ALTER TABLE {table} DROP COLUMN content")
+        c.commit()
+        moved = True
+    if moved:       # give the space back once: dropping a column only frees pages inside the file
+        c.execute("VACUUM")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
 
 
 # ---------------------------------------------------------------- scope
@@ -535,7 +576,21 @@ def _seen_map(seen: dict[str, int] | None, slug: str, since: int | None) -> int 
 
 
 # Release events remain in the bot feed, but are not human conversation.
-HUMAN_MESSAGE = "COALESCE(json_extract(m.meta, '$.kind'), '') != 'thread_released'"
+HUMAN_MESSAGE = "COALESCE(json_extract(m.meta, '$.kind'), '') NOT IN ('thread_released', 'thread_handed')"
+# what a channel view shows a human: not a thread a human hid (#374). Bots, search and the thread itself still see it.
+HUMAN_LISTED = HUMAN_MESSAGE + " AND COALESCE(m.thread_id, m.id) NOT IN (SELECT thread_id FROM thread_hidden)"
+
+
+def hide_thread(tid: int, by: str, hidden: bool = True) -> None:
+    with _write_lock, conn() as c:
+        if hidden:
+            c.execute("INSERT OR IGNORE INTO thread_hidden(thread_id, hidden_by, hidden_at) VALUES (?,?,?)", (tid, by, now()))
+        else:
+            c.execute("DELETE FROM thread_hidden WHERE thread_id=?", (tid,))
+
+
+def thread_hidden(tid: int) -> bool:
+    return conn().execute("SELECT 1 FROM thread_hidden WHERE thread_id=?", (tid,)).fetchone() is not None
 
 
 def list_boards(
@@ -565,7 +620,7 @@ def list_boards(
         where.append(sc)
         params += sp
     clause = f"WHERE {' AND '.join(where)}" if where else ""
-    visible = f" AND {HUMAN_MESSAGE}" if hide_events else ""
+    visible = f" AND {HUMAN_LISTED}" if hide_events else ""
     rows = conn().execute(
         f"""
         SELECT b.id, b.slug, b.topic, b.kind, b.created_at, b.workspace_id, b.name, b.archived,
@@ -612,6 +667,7 @@ def post_message(
     image_attachment: tuple[bytes, str, str] | None = None,
     workspace_id: int | None = None,
     client_key: str | None = None,
+    file_attachment: tuple[bytes, str] | None = None,
 ) -> dict:
     """`workspace_id`: the poster's scope (db.scope). A bot may post only in its own
     workspace's channels and its conversations; a channel it names that does not
@@ -673,14 +729,15 @@ def post_message(
         if image_attachment is not None:
             content, media_type, name = image_attachment
             c.execute(
-                "INSERT INTO image_attachments (message_id, content, media_type, name, size_bytes)"
-                " VALUES (?,?,?,?,?)", (mid, content, media_type, name, len(content)),
+                "INSERT INTO image_attachments (message_id, storage_key, media_type, name, size_bytes)"
+                " VALUES (?,?,?,?,?)", (mid, storage.write(content), media_type, name, len(content)),
             )
+        if file_attachment is not None:
+            content, name = file_attachment
+            c.execute("INSERT INTO file_attachments (message_id, storage_key, name, size_bytes) VALUES (?,?,?,?)",
+                      (mid, storage.write(content), name, len(content)))
         if text_attachment is not None:
-            c.execute(
-                "INSERT INTO text_attachments (message_id, content, size_bytes) VALUES (?,?,?)",
-                (mid, text_attachment, len(text_attachment.encode("utf-8"))),
-            )
+            add_text_attachment(c, mid, text_attachment)
         if parent_thread is None:
             c.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
         for h in handles:
@@ -745,8 +802,19 @@ def _mention_elsewhere(r) -> str | None:
     return "elsewhere"
 
 
+def _mention_never_claims(r) -> str | None:
+    """"never claims" for an agent that cannot hold a thread (#450): a human, a keeper, the
+    board's cron agents, an interactive session. On a thread root its mention reserves the
+    thread for nobody, so it is treated like a stopped one: the thread goes to the workspace's
+    bots, and the sender is told."""
+    if r["self_mention"] or r["board_kind"] == "conversation":     # naming yourself, or a participant:
+        return None                                                  # nothing to warn about
+    return "never claims" if r["kind"] in UNSCOPED_KINDS or r["interactive"] else None
+
+
 def _mention_rows(ids, marks):
-    q = ("SELECT mn.message_id, a.handle, a.kind, a.last_seen_at, a.workspace_id, {run} AS run,"
+    q = ("SELECT mn.message_id, a.handle, a.kind, a.last_seen_at, a.workspace_id, a.interactive, {run} AS run,"
+         " mn.agent_id = m.agent_id AS self_mention,"
          " b.kind AS board_kind, b.workspace_id AS board_workspace_id FROM mentions mn"
          " JOIN agents a ON a.id=mn.agent_id JOIN messages m ON m.id=mn.message_id"
          " JOIN boards b ON b.id=m.board_id {join} WHERE mn.message_id IN ({marks})")
@@ -782,12 +850,21 @@ def _hydrate(rows, hide_events: bool = False) -> list[dict]:
                 "url": f"/api/messages/{mid}/image",
             })
         for r in conn().execute(
+            f"SELECT message_id, name, size_bytes FROM file_attachments WHERE message_id IN ({marks})", ids
+        ):
+            mid = r["message_id"]
+            attachments.setdefault(mid, []).append({
+                "name": r["name"], "size_bytes": r["size_bytes"], "url": f"/api/messages/{mid}/file",
+            })
+        for r in conn().execute(
             f"SELECT message_id, tag FROM tags WHERE message_id IN ({marks})", ids
         ):
             tags.setdefault(r["message_id"], []).append(r["tag"])
+        roots = {r["id"] for r in rows if r["reply_to"] is None}
         for r in _mention_rows(ids, marks):
             mentions.setdefault(r["message_id"], []).append(r["handle"])
-            state = mention_state(r["kind"], r["last_seen_at"], r["run"]) or _mention_elsewhere(r)
+            state = (_mention_never_claims(r) if r["message_id"] in roots else None) \
+                or mention_state(r["kind"], r["last_seen_at"], r["run"]) or _mention_elsewhere(r)
             if state:
                 unreachable.setdefault(r["message_id"], []).append(
                     {"mention": r["handle"], "state": state, "last_seen_at": r["last_seen_at"]})
@@ -838,14 +915,46 @@ def get_message(mid: int) -> dict | None:
     return hydrated[0] if hydrated else None
 
 
+def add_text_attachment(c: sqlite3.Connection, mid: int, text: str) -> None:
+    """Inside the caller's write lock, so a delete cannot take the file between write and insert."""
+    content = text.encode("utf-8")
+    c.execute("INSERT INTO text_attachments (message_id, storage_key, size_bytes) VALUES (?,?,?)",
+              (mid, storage.write(content), len(content)))
+
+
 def get_text_attachment(mid: int) -> str | None:
-    row = conn().execute("SELECT content FROM text_attachments WHERE message_id=?", (mid,)).fetchone()
-    return row["content"] if row else None
+    """The file holding a message's text attachment."""
+    row = conn().execute("SELECT storage_key FROM text_attachments WHERE message_id=?", (mid,)).fetchone()
+    return storage.path(row["storage_key"]) if row else None
 
 
 def get_image_attachment(mid: int) -> dict | None:
+    """An image's metadata, with `path` the file holding it."""
     row = conn().execute("SELECT * FROM image_attachments WHERE message_id=?", (mid,)).fetchone()
-    return dict(row) if row else None
+    return {**row, "path": storage.path(row["storage_key"])} if row else None
+
+
+def get_file_attachment(mid: int) -> dict | None:
+    """A file's name and size, with `path` the file holding it."""
+    row = conn().execute("SELECT * FROM file_attachments WHERE message_id=?", (mid,)).fetchone()
+    return {**row, "path": storage.path(row["storage_key"])} if row else None
+
+
+def delete_attachments(mid: int) -> None:
+    """Remove a message's attachments, and each file no other message still uses. Nothing deletes
+    messages today; whatever does first calls this, since a key can be shared."""
+    c = conn()
+    with _write_lock:
+        keys = set()
+        with c:
+            for table in ("text_attachments", "image_attachments", "file_attachments"):
+                keys |= {r["storage_key"] for r in c.execute(f"SELECT storage_key FROM {table} WHERE message_id=?", (mid,))}
+                c.execute(f"DELETE FROM {table} WHERE message_id=?", (mid,))
+        for key in keys:
+            if not c.execute("SELECT 1 FROM text_attachments WHERE storage_key=?"
+                             " UNION ALL SELECT 1 FROM image_attachments WHERE storage_key=?"
+                             " UNION ALL SELECT 1 FROM file_attachments WHERE storage_key=?", (key, key, key)).fetchone():
+                storage.delete(key)
 
 
 def thread_workers(tids: list[int]) -> dict[int, str | None]:
@@ -902,8 +1011,13 @@ def _claim_thread(c: sqlite3.Connection, tid: int, agent: dict) -> dict:
         # the moderator reads and replies everywhere but claims only in the admin workspace (#319)
         raise PermissionError("the moderator claims threads only in the admin workspace: this one is"
                               " for its workspace's bots")
-    mentions = c.execute("SELECT agent_id FROM mentions WHERE message_id=?", (tid,)).fetchall()
-    if mentions and agent["id"] not in {m["agent_id"] for m in mentions}:
+    # a mention reserves the thread for the agents that can hold it: not one that never claims
+    # (a human, the board's cron, a session), one stopped on /fleet or one outside this
+    # workspace (#450). A bot only away by presence still holds its reservation.
+    mentioned = _mention_rows([tid], "?")
+    reserved = {r["handle"].lower() for r in mentioned if not (
+        r["kind"] in UNSCOPED_KINDS or r["interactive"] or r["run"] == 0 or _mention_elsewhere(r))}
+    if reserved and agent["handle"].lower() not in reserved | {r["handle"].lower() for r in mentioned}:
         raise PermissionError("this request is addressed to someone else")
     from . import workspaces
     if workspaces.is_archived(root["board_id"]):
@@ -925,17 +1039,35 @@ def claim_thread(tid: int, agent: dict) -> dict:
         return _claim_thread(c, tid, agent)
 
 
-def release_thread(tid: int, agent: dict) -> dict:
+def release_thread(tid: int, agent: dict, to: str | None = None) -> dict:
+    """Release a thread for any bot to pick up, or, with `to`, hand it to that bot (#468): the
+    claim moves in one transaction, so no other launcher can take it in between."""
     from . import workspaces
     with _write_lock, conn() as c:
         root = c.execute("SELECT * FROM messages WHERE id=? AND thread_id=id", (tid,)).fetchone()
         if root is None:
             raise KeyError("no such thread root")
         claim = c.execute("SELECT agent_id FROM thread_workers WHERE thread_id=?", (tid,)).fetchone()
-        if claim is None:
+        if claim is None and to is None:
             return {"thread_id": tid, "worker": None}
-        if agent["id"] not in (claim["agent_id"], root["agent_id"]) and not workspaces.is_admin(agent):
+        if agent["id"] not in ((claim["agent_id"],) if claim else ()) + (root["agent_id"],) \
+                and not workspaces.is_admin(agent):
             raise PermissionError("only the worker, thread author or an administrator can release it")
+        if to is not None:
+            target = get_agent_by_handle(to.lstrip("@"))
+            if target is None:
+                raise KeyError(f"no agent named {to}")
+            if workspaces.is_archived(root["board_id"]):
+                raise PermissionError("this workspace or channel is archived")
+            c.execute("DELETE FROM thread_workers WHERE thread_id=?", (tid,))
+            worker = _claim_thread(c, tid, target)      # its checks: refused, nothing changes
+            c.execute(
+                "INSERT INTO messages (board_id,agent_id,body,reply_to,thread_id,meta,created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (root["board_id"], agent["id"], f"Thread handed to @{target['handle']} by @{agent['handle']}.",
+                 tid, tid, json.dumps({"kind": "thread_handed", "to": target["handle"]}), now()),
+            )
+            return worker
         if workspaces.is_archived(root["board_id"]):
             raise PermissionError("this workspace or channel is archived")
         c.execute("DELETE FROM thread_workers WHERE thread_id=?", (tid,))
@@ -1017,6 +1149,13 @@ def complete_thread(tid: int, through: int, agent: dict) -> dict:
         c.execute("INSERT INTO thread_completions VALUES (?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET "
                   "through_id=excluded.through_id, completed_by=excluded.completed_by, completed_at=excluded.completed_at",
                   (tid, through, agent["id"], now()))
+        # what the thread asked of a human through here is settled, and stays so if a reply reopens it:
+        # a completed thread blocks on nobody (#448). w<id> ends the ask; the message stays a mention.
+        from .status import DISMISS_SCHEMA
+        c.execute(DISMISS_SCHEMA.strip().rstrip(";"))     # CREATE TABLE IF NOT EXISTS
+        c.execute("INSERT OR IGNORE INTO status_dismissals(key,text,by_agent,at) SELECT 'w' || id, substr(body,1,200), ?, ?"
+                  " FROM messages WHERE thread_id=? AND id<=? AND (meta LIKE '%\"needs\"%'"
+                  " OR id IN (SELECT message_id FROM tags WHERE tag='needs-human'))", (agent["id"], now(), tid, through))
     return {"thread_id": tid, "completed_through": through}
 
 
@@ -1037,7 +1176,9 @@ def list_messages(
     where = ["m.id > ?"]
     params: list = [since]
     if hide_events:
-        where.append(HUMAN_MESSAGE)
+        # the human page's list of roots keeps hidden threads, marked, so they fold in place (#407);
+        # every other human listing (the live poll, the unread view, the counts) leaves them out
+        where.append(HUMAN_MESSAGE if thread is not None or roots else HUMAN_LISTED)
     if board:
         where.append("b.slug = ?")
         params.append(board)
@@ -1066,7 +1207,21 @@ def list_messages(
     sql = f"{_MSG_SELECT} WHERE {' AND '.join(where)} ORDER BY m.id {direction} LIMIT ?"
     params.append(max(1, min(limit, 501)))
     rows = conn().execute(sql, params).fetchall()
-    return _hydrate(rows, hide_events=hide_events)
+    out = _hydrate(rows, hide_events=hide_events)
+    return _mark_hidden(out) if hide_events and roots else out
+
+
+def _mark_hidden(messages: list[dict]) -> list[dict]:
+    """A root whose thread a human hid carries `hidden`, by whom and when (#407)."""
+    ids = [m["id"] for m in messages if m["reply_to"] is None]
+    if ids:
+        marks = ",".join("?" * len(ids))
+        hidden = {r["thread_id"]: r for r in conn().execute(
+            f"SELECT thread_id, hidden_by, hidden_at FROM thread_hidden WHERE thread_id IN ({marks})", ids)}
+        for m in messages:
+            if m["id"] in hidden:
+                m.update(hidden=True, hidden_by=hidden[m["id"]]["hidden_by"], hidden_at=hidden[m["id"]]["hidden_at"])
+    return messages
 
 
 def list_inbox(agent_id: int, since: int = 0, limit: int = 50, workspace_id: int | None = None) -> list[dict]:

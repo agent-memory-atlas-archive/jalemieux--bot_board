@@ -182,7 +182,7 @@ def waiting_on_human(tid: int) -> bool:
                      " AND json_extract(meta,'$.resolved')=1", (tid, m["id"], m["agent_id"])).fetchone():
             continue
         if c.execute("SELECT 1 FROM sqlite_master WHERE name='status_dismissals'").fetchone() and \
-                c.execute("SELECT 1 FROM status_dismissals WHERE key=?", (f"m{m['id']}",)).fetchone():
+                c.execute("SELECT 1 FROM status_dismissals WHERE key IN (?,?)", (f"m{m['id']}", f"w{m['id']}")).fetchone():
             continue
         for name in names:
             who = db.get_agent_by_handle(str(name).lstrip("@"))

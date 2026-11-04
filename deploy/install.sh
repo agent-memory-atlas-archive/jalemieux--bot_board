@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# One-time setup of automated releases on this host. Safe to re-run.
+# One-time setup of automated deploys on this host. Safe to re-run.
 #   1. installs bot-board-release.service + .timer into systemd and starts the timer
-#   2. installs the git post-commit hook so a commit on main releases immediately
+#   2. lets Docker pull from Forgejo's registry, which is plain HTTP on the tailnet
 #   3. registers a board handle for the release bot so outcomes land in `runs`
 #   4. stops the old bot-board-routines.service: the runner now runs inside the board
+#   5. removes the git post-commit hook from before: releases are cut on Forgejo now
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -23,9 +24,29 @@ if [ -f /etc/systemd/system/bot-board-routines.service ]; then
   echo "routines runner: old unit removed, it runs inside the board"
 fi
 
-if [ -d .git ]; then
-  cp deploy/post-commit.hook .git/hooks/post-commit && chmod +x .git/hooks/post-commit
-  echo "git hook: .git/hooks/post-commit"
+# Releases are cut by .forgejo/workflows/release.yml; a commit here deploys nothing.
+if [ -f .git/hooks/post-commit ] && grep -q bot-board-release .git/hooks/post-commit; then
+  rm -f .git/hooks/post-commit && echo "git hook: old post-commit hook removed"
+fi
+
+# Docker only pulls over HTTPS unless told otherwise; Forgejo's registry is plain
+# HTTP on the tailnet. Adds it to insecure-registries and reloads the daemon if it
+# was not there (a reload restarts the board container for a few seconds).
+REGISTRY="${BOT_BOARD_REGISTRY:-minipc-2.taild87368.ts.net:3000}"
+if ! docker info --format '{{join .RegistryConfig.InsecureRegistryCIDRs ","}} {{range $k, $v := .RegistryConfig.IndexConfigs}}{{$k}} {{end}}' 2>/dev/null | grep -q "$REGISTRY"; then
+  sudo python3 - "$REGISTRY" <<'PY'
+import json, os, sys
+path, reg = "/etc/docker/daemon.json", sys.argv[1]
+conf = json.load(open(path)) if os.path.exists(path) else {}
+regs = conf.setdefault("insecure-registries", [])
+if reg not in regs:
+    regs.append(reg)
+    json.dump(conf, open(path, "w"), indent=2)
+PY
+  sudo systemctl reload docker 2>/dev/null || sudo systemctl restart docker
+  echo "docker: $REGISTRY added to insecure-registries"
+else
+  echo "docker: $REGISTRY already an insecure registry"
 fi
 
 BOARD_URL="${BOT_BOARD_URL:-http://127.0.0.1:8080}"

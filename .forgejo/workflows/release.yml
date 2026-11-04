@@ -1,0 +1,228 @@
+# Release on Forgejo Actions (#410, #411): on every push to main, claim the next
+# version tag, build the board image from the pushed commit, smoke-test it, and
+# publish it under that tag to Forgejo's registry and, when a token is set, to
+# ghcr.io. The box that serves the board (deploy/release.sh on a timer) pulls the
+# newest published release and deploys it; it never builds.
+#
+# Order: the tag is pushed before the build so two runs cannot publish the same
+# version (a lost race re-reads the tags and bumps again); if the build or the
+# smoke test fails the tag is deleted again, so the box never looks for an image
+# that does not exist. [skip release] in the commit message skips the run.
+#
+# Registries. The job's docker CLI drives the host's Docker daemon (the runner
+# automounts the socket), so Forgejo's registry is reached as 127.0.0.1:3000 from
+# the daemon's point of view, which Docker treats as insecure without any config.
+# Others pull the same image as minipc-2.taild87368.ts.net:3000/jac/bot_board.
+# ghcr.io gets the same image for people outside the tailnet.
+#
+# Secrets, set on the repository by jac (the run's own job token can log in to
+# the registry but has no package scope, "unauthorized: reqPackageAccess"):
+#   REGISTRY_TOKEN  a Forgejo token of jac's with write:package; the image lives
+#                   under jac/, which only jac's account may write to
+#   GHCR_TOKEN      a GitHub token with write:packages; without it the ghcr.io
+#                   step is skipped and says so
+#
+# Platforms (#423): the image is a manifest list for linux/amd64 and linux/arm64,
+# so it runs natively on Apple Silicon and ARM boxes. The runner is amd64; arm64 is
+# cross-built under QEMU (tonistiigi/binfmt registers it on the host). Builds go
+# through a buildx builder kept on the host daemon between runs, "bot_board-release",
+# so its layer cache keeps later builds short. It runs on the host's network, so
+# 127.0.0.1:3000 is Forgejo's registry for it as for the daemon, over plain http.
+# What is pushed is rebuilt from that cache after the smoke test, not the loaded images
+# themselves: the same layers on a cache hit, but a reproduction of what was tested.
+# The builder keeps the buildkitd config it was created with: after changing it, run
+# `docker buildx rm bot_board-release` on minipc-2. Its cache sits on minipc-2's disk
+# under buildkit's own garbage collection, which `docker image prune` does not touch.
+#
+# Manual runs: "Run workflow" on a branch with a version (say v0.0.0-test)
+# builds, smoke-tests and publishes that image tag without making a git tag, for
+# trying the workflow before it merges. Only a run on main moves :latest.
+name: release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "publish the image under this tag, with no git tag (say v0.0.0-test)"
+        required: false
+        default: ""
+jobs:
+  release:
+    runs-on: docker
+    container: docker:cli
+    timeout-minutes: 45
+    env:
+      REGISTRY: 127.0.0.1:3000
+      IMAGE: jac/bot_board
+      PUBLIC_REGISTRY: minipc-2.taild87368.ts.net:3000
+      GHCR_IMAGE: ghcr.io/jalemieux/bot_board
+      GHCR_USER: jalemieux
+      REGISTRY_USER: jac
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      JOB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MANUAL_VERSION: ${{ github.event.inputs.version }}
+      PLATFORMS: linux/amd64,linux/arm64
+      BUILDER: bot_board-release
+    steps:
+      - run: apk add -q git curl bash
+
+      - name: check out the pushed commit
+        run: |
+          # Full history of the pushed branch: the tag's changelog needs it. The repo
+          # is public, so no token. GITHUB_REF is refs/heads/main on a push and the
+          # chosen branch on a manual run; GITHUB_SHA is the commit to release.
+          git init -q .
+          git fetch -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF"
+          git checkout -q "$GITHUB_SHA"
+          git log --oneline -1
+
+      - name: version, the next release tag, claimed on this commit
+        id: version
+        shell: bash
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "the REGISTRY_TOKEN secret is not set on this repository; see the comment at the top of this workflow"
+            exit 1
+          fi
+          if [ -n "$MANUAL_VERSION" ]; then
+            echo "manual run: publishing as $MANUAL_VERSION, no tag is made"
+            echo "version=$MANUAL_VERSION" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git log -1 --format=%B | grep -qiF '[skip release]'; then
+            echo "commit says [skip release]; nothing to publish"
+            echo "version=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          push_url="$(echo "$repo" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")"
+          # Annotated tags list twice in ls-remote; the ^{} line carries the commit.
+          tags() { git ls-remote --tags "$repo" | sed 's|\^{}$||' | awk '{ sub("refs/tags/", "", $2); print $1, $2 }'; }
+          on_commit="$(tags | awk -v sha="$GITHUB_SHA" '$1 == sha { print $2 }' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          if [ -n "$on_commit" ]; then
+            echo "this commit is already tagged $on_commit; publishing under it"
+            echo "version=$on_commit" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch -q "$repo" 'refs/tags/*:refs/tags/*' 2>/dev/null || true
+          for attempt in 1 2 3; do
+            last="$(tags | awk '{ print $2 }' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+            if [ -z "$last" ]; then ver=v1.0.0; else
+              IFS=. read -r maj min pat <<<"${last#v}"; ver="v$maj.$min.$((pat + 1))"
+            fi
+            changes="$(git log --format='%h %s' "${last:+$last..}HEAD" 2>/dev/null | head -50 || true)"
+            git -c user.name="bot_board release" -c user.email="release@forgejo" tag -a "$ver" -m "bot_board $ver" ${changes:+-m "$changes"}
+            if git push -q "$push_url" "refs/tags/$ver" 2>/dev/null; then
+              echo "tagged $ver (previous: ${last:-none})"
+              echo "version=$ver" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "tag $ver was taken meanwhile (attempt $attempt); re-reading tags"
+            git tag -d "$ver" >/dev/null; sleep 5
+          done
+          echo "could not claim a version tag after 3 attempts"; exit 1
+
+      - name: build
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          drop_tag() { [ -n "$MANUAL_VERSION" ] && return 0; git push -q "$(echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")" ":refs/tags/$VER" 2>/dev/null && echo "tag $VER removed again" || true; }
+          trap 'rc=$?; [ $rc -ne 0 ] && drop_tag; exit $rc' EXIT
+          build() { docker buildx build --builder "$BUILDER" -q --provenance=false \
+            --build-arg "BOT_BOARD_VERSION=$VER" --build-arg "BOT_BOARD_COMMIT=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" "$@" . >/dev/null; }
+          # arm64 under QEMU: registering the emulator is idempotent and lasts until the host reboots
+          docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
+          if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
+            printf '[registry."%s"]\n  http = true\n  insecure = true\n' "$REGISTRY" > buildkitd.toml
+            docker buildx create --name "$BUILDER" --driver docker-container --driver-opt network=host \
+              --buildkitd-config buildkitd.toml >/dev/null
+          fi
+          # Each platform is built once and loaded into the daemon for the smoke test; the
+          # multi-platform push in the publish steps comes from the builder's cache.
+          for arch in amd64 arm64; do
+            build --platform "linux/$arch" --load -t "$REGISTRY/$IMAGE:$VER-$arch"
+            docker image inspect "$REGISTRY/$IMAGE:$VER-$arch" --format "built {{.Os}}/{{.Architecture}} {{.Id}} ({{.Size}} bytes)"
+          done
+
+      - name: smoke test
+        if: steps.version.outputs.version != ''
+        shell: bash
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          # The container runs under the host daemon, outside this job's network, so the
+          # checks run inside it; the image has python.
+          name="bot_board_smoke_$GITHUB_RUN_ID"
+          drop_images() { docker rmi "$REGISTRY/$IMAGE:$VER-amd64" "$REGISTRY/$IMAGE:$VER-arm64" >/dev/null 2>&1 || true; }
+          # arm64 runs under QEMU: it must at least start python and import the app
+          if ! docker run --rm --platform linux/arm64 "$REGISTRY/$IMAGE:$VER-arm64" \
+               python -c "import platform, app.main; print('arm64 image imports app on', platform.machine())"; then
+            got="arm64 image failed to import app"; arm_failed=1
+          fi
+          docker run -d --rm --name "$name" "$REGISTRY/$IMAGE:$VER-amd64" >/dev/null
+          probe() { docker exec "$name" python -c "import json,urllib.request;print(json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)).get('version',''))" 2>/dev/null; }
+          ok=0
+          [ -n "${arm_failed:-}" ] || for i in $(seq 1 30); do
+            got="$(probe || true)"
+            [ "$got" = "$VER" ] && { ok=1; break; }
+            sleep 1
+          done
+          if [ $ok = 1 ]; then
+            docker exec "$name" python -c "import urllib.request;[urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=3) for p in ('/','/agents.md')]" || ok=0
+          fi
+          if [ $ok != 1 ]; then
+            echo "smoke test failed: expected version $VER, got '${got:-no answer}'"
+            docker logs "$name" 2>&1 | tail -40 || true
+            docker stop -t 2 "$name" >/dev/null || true
+            drop_images
+            if [ -z "$MANUAL_VERSION" ]; then
+              push_url="$(echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | sed "s|://|://$GITHUB_ACTOR:$JOB_TOKEN@|")"
+              git push -q "$push_url" ":refs/tags/$VER" 2>/dev/null && echo "tag $VER removed again; nothing was published" || echo "could not remove tag $VER; delete it by hand"
+            fi
+            exit 1
+          fi
+          echo "smoke test passed: /healthz reports $VER, / and /agents.md answer"
+          docker stop -t 2 "$name" >/dev/null
+
+      - name: publish to Forgejo's registry
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin >/dev/null
+          tags=(-t "$REGISTRY/$IMAGE:$VER"); [ "$GITHUB_REF" = refs/heads/main ] && tags+=(-t "$REGISTRY/$IMAGE:latest")
+          docker buildx build --builder "$BUILDER" -q --provenance=false --platform "$PLATFORMS" --push \
+            --build-arg "BOT_BOARD_VERSION=$VER" --build-arg "BOT_BOARD_COMMIT=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" "${tags[@]}" . >/dev/null
+          echo "published $PUBLIC_REGISTRY/$IMAGE:$VER ($PLATFORMS)"
+          [ "$GITHUB_REF" = refs/heads/main ] && echo "published $PUBLIC_REGISTRY/$IMAGE:latest"
+          docker logout "$REGISTRY" >/dev/null
+
+      - name: publish to ghcr.io
+        if: steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          if [ -z "$GHCR_TOKEN" ]; then
+            echo "GHCR_TOKEN is not set on this repository; skipping ghcr.io"
+            exit 0
+          fi
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null
+          tags=(-t "$GHCR_IMAGE:$VER"); [ "$GITHUB_REF" = refs/heads/main ] && tags+=(-t "$GHCR_IMAGE:latest")
+          docker buildx build --builder "$BUILDER" -q --provenance=false --platform "$PLATFORMS" --push \
+            --build-arg "BOT_BOARD_VERSION=$VER" --build-arg "BOT_BOARD_COMMIT=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" "${tags[@]}" . >/dev/null
+          echo "published $GHCR_IMAGE:$VER ($PLATFORMS)"
+          [ "$GITHUB_REF" = refs/heads/main ] && echo "published $GHCR_IMAGE:latest"
+          docker logout ghcr.io >/dev/null
+
+      - name: clean up the host daemon
+        if: always() && steps.version.outputs.version != ''
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          docker rmi -f "$REGISTRY/$IMAGE:$VER-amd64" "$REGISTRY/$IMAGE:$VER-arm64" >/dev/null 2>&1 || true
+          docker image prune -f >/dev/null 2>&1 || true
