@@ -244,7 +244,7 @@ def render_body(body: str) -> str:
 
 ADMIN_ALERT_JS = """
 (function () {
-  var showDismissed = false, tab = 'needs';   // needs: what waits on you and the alerts; mentions: the rest (#223)
+  var showDismissed = false;   // the bell holds alerts; what people ask of you is in the rail's Mentions (#445)
   function token() { try { var me = JSON.parse(localStorage.getItem('bb.me')); return me && me.token; } catch (err) { return null; } }
   async function act(method, path, body) {
     var t = token(), headers = {'Content-Type': 'application/json'};
@@ -286,35 +286,25 @@ ADMIN_ALERT_JS = """
   function render(st) {
     var items = (st && st.attention) || [], gone = (st && st.dismissed) || [];
     var waiting = (st && st.waiting) || [], mentions = (st && st.mentions) || [];
-    var n = items.length + waiting.length;    // mentions do not count on the bell
+    var n = items.length;    // asks and mentions are counted in the rail, not here
     var count = document.getElementById('bell-count');
     if (count) { count.textContent = n || ''; count.hidden = !n; }
+    // the board page's rail shows the asks and mentions from the same answer
+    if (st) window.dispatchEvent(new CustomEvent('bb:status', {detail: st}));
     var box = document.getElementById('inbox');
     if (box) {
       box.replaceChildren();
-      if (st && (st.waiting || st.mentions)) {    // a signed-in human: two tabs
-        var tabs = document.createElement('div'); tabs.className = 'inbox-tabs'; tabs.setAttribute('role', 'tablist');
-        [['needs', 'Needs you' + (n ? ' · ' + n : '')], ['mentions', 'Mentions' + (mentions.length ? ' · ' + mentions.length : '')]]
-          .forEach(function (t) {
-            var b = document.createElement('button'); b.type = 'button'; b.textContent = t[1]; b.setAttribute('role', 'tab');
-            b.setAttribute('aria-selected', tab === t[0] ? 'true' : 'false');
-            b.addEventListener('click', function (ev) { ev.stopPropagation(); tab = t[0]; render(st); });
-            tabs.appendChild(b);
-          });
-        box.appendChild(tabs);
-      }
-      if (tab === 'mentions' && st && st.mentions) {
-        if (mentions.length) box.appendChild(itemList(mentions));
-        else { var e0 = document.createElement('div'); e0.className = 'inbox-head'; e0.textContent = 'No mention waits for you.'; box.appendChild(e0); }
-        return;
-      }
       var h = document.createElement('div'); h.className = 'inbox-head';
-      h.textContent = n
-        ? n + (n === 1 ? ' thing needs a human' : ' things need a human')
-        : 'All clear. Nothing needs you.';
+      h.textContent = n ? n + (n === 1 ? ' alert: the fleet, workspaces and routines' : ' alerts: the fleet, workspaces and routines')
+                        : 'All clear. No alert.';
       box.appendChild(h);
-      if (waiting.length) box.appendChild(itemList(waiting, 'Waiting on you'));
-      if (items.length) box.appendChild(itemList(items, waiting.length ? 'Alerts' : ''));
+      if (items.length) box.appendChild(itemList(items, ''));
+      var asks = waiting.length + mentions.length;
+      if (asks) {
+        var to = document.createElement('a'); to.className = 'inbox-mentions'; to.href = '/mentions';
+        to.textContent = asks + (asks === 1 ? ' message names you' : ' messages name you') + (waiting.length ? ', ' + waiting.length + ' waiting on you' : '') + ': Mentions →';
+        box.appendChild(to);
+      }
       if (gone.length) {
         var t = document.createElement('button'); t.type = 'button'; t.className = 'inbox-toggle';
         t.textContent = (showDismissed ? 'hide ' : 'show ') + gone.length + ' dismissed';
@@ -363,6 +353,7 @@ ADMIN_ALERT_JS = """
       box.hidden = true; bell.setAttribute('aria-expanded', 'false');
     });
   }
+  window.bbStatusRefresh = refresh;
   refresh(); setInterval(refresh, 30000);
 })();
 """
@@ -388,9 +379,6 @@ background:var(--accent);color:#fff;font:600 10px/17px var(--mono);text-align:ce
 background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:10px 12px}
 .inbox .inbox-head{font:600 12px var(--mono);color:var(--ink);margin:0 0 6px}
 .inbox .inbox-sub{font:600 10px var(--mono);color:var(--dim);text-transform:uppercase;margin:8px 0 2px}
-.inbox .inbox-tabs{display:flex;gap:4px;margin:0 0 8px}
-.inbox .inbox-tabs button{background:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font:12px var(--mono);color:var(--dim);cursor:pointer}
-.inbox .inbox-tabs button[aria-selected=true]{background:var(--sel);color:var(--ink);border-color:var(--accent)}
 .inbox ul{list-style:none;margin:0;padding:0}
 .inbox li{display:flex;gap:10px;align-items:baseline;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px}
 .inbox li .where{font:600 10px var(--mono);color:var(--dim);text-transform:uppercase;flex:0 0 64px}
@@ -400,6 +388,7 @@ background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shad
 .inbox li .dismiss{flex:none;align-self:center;background:none;border:1px solid transparent;border-radius:6px;color:var(--dim);
 cursor:pointer;font:13px var(--mono);padding:1px 7px}
 .inbox li .dismiss:hover{border-color:var(--line);color:var(--ink);background:var(--sel)}
+.inbox .inbox-mentions{display:block;margin-top:10px;padding-top:8px;border-top:1px solid var(--line);font:12px var(--mono);color:var(--accent)}
 .inbox .inbox-toggle{margin-top:8px;background:none;border:0;padding:0;color:var(--dim);font:12px var(--mono);cursor:pointer;text-decoration:underline}
 .inbox ul.dismissed li{opacity:.65}
 .inbox ul.dismissed li .dismiss{font-size:11px}
@@ -644,6 +633,11 @@ color:var(--dim);font:11.5px var(--mono);padding:2px 8px;cursor:pointer}
 .ugroup h3 button:hover,.ubar button:hover{color:var(--ink);background:var(--panel)}
 .ugroup .ctx{display:block;margin:0 0 2px;font:11.5px var(--mono);color:var(--dim);cursor:pointer;background:none;border:0;padding:0}
 .ugroup .ctx:hover{color:var(--accent)}
+.mrow{position:relative}.mrow .mdone{position:absolute;top:10px;right:18px;background:none;border:1px solid var(--line);
+border-radius:6px;padding:2px 9px;font:12px var(--mono);color:var(--dim);cursor:pointer}
+.mrow .mdone:hover{color:var(--ink);background:var(--panel)}
+.ugroup .ask{font:12.5px var(--sans);margin:2px 0 4px;color:var(--ink)}
+.ugroup .ask b{color:var(--accent);font:600 10.5px var(--mono);text-transform:uppercase;margin-right:4px}
 .ugroup .more{margin:2px 22px 0 70px;font:12px var(--mono);color:var(--dim)}
 .ubar{display:flex;align-items:center;gap:10px;margin-left:auto}
 .rail .empty{padding:4px 16px;font:12px var(--mono);color:var(--dim)}
@@ -1003,6 +997,9 @@ function renderRail(){
   var total = totalUnread(), uli = $('#unreadli');
   uli.className = (S.view === 'unread' ? 'active ' : '') + (total ? 'unread' : '');
   $('.badge', uli).hidden = !total; $('.badge', uli).textContent = total > 999 ? '999+' : total;
+  var mli = $('#mentionsli'), mn = mentionCount();
+  mli.hidden = !ME; mli.className = (S.view === 'mentions' ? 'active ' : '') + (mn ? 'unread' : '');
+  $('.badge', mli).hidden = !mn; $('.badge', mli).textContent = mn;
 }
 // Channels are listed by workspace: the workspace is a heading, not a channel, and
 // its channels sit under it by name (General first). A workspace is folded unless
@@ -1040,6 +1037,7 @@ function totalUnread(){
 }
 rail.addEventListener('click', function(ev){
   if (ev.target.closest('#unreadli')) { openUnread(true); return; }
+  if (ev.target.closest('#mentionsli')) { openMentions(true); return; }
   var f = ev.target.closest('button.fold, li.ws');
   if (f) { var p = f.dataset.proj; if (S.open[p]) delete S.open[p]; else S.open[p] = 1; save('bb.open', S.open); renderRail(); return; }
   var li = ev.target.closest('li[data-slug]'); if (!li) return;
@@ -1231,6 +1229,8 @@ stream.addEventListener('click', function(ev){
   if (older) { loadOlder(); return; }
   var mr = ev.target.closest('[data-markread]');
   if (mr) { markRead(mr.dataset.markread ? [mr.dataset.markread] : null); return; }
+  var dn = ev.target.closest('[data-done]');
+  if (dn) { mentionDone(dn.dataset.done, dn); return; }
   var cb = ev.target.closest('[data-collapse]');
   if (cb) { setHidden(+cb.dataset.collapse, true); return; }
   var xb = ev.target.closest('[data-expand]');
@@ -1329,6 +1329,73 @@ function renderUnread(){
   }).join('');
   stream.scrollTop = keep;
   renderUnreadHead();
+}
+// ---------------------------------------------------------------- mentions (#445)
+// What names this human, from GET /api/status (the bell's fetch shares it with a bb:status event):
+// first what bots marked as waiting on them, with the ask, then the other @mentions. An item leaves
+// when the human answers in its thread, its asker marks it resolved, or the human says done.
+S.status = null; S.mmsgs = {};
+function mentionCount(){ return S.status ? (S.status.waiting || []).length + (S.status.mentions || []).length : 0; }
+window.addEventListener('bb:status', function(ev){
+  S.status = ev.detail; renderRail();
+  if (S.view === 'mentions') renderMentions();
+});
+function openMentions(push){
+  S.view = 'mentions'; S.cur = null; S.thread = null; app.classList.add('thread-closed');
+  showCompose();
+  if (push && !SOLO) history.pushState({}, '', '/mentions');
+  if (S.ctrl) S.ctrl.abort(); S.ctrl = null;
+  renderRail();
+  stream.innerHTML = '<div class="empty">loading…</div>';
+  if (!ME) { renderMentionsHead(); stream.innerHTML = '<div class="empty">Sign in to see what names you.</div>'; return; }
+  if (S.status) renderMentions();         // what the last status said, until the refresh answers
+  else renderMentionsHead();               // "loading…" until the first bb:status event
+  if (window.bbStatusRefresh) window.bbStatusRefresh();
+}
+function renderMentionsHead(){
+  var n = mentionCount();
+  head.innerHTML = '<h1>mentions</h1><div class="topic">' + (n ? n + ' message' + (n === 1 ? '' : 's') +
+    ' that name you and that you have not answered in their thread' : 'nothing names you that you have not answered') + '</div>';
+  head.appendChild(live);
+  document.title = (n ? '(' + n + ') ' : '') + 'mentions · ' + INIT.name;
+}
+function renderMentions(){
+  renderMentionsHead();
+  var st = S.status || {}, waiting = st.waiting || [], mentions = st.mentions || [], all = waiting.concat(mentions);
+  if (!all.length) { stream.innerHTML = '<div class="empty">Nothing waits on you. You are all caught up.</div>'; return; }
+  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !S.mmsgs[id]; });
+  if (missing.length) {
+    Promise.all(missing.map(function(id){
+      return fetch('/api/messages/' + id).then(function(r){ return r.json(); }).then(function(d){ if (d.message) S.mmsgs[id] = d.message; });
+    })).then(function(){ if (S.view === 'mentions') renderMentions(); }).catch(function(){});
+    if (!stream.querySelector('.mrow')) return;     // keep "loading…" until the messages are in
+  }
+  var keep = stream.scrollTop;
+  var group = function(title, items, needs){
+    if (!items.length) return '';
+    return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span></h3>' +
+      items.map(function(x){
+        var m = S.mmsgs[+x.key.slice(1)]; if (!m) return '';
+        var tid = m.thread_id || m.id, h = messageHtml(m, true);
+        var top = (needs ? '<div class="ask"><b>needs you</b> ' + esc(x.text) + '</div>' : '') +
+          '<button class="ctx" data-thread="' + tid + '">' + (m.reply_to ? '↳ reply in thread #' : 'open thread #') + tid + ' · #' + esc(m.channel) + '</button>';
+        return '<div class="mrow">' + h.replace('<div class="body">', top + '<div class="body">') +
+          '<button type="button" class="mdone" data-done="' + esc(x.key) + '" title="clear it without replying">done</button></div>';
+      }).join('') + '</section>';
+  };
+  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false);
+  stream.scrollTop = keep;
+}
+function mentionDone(key, b){
+  b.disabled = true;
+  fetch('/api/status/dismissed', {method: 'POST', headers: {'content-type': 'application/json', 'Authorization': 'Bearer ' + ME.token},
+    body: JSON.stringify({key: key})})
+  .then(function(r){ return r.json().then(function(d){
+    if (!r.ok) { b.disabled = false; alert(d.detail || ('refused: ' + r.status)); return; }
+    window.dispatchEvent(new CustomEvent('bb:status', {detail: d}));
+    if (window.bbStatusRefresh) window.bbStatusRefresh();
+  }); })
+  .catch(function(){ b.disabled = false; alert('could not reach the board'); });
 }
 function markRead(slugs){
   (slugs || Object.keys(S.umsgs)).forEach(function(slug){
@@ -1672,6 +1739,7 @@ function wireCompose(form, target){
         grow(ta); hidePop(); attachmentNotice();
         // The live loop renders it; nudge in case the poll is between requests.
         if (d.message && d.message.id > S.cursor) onMessage(d.message);
+        if (window.bbStatusRefresh) window.bbStatusRefresh();     // an answer takes it off Mentions
       })
       .catch(function(){ setBusy(false); err.textContent = 'could not reach the board'; });
   });
@@ -1818,6 +1886,7 @@ function route(){
   var m = location.pathname.match(/^\/c\/([^\/]+)/), t = location.pathname.match(/^\/t\/(\d+)/);
   if (m) return openChannel(decodeURIComponent(m[1]), false);
   if (location.pathname === '/unread') return openUnread(false);
+  if (location.pathname === '/mentions') return openMentions(false);
   if (t) return openThread(+t[1], false);
   var first = S.channels.filter(function(b){ return S.unread[b.slug]; })[0] || S.channels[0];
   if (first) openChannel(first.slug, false);
@@ -1906,7 +1975,9 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
 </header>
 <nav class="rail" id="rail">
   <ul class="views"><li id="unreadli" title="every message you have not read yet, across channels and conversations">
-    <span class="sigil u">●</span><span class="name">Unread</span><span class="badge" hidden></span></li></ul>
+    <span class="sigil u">●</span><span class="name">Unread</span><span class="badge" hidden></span></li>
+    <li id="mentionsli" hidden title="messages that name you or wait on you, until you answer in their thread">
+    <span class="sigil u">@</span><span class="name">Mentions</span><span class="badge" hidden></span></li></ul>
   <h2>Workspaces <span id="nch"></span></h2>
   <ul id="channels"></ul>
   <h2 id="dmh" hidden title="conversations you are in">Direct messages <span id="ndm"></span></h2>

@@ -2285,6 +2285,11 @@ def page_unread(request: Request, reader: dict | None = Depends(page_reader)) ->
     return _app_page(request, reader)
 
 
+@app.get("/mentions", response_class=HTMLResponse, include_in_schema=False)
+def page_mentions(request: Request, reader: dict | None = Depends(page_reader)) -> str:
+    return _app_page(request, reader)
+
+
 @app.get("/t/{tid}", response_class=HTMLResponse, include_in_schema=False)
 def page_thread(tid: int, request: Request, reader: dict | None = Depends(page_reader)) -> HTMLResponse:
     if not private_page(reader) and db.get_message(tid) is None:
