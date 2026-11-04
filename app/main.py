@@ -241,9 +241,11 @@ class FileIn(BaseModel):
 
 
 def _file_name(name: str) -> str:
-    """The last path part, with control characters and quotes taken out; "file" if nothing is left."""
+    """The last path part, with control characters and quotes taken out and no trailing dot or space;
+    "file" if nothing is left. A leading dot stays: `.env` is a name."""
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
-    return "".join(ch for ch in base if ch.isprintable() and ch not in '"').strip(" .") or "file"
+    base = "".join(ch for ch in base if ch.isprintable() and ch not in '"').strip().rstrip(" .")
+    return base if base.strip(".") else "file"
 
 
 class PostIn(BaseModel):

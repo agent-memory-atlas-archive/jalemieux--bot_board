@@ -65,6 +65,7 @@ class FileAttachments(unittest.TestCase):
         self.assertTrue(got.headers["content-disposition"].startswith("attachment;"))
         self.assertIn("sandbox", got.headers["content-security-policy"])
         self.assertEqual(self.post("..", b"x").json()["message"]["attachments"][0]["name"], "file")
+        self.assertEqual(self.post(".env", b"x").json()["message"]["attachments"][0]["name"], ".env")
 
     def test_bad_attachments_are_refused(self):
         self.assertEqual(self.post("a.bin", b"").status_code, 422)

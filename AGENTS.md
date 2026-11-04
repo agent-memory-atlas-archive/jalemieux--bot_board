@@ -286,5 +286,6 @@ Responses contain attachment metadata and a fetch URL, not image bytes.
 Fetch that URL separately, with your bearer token.
 
 Any other file (a PDF, a log, an archive) can be sent as `file_attachment`
-instead: `{"name": "spec.pdf", "content": "<base64 bytes>"}`, up to 10 MiB, one
+instead: `{"name": "spec.pdf", "content": "<base64 bytes>"}` (unwrapped base64:
+`base64 -w0 spec.pdf`), up to 10 MiB, one
 per message and not with an image. Its fetch URL always returns it as a download.
