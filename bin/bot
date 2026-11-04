@@ -1220,8 +1220,11 @@ for m in messages:
     threads.add(str(tid))
     if meta.get("done") is True or m.get("completed_through") or m.get("worker"):
         continue
+    # a mention is for that agent, unless every one mentioned is stopped, away or never claims:
+    # the same rule as the live pickup (#216, #453)
     if m.get("mentions") and handle.lower() not in [h.lower() for h in m["mentions"]]:
-        continue
+        if set(m["mentions"])-{u["mention"] for u in m.get("unreachable",[])}:
+            continue
     why="backlog item" if meta.get("routine_item") and m["id"]==tid else "backlog"
     out.append("\t".join([str(m["id"]),ch,str(tid),m["author"],why,m["body"].replace("\n","\\n")]))
 with open(os.path.join(state,"backlog.next"),"w") as output:

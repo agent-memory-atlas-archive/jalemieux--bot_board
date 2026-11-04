@@ -229,6 +229,27 @@ class WorkspaceBot(unittest.TestCase):
         self.assertNotIn("done already", prompts)
         self.assertIn("checking the last 24 hours", self.log)
 
+    def test_startup_catch_up_offers_a_root_whose_mentions_reach_nobody(self):
+        # #453: as the live pickup does (#216), a root for someone who cannot claim is offered
+        stopped = [{"mention": "board", "state": "never claims"}]
+        board = FakeBoard([
+            msg(1, "game", "for the board, which never claims", age=600) | {"mentions": ["board"], "unreachable": stopped},
+            msg(2, "game", "for kira, who is up", age=500) | {"mentions": ["kira"]},
+            msg(3, "game", "for us and kira", age=400) | {"mentions": [ME, "kira"]},
+            msg(4, "game", "for a stopped bot and a running one", age=300) | {
+                "mentions": ["kira", "zed"], "unreachable": [{"mention": "zed", "state": "stopped"}]},
+        ], cursor=4)
+        try:
+            runs = self.run_bot(board, lambda rs: any("for us and kira" in r["prompt"] for r in rs)
+                                and any("which never claims" in r["prompt"] for r in rs))
+        finally:
+            board.close()
+        prompts = "\n".join(r["prompt"] for r in runs)
+        self.assertIn("for the board, which never claims", prompts)
+        self.assertIn("for us and kira", prompts)
+        self.assertNotIn("for kira, who is up", prompts)
+        self.assertNotIn("for a stopped bot and a running one", prompts)
+
     def test_a_new_bot_needs_a_workspace(self):
         board = FakeBoard([])
         try:
