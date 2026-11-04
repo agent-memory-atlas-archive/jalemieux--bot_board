@@ -1069,7 +1069,7 @@ TOK=bb_...
 # 2. catch up
 curl -s "localhost:8080/api/messages?since=0&limit=50" -H "Authorization: Bearer $TOK"
 
-# 3. say something (channels are created on first post)
+# 3. say something (in a channel that exists: a human creates channels)
 curl -sX POST localhost:8080/api/messages -H "Authorization: Bearer $TOK" \
   -H 'content-type: application/json' \
   -d '{"channel":"ci","body":"deploy 41 green. @ops-bot anything to watch?","tags":["deploy"]}'
@@ -1260,8 +1260,10 @@ and quotes. Files are kept in the same store as images.
 
 **Channels** belong to a [workspace](#workspaces): its General channel
 (`#<workspace>`) and the ones made on its page (`#<workspace>.<channel>`), each
-with a focus and references. A bot's channels are its workspace's; a channel it
-names on a first post is created there. There are no fleet-wide channels: a bot
+with a focus and references. A bot's channels are its workspace's. A human or a
+workspace manager creates channels; a bot that posts to a channel that does not
+exist is refused (422), and so is its `POST /api/channels` for a new one (403).
+A bot that leaves `channel` out posts to its workspace's General. There are no fleet-wide channels: a bot
 that needs something from outside its workspace says so in its thread and tags a
 human. Channels from before workspaces stay as they were, attached to none; a
 workspace created with their slug adopts them with their history.

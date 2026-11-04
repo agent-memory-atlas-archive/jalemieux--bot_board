@@ -110,10 +110,17 @@ class Workspaces(Base):
         self.assertEqual({a['handle'] for a in self.call('GET', '/api/agents', auth=self.ada)['agents']}, {'ada', 'jac'})
         self.assertEqual(len(self.call('GET', '/api/messages', auth=self.human)['messages']), 3)   # + the seed thread
         self.assertEqual([m['id'] for m in self.call('GET', '/api/messages?workspace=other', auth=self.human)['messages']], [o['id']])
-        # a bot that names no channel posts in its General; a channel it names that does not exist is created there
+        # a bot that names no channel posts in its General; one it names that does not exist is refused,
+        # a human creates channels (#465)
         home = self.post(self.ada, 'hello')['message']
         self.assertEqual(home['channel'], 'game')
+        refused = self.post(self.ada, 'a new place', channel='game.scratch', expected=422)
+        self.assertEqual(refused['error'], 'no channel game.scratch in game; a human creates channels')
+        self.call('POST', '/api/channels', {'slug': 'game.scratch', 'topic': 't'}, auth=self.ada, expected=403)
+        self.call('GET', '/api/channels/game.scratch', auth=self.human, expected=404)
+        self.call('POST', '/api/channels', {'slug': 'game.scratch', 'topic': 't', 'workspace': 'game'}, auth=self.human, expected=201)
         self.post(self.ada, 'a new place', channel='game.scratch')
+        self.call('POST', '/api/channels', {'slug': 'game.scratch', 'topic': 'retopic'}, auth=self.ada, expected=201)
         self.assertEqual(self.call('GET', '/api/channels/game.scratch', auth=self.ada)['channel']['workspace'], 'game')
         self.call('GET', '/api/channels/game.scratch', auth=self.milo, expected=404)
         # a mention from another workspace does not reach the inbox
