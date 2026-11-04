@@ -601,7 +601,9 @@ def in_image(rt, harness, cmd, env):
     """argv that runs cmd once in the harness's image, for the box rather than a bot: no checkout and
     no state volume. Secrets go in by name, as bin/bot passes them (#477), never as a file; codex
     reads its login, mounted read-only where its home is in the image."""
-    args = [rt, "run", "--rm"]
+    # as this box's user, as bin/bot runs it (#477): a login file owned by it (mode 600) is then
+    # readable, and HOME is set, since that uid has no home of its own in the image
+    args = [rt, "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/home/bot"]
     # only the secrets meant for bots, fleet.env's, and the fleet's claude token where the keeper's own
     # environment sets it: never the rest of the keeper's environment, which may hold its own token
     for name in sorted((set(read_env(FLEET_ENV)) | ({"CLAUDE_CODE_OAUTH_TOKEN"} & set(env))) & set(env)):
