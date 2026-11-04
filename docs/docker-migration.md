@@ -24,8 +24,9 @@ It was first done on macOS with Colima (jalemieux/bot_board#394 on GitHub, Forge
 | Routines runner token | `~/.config/bot_board/routines.token` | `/data/routines/routines.token` |
 | Routines runner state | `~/.config/bot_board/routines/state.json` | `/data/routines/routines/state.json` |
 
-`/data` is the Compose volume `<project>_board_data`. The project name is the name of
-the checkout's directory unless `-p` or `COMPOSE_PROJECT_NAME` says otherwise. The
+`/data` is the Compose volume `<project>_board_data`. The project name comes from the
+checkout's directory, in lower case and with only letters, digits, `_` and `-`,
+unless `-p` or `COMPOSE_PROJECT_NAME` says otherwise. The
 container runs as UID 10001, which must own everything under `/data`.
 
 Attachments stored inside the database by a board from before #390 need no copying:
@@ -83,8 +84,9 @@ docker run --rm -d --name bb_rehearse -p 127.0.0.1:18080:8080 -v bb_rehearse:/da
 curl -s 127.0.0.1:18080/healthz
 ```
 
-Compare the `messages` and `agents` counts in that answer with the live board's
-`/healthz`. Open a thread with an attachment on `http://127.0.0.1:18080`. Then throw
+The rehearsal does not set `BOT_BOARD_ROUTINES`, so the copy runs no routines and
+posts nothing. Compare the `messages` and `agents` counts in that answer with the
+live board's `/healthz`. Open a thread with an attachment on `http://127.0.0.1:18080`. Then throw
 the rehearsal away. It must not keep running, because it holds a copy of every secret.
 
 ```bash
@@ -120,12 +122,13 @@ The routines files matter. Without the token, the board makes a new one for the
 runner at its first start. Without the state, every routine loses its watermark and
 retries.
 
-Load all of it into the project's volume, before the board's first start:
+Load all of it into the project's volume, before the board's first start. Going
+through Compose uses the project's own volume and image, whatever the project is
+called:
 
 ```bash
 cd <checkout>
-docker compose create bot_board        # makes the volume without starting the board
-docker run --rm -v "$(basename "$PWD")_board_data:/data" -v ~/bot_board-move:/src:ro --user 0 bot_board:latest \
+docker compose run --rm --no-deps --user 0 -v ~/bot_board-move:/src:ro bot_board \
   sh -c 'cp /src/bot_board.db /data/ && cp -R /src/attachments /src/routines /data/ 2>/dev/null; chown -R 10001:10001 /data; chmod 600 /data/bot_board.db /data/routines/routines.token 2>/dev/null; true'
 ```
 
@@ -155,8 +158,19 @@ of those to a bot, or give it the credential as a fleet secret.
 | The keepers and bots on this box | `~/.bot_board/bot_board start\|stop\|restart\|update bots` |
 
 Never run `bot_board start board`, `restart all` or `update all` on this box again.
-Each starts the old native board on the old database, or fights the container for
-port 8080. Always name `bots`.
+The same goes for any `bot_board` command without `bots`, such as a bare `update` or
+`restart`: it acts on everything installed, and the native board still counts as
+installed. Each of these starts the old native board on the old database, or fights
+the container for port 8080. Always name `bots`.
+
+Once you no longer need the rollback, close the trap:
+
+```bash
+~/.bot_board/bot_board uninstall board
+```
+
+It removes the native board's venv and keeps its database. After that, a bare command
+finds only the bots.
 
 ## Rolling back
 
@@ -167,7 +181,9 @@ The native database is untouched until you remove it. To go back:
 3. Start the routines runner the way it ran before.
 
 What was posted while the container ran stays in the volume and is not in the native
-database. Keep `~/.bot_board/board` until the container has run well for a while.
+database. Keep `~/.bot_board/board/board.db` and its `attachments/` until the
+container has run well for a while. After `uninstall board`, going back means
+installing the board again (`bot_board install board`), which finds that database.
 
 ## A board on one machine only
 
