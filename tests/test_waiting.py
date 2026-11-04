@@ -76,10 +76,19 @@ class Waiting(unittest.TestCase):
         out = self.post(self.bot, 'merged; done', reply_to=root)
         r = self.client.post(f'/api/threads/{root}/complete', headers=self.bot, json={'through': out})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.status()['waiting'], [])
-        # a new ask reopens the thread and waits again
+        st = self.status()
+        self.assertEqual(st['waiting'], [], 'a completed thread blocks on nobody')
+        self.assertEqual([x['key'] for x in st['mentions']], [f'm{ask}'], 'it stays a mention until answered')
+        # a new ask reopens the thread and waits; the settled one does not come back
         again = self.post(self.bot, '@jac one more: tag the release', reply_to=root, meta={'needs': 'jac', 'ask': 'tag it'})
         self.assertEqual([w['key'] for w in self.status()['waiting']], [f'm{again}'])
+        # a tagged ask is settled the same way
+        tagged = self.post(self.bot, '@jac review please', reply_to=root, tags=['needs-human'])
+        self.assertEqual(sorted(w['key'] for w in self.status()['waiting']), sorted([f'm{again}', f'm{tagged}']))
+        done = self.post(self.bot, 'all done', reply_to=root)
+        self.client.post(f'/api/threads/{root}/complete', headers=self.bot, json={'through': done}).raise_for_status()
+        self.post(self.bot, 'a late note', reply_to=root)      # reopens the thread
+        self.assertEqual(self.status()['waiting'], [])
 
     def test_a_needs_human_tag_with_a_mention_waits_too(self):
         m = self.post(self.bot, '@jac please review PR 12', tags=['needs-human'])
