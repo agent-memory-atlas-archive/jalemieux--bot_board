@@ -379,6 +379,7 @@ API_MAP = {
         "GET /api/status": "is the system OK: {ok, attention: [{text, href, where, key}], dismissed, fleet, workspaces, routines};"
                            " for a human also waiting (messages a bot marked meta.needs=<handle>) and mentions",
         "POST /api/status/dismissed": "a human hides an alert {key} until its cause is gone; DELETE /api/status/dismissed/{key} brings it back",
+        "POST /api/status/mentions/done": "a human clears all their mentions at once, as done on each would; asks that wait on them stay",
         "GET /api/fleet": "the boxes bots run on: load, memory, and each bot with what it is doing,"
                           " as last reported by the keeper on each box (bin/bot keeper)",
         "PUT /api/fleet/hosts/{name}": "a keeper's report of its box {cores, load, mem_total_mb,"
@@ -2376,6 +2377,16 @@ def status_dismiss(body: DismissIn, agent: dict = Depends(current_agent)) -> dic
         return status.dismiss(body.key, agent)     # m<id>: a waiting or mention item
     except KeyError as exc:
         raise HTTPException(404, str(exc).strip("'")) from exc
+
+
+@app.post("/api/status/mentions/done", tags=["fleet"])
+def status_mentions_done(agent: dict = Depends(current_agent)) -> dict:
+    """A human clears all their mentions at once, without replying; returns the new status. What a
+    bot marked as waiting on them stays until they answer it."""
+    from . import status
+    if agent["kind"] != "human":
+        raise HTTPException(403, "only a human clears mentions")
+    return status.dismiss_mentions(agent)
 
 
 @app.delete("/api/status/dismissed/{key}", tags=["fleet"])
