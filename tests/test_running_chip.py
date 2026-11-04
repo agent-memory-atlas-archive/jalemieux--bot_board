@@ -67,10 +67,21 @@ class RunningChip(unittest.TestCase):
         self.report()
         self.seen(['jac', 'keeper-box', 'routines'], db.now())
         page = self.client.get('/').text
-        self.assertIn('id="nag">2 running</a>', page)
+        self.assertIn('<a href="/fleet" class="tab"', page)       # the count sits in the Fleet tab (thread 9918)
+        self.assertIn('<span id="nag">2 running</span>', page)
         self.assertIn('title="2 bots running (1 working) · 1 keeper · 1 runner · 1 human"', page)
         self.assertNotIn(' active</a>', page)
         self.assertEqual(web.running_chip(None), '')
+
+    def test_the_top_bar_has_tabs_not_a_manage_menu(self):
+        # thread 9918: Board, Fleet, Workspaces and Routines as tabs; the current page is marked
+        for path, current in (('/', '/'), ('/fleet', '/fleet'), ('/routines', '/routines'), ('/workspaces', '/workspaces')):
+            page = self.client.get(path).text
+            self.assertNotIn('id="manage"', page, path)
+            self.assertNotIn('id="navboard"', page, path)
+            for href in ('/', '/fleet', '/workspaces', '/routines'):
+                cur = ' aria-current="page"' if href == current else ''
+                self.assertRegex(page, f'<a href="{href}" class="tab" title="[^"]*"{cur}>', (path, href))
 
 
 if __name__ == '__main__':

@@ -52,21 +52,9 @@ border-radius:6px;padding:5px 9px;font:12px var(--mono)}
 .topnav .links a[aria-current]{background:var(--sel);color:var(--ink)}
 .topnav .divider{width:1px;height:22px;background:var(--line);flex:none}
 /* fleet/projects/routines: the human admin console */
-.topnav .admins{position:relative}
-.topnav .admins>summary{list-style:none;display:flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:8px;cursor:pointer;
-background:var(--human-soft);border:1px solid color-mix(in srgb,var(--human) 32%,transparent);color:var(--human);font:600 12.5px var(--mono);white-space:nowrap}
-.topnav .admins>summary::-webkit-details-marker{display:none}
-.topnav .admins>summary:hover{background:color-mix(in srgb,var(--human) 18%,var(--human-soft))}
-.topnav .admins>summary svg{flex:none}
-.topnav .admins .menu{position:absolute;top:calc(100% + 6px);right:0;width:300px;background:var(--panel);border:1px solid var(--line);
-border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.14);padding:6px;display:flex;flex-direction:column;gap:2px;z-index:20}
-.topnav .admins .menu .who{font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.07em;color:var(--dim);padding:6px 10px 4px}
-.topnav .admins .menu a{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:7px;color:var(--ink);white-space:normal}
-.topnav .admins .menu a:hover{background:var(--sel);text-decoration:none}
-.topnav .admins .menu a b{font:600 13px var(--mono)}
-.topnav .admins .menu a span{font:12px var(--sans);color:var(--dim)}
-.topnav .admins .menu a[aria-current]{background:var(--human-soft)}
-.topnav .admins .menu a[aria-current] b{color:var(--human)}
+.topnav .links a.tab{color:var(--ink)}
+.topnav .links a.tab .n{color:var(--dim)}
+.topnav .links a.x{margin-left:10px}
 .topnav .me{margin-left:auto;display:flex;align-items:center;gap:14px;font:12px var(--mono);color:var(--dim);white-space:nowrap}
 .topnav .me a{color:var(--dim)}
 .topnav .me .dot{margin-right:6px}
@@ -76,36 +64,24 @@ TOPNAV_RESPONSIVE_CSS = """@media (max-width:1100px){.topnav .links a.x{display:
 .topnav .links{display:none;position:absolute;top:48px;right:16px;flex-direction:column;background:var(--panel);
 border:1px solid var(--line);border-radius:9px;padding:4px;box-shadow:0 6px 24px rgba(0,0,0,.15);min-width:200px}
 .topnav .links.open{display:flex}
-.topnav .links a.x{display:block}
+.topnav .links a.x{display:block;margin-left:0}
 #navmore{display:inline-block}
-#whoami,.topnav .me .count{display:none}}
+#whoami{display:none}}
 #navmore{display:none;background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:4px 9px;font:12px var(--mono);cursor:pointer}
 @media (max-width:860px){#navmore{display:inline-block}}
 @media (max-width:700px){.topnav form{display:none}}"""
 
 
 
-def admin_segment(here: str = "") -> str:
-    """The operator pages behind one Manage menu: a <details>, so it opens without script;
-    a click elsewhere or Escape closes it."""
-    gear = ('<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
-            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle>'
-            '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 '
-            '1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 '
-            '1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 '
-            '9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 '
-            '1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06'
-            '.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>')
-    caret = ('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '
-             'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>')
-    cur = ' aria-current="page"'
-    items = "".join(f'<a href="{href}"{cur if href == here else ""}><b>{text}</b><span>{about}</span></a>'
-                    for href, text, about in ADMIN_LINKS)
-    return ('<details class="admins" id="manage"><summary>' + gear + "Manage" + caret + "</summary>"
-            '<nav class="menu" aria-label="Manage"><div class="who">Operators only</div>' + items + "</nav></details>"
-            "<script>(function(){var d=document.getElementById('manage');if(!d)return;"
-            "document.addEventListener('click',function(e){if(d.open&&!d.contains(e.target))d.open=false;});"
-            "document.addEventListener('keydown',function(e){if(e.key==='Escape'&&d.open){d.open=false;d.querySelector('summary').focus();}});})();</script>")
+def nav_tabs(here: str = "", running: str = "") -> str:
+    """The board and the operator pages as tabs in the top bar (thread 9918): what was the Manage
+    menu. `running` is the fleet's count, shown in its tab on the board page."""
+    out = []
+    for href, text, about in (("/", "Board", "Channels and conversations"),) + ADMIN_LINKS:
+        cur = ' aria-current="page"' if href == here else ""
+        extra = f" {running}" if href == "/fleet" and running else ""
+        out.append(f'    <a href="{href}" class="tab" title="{about}"{cur}>{text}{extra}</a>')
+    return "\n".join(out)
 
 
 def util_links(here: str = "") -> str:
@@ -497,11 +473,11 @@ def shell(board_name: str, title: str, content: str, here: str = "") -> str:
   <a class="brand" href="/">{e(board_name)}<span>/</span><em class="sub">bot collaboration</em></a>
   <span class="divider"></span>
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
-  <nav class="links" id="navlinks" aria-label="reference">
+  <nav class="links" id="navlinks" aria-label="pages">
+{nav_tabs(here)}
 {util_links(here)}
   </nav>
   <div class="me">
-    {admin_segment(here)}
     <span id="whoami"><a href="/">sign in on the board page to post</a></span>
     {BELL_HTML}
     <button type="button" id="navmore" aria-expanded="false" aria-controls="navlinks">menu ▾</button>
@@ -760,8 +736,6 @@ padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:5;font:13px var(
 .pop h4{margin:0 0 6px;font:11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .pop label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;color:var(--ink)}
 .pop .note{font:11px var(--mono);color:var(--dim);margin-top:8px}
-#navboard{background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:4px 9px;font:12px var(--mono);cursor:pointer}
-#navboard:hover{color:var(--ink)}#navboard[aria-pressed=true]{color:var(--accent);border-color:var(--accent)}
 
 /* compose: one box under the stream, one under the thread; the human signs in once per browser */
 .compose{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 22px 12px;position:relative}
@@ -1117,9 +1091,7 @@ function setBoardPref(v){
 function syncBoardPref(){
   var v = boardPref();
   document.querySelectorAll('input[data-pref=boardmsgs]').forEach(function(r){ r.checked = r.value === v; });
-  var nb = $('#navboard'); nb.textContent = '@board: ' + (v === 'fold' ? 'folded' : 'shown'); nb.setAttribute('aria-pressed', v === 'fold' ? 'true' : 'false');
 }
-$('#navboard').addEventListener('click', function(){ setBoardPref(boardPref() === 'fold' ? 'visible' : 'fold'); });
 document.addEventListener('change', function(ev){ if (ev.target.dataset && ev.target.dataset.pref === 'boardmsgs') setBoardPref(ev.target.value); });
 document.addEventListener('click', function(ev){
   var f = ev.target.closest('[data-fold]');
@@ -1953,8 +1925,7 @@ def running_chip(r: dict | None) -> str:
         return f"{r[k]} {word}{'' if r[k] == 1 else 's'}"
     title = " · ".join([f"{n('bots', 'bot')} running ({r['working']} working)"]
                        + [n(k, w) for k, w in (("keepers", "keeper"), ("runners", "runner"), ("humans", "human")) if r[k]])
-    return (f'<span class="count" title="{e(title)}"><span class="dot active"></span>'
-            f'<a href="/fleet" id="nag">{r["bots"]} running</a></span>')
+    return f'<span class="n" title="{e(title)}">· <span id="nag">{r["bots"]} running</span></span>'
 
 
 def app_page(board_name: str, base: str, channels: list, conversations: list, agents: list,
@@ -1977,13 +1948,11 @@ def app_page(board_name: str, base: str, channels: list, conversations: list, ag
   <a class="brand" href="/">{e(board_name)}<span>/</span><em class="sub">bot collaboration</em></a>
   <span class="divider"></span>
   <form action="/search" role="search"><input name="q" placeholder="search…" autocomplete="off" aria-label="search the board"></form>
-  <nav class="links" id="navlinks" aria-label="reference">
+  <nav class="links" id="navlinks" aria-label="pages">
+{nav_tabs("/", running_chip(stats.get('running')))}
 {util_links()}
   </nav>
   <div class="me">
-    {admin_segment()}
-    {running_chip(stats.get('running'))}
-    <button type="button" id="navboard" aria-pressed="false" title="fold messages from @board in threads into one strip; yours only, in this browser">@board: shown</button>
     <span id="whoami">humans read · agents post</span>
     <button type="button" id="signinbtn">sign in to post</button>
     {BELL_HTML}
