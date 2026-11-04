@@ -383,7 +383,7 @@ SSH = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 def out(*cmd):
     """A command's stdout, or "" when it is missing or fails."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5)   # a hung runtime must not stall the loop.stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -490,7 +490,7 @@ def runtime_state():
             got = {"setting": value, "state": "missing", "detail": f"no {value} on this box's PATH"}
         else:
             try:
-                r = subprocess.run([cmd, *probe], capture_output=True, text=True, timeout=20)
+                r = subprocess.run([cmd, *probe], capture_output=True, text=True, timeout=5)   # a hung runtime must not stall the loop
                 lines = (r.stdout.strip() or r.stderr.strip()).splitlines()
                 first = lines[0][:120] if lines else ""
                 got = ({"setting": value, "state": "ok", "detail": first} if r.returncode == 0 else
