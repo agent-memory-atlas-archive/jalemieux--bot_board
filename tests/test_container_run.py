@@ -33,7 +33,7 @@ if log:
     with open(log, "a") as fh:
         fh.write(json.dumps(argv) + "\n")
 if not argv or argv[0] != "run":
-    sys.stderr.write("fake runtime: expected 'run', got %r\n" % (argv,)); sys.exit(2)
+    sys.exit(0)   # e.g. `rm -f <name>` from bot kill: recorded above, nothing to simulate
 takes_value = {"-e", "--user", "-w", "-v", "--env-file", "--name"}
 i, mounts, workdir, image, cmd = 1, [], None, None, None
 while i < len(argv):
@@ -81,8 +81,11 @@ class ContainerRun(unittest.TestCase):
         for harness in ("claude", "codex", "opencode", "copilot"):
             with self.subTest(harness=harness), FakeBoard() as board:
                 self.log.write_text("")
+                # the fake board is loopback; the fake runtime shares the host network, so tell
+                # the guard loopback is reachable here (BOT_CONTAINER_HOST_NETWORK)
                 L = Launcher(board, harness, env={"BOT_RUNTIME": str(self.runtime),
-                                                  "FAKE_RUNTIME_LOG": str(self.log)})
+                                                  "FAKE_RUNTIME_LOG": str(self.log),
+                                                  "BOT_CONTAINER_HOST_NETWORK": "1"})
                 self.addCleanup(L.close)
                 # a real checkout has files; seed one so the empty-/work guard passes
                 checkout = Path(L.tmp.name) / "work" / L.name
@@ -121,7 +124,8 @@ class ContainerRun(unittest.TestCase):
         with FakeBoard() as board:
             self.log.write_text("")
             L = Launcher(board, "opencode", env={"BOT_RUNTIME": str(self.runtime),
-                                                 "FAKE_RUNTIME_LOG": str(self.log)})
+                                                 "FAKE_RUNTIME_LOG": str(self.log),
+                                                 "BOT_CONTAINER_HOST_NETWORK": "1"})
             self.addCleanup(L.close)
             checkout = Path(L.tmp.name) / "work" / L.name
             checkout.mkdir(parents=True, exist_ok=True)
@@ -173,8 +177,9 @@ class ContainerRun(unittest.TestCase):
         self.log.write_text("")
         empty = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        # opt out of the loopback-board guard so it cannot preempt the /work guard under test
         r = self.run_sub(["claude", "--handle", "tbot", "--dir", empty, "--", "--version"],
-                         self.sub_env())
+                         self.sub_env({"BOT_CONTAINER_HOST_NETWORK": "1"}))
         self.assertEqual(r.returncode, 97, r.stdout + r.stderr)
         self.assertIn("did not bind-mount", r.stderr)
 
@@ -182,6 +187,44 @@ class ContainerRun(unittest.TestCase):
         r = self.run_sub(["claude", "--handle", "tbot", "--", "--version"], self.sub_env())
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("needs --dir", r.stderr)
+
+    def test_loopback_board_is_refused_in_a_bot_container(self):
+        checkout = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, checkout, ignore_errors=True)
+        (Path(checkout) / ".keep").write_text("a non-empty checkout")
+        # a loopback board the container cannot reach is refused, naming the setting
+        r = self.run_sub(["claude", "--handle", "tbot", "--dir", checkout, "--", "--version"],
+                         self.sub_env({"BOARD": "http://127.0.0.1:8080"}))
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("could not reach the board", r.stderr)
+        # the host-network opt-out allows it, and the run carries the kill name --name ...-run
+        self.log.write_text("")
+        r2 = self.run_sub(["claude", "--handle", "tbot", "--dir", checkout, "--", "--version"],
+                          self.sub_env({"BOARD": "http://127.0.0.1:8080", "BOT_CONTAINER_HOST_NETWORK": "1"}))
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertTrue(any("bot_board-tbot-run" in c for call in self.calls() for c in call),
+                        "bot mode names the container for kill: %s" % self.calls())
+
+    def test_kill_removes_the_named_container(self):
+        with FakeBoard() as board:
+            self.log.write_text("")
+            L = Launcher(board, "claude", env={"BOT_RUNTIME": str(self.runtime),
+                                               "FAKE_RUNTIME_LOG": str(self.log),
+                                               "BOT_CONTAINER_HOST_NETWORK": "1"})
+            self.addCleanup(L.close)
+            checkout = Path(L.tmp.name) / "work" / L.name
+            checkout.mkdir(parents=True, exist_ok=True)
+            (checkout / ".keep").write_text("a non-empty checkout")
+            L.plan(fh.step("claude", "ok", "rules read"))
+            L.start()
+            L.wait_for(lambda: len(L.prompts()) >= 1, "the first turn")
+            r = subprocess.run([BOT, "kill", L.name], env=L.env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            name = "bot_board-%s-run" % L.name
+            self.assertTrue(any(c[:2] == ["rm", "-f"] and name in c for c in self.calls()),
+                            "bot kill removed the named container: %s" % self.calls())
+            self.assertTrue(any(call and call[0] == "run" and name in call for call in self.calls()),
+                            "the turn ran in the named container: %s" % self.calls())
 
 
 if __name__ == "__main__":
