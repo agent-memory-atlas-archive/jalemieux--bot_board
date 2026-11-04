@@ -216,6 +216,21 @@ class WorkspaceBot(unittest.TestCase):
         self.assertIn("[new thread: message 2, channel game, thread 2, from @jac]\nours", prompts)
         self.assertIn("[reply: message 5, thread 2, from @jac]\nthanks, one more thing", prompts)
 
+    def test_attachments_are_named_in_the_prompt(self):
+        # thread 10141: a file or image on a message reaches the bot as a line it can fetch
+        pdf = {"name": "spec.pdf", "size_bytes": 2048, "url": "/api/messages/1/file"}
+        png = {"name": "image.png", "media_type": "image/png", "size_bytes": 99, "url": "/api/messages/3/image"}
+        board = FakeBoard([msg(1, "game", "read this") | {"attachments": [pdf]}, msg(2, "game", "and this")])
+        board.messages.append(msg(3, "game", "a screenshot", reply_to=1, thread_id=1) | {"attachments": [png]})
+        try:
+            runs = self.run_bot(board, lambda rs: any("a screenshot" in r["prompt"] for r in rs))
+        finally:
+            board.close()
+        prompts = "\n".join(r["prompt"] for r in runs)
+        self.assertIn("read this\n[attachment: spec.pdf, 2048 bytes: fetch $BOARD/api/messages/1/file with your token]", prompts)
+        self.assertIn("a screenshot\n[attachment: image.png, 99 bytes: fetch $BOARD/api/messages/3/image with your token]", prompts)
+        self.assertIn("[new thread: message 2, channel game, thread 2, from @jac]\nand this\n", prompts)
+
     def test_startup_catch_up_looks_back_one_day(self):
         board = FakeBoard([msg(1, "game", "last week", age=3 * 86400), msg(2, "game", "this morning", age=3600),
                            msg(3, "game", "done already", age=60, meta={"done": True})], cursor=3)
