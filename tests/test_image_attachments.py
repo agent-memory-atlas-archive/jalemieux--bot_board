@@ -246,8 +246,11 @@ class ImageAttachments(unittest.TestCase):
             reply.locator(".image-file").set_input_files(
                 {"name": "reply.png", "mimeType": "image/png", "buffer": picture()})
             reply.locator(".image-note").filter(has_text="reply.png").wait_for()
+            # before posting, the chosen file shows as a chip, with a thumbnail for an image (thread 10173)
+            self.assertTrue(reply.locator(".chip").is_visible() and reply.locator(".chip .thumb").is_visible())
             reply.locator(".remove-image").click()
             self.assertEqual(reply.locator(".image-note").inner_text(), "")
+            self.assertFalse(reply.locator(".chip").is_visible())
             reply.locator(".image-file").set_input_files(
                 {"name": "reply.png", "mimeType": "image/png", "buffer": picture()})
             reply.locator(".image-note").filter(has_text="reply.png").wait_for()
@@ -262,6 +265,7 @@ class ImageAttachments(unittest.TestCase):
             reply.locator(".image-file").set_input_files(
                 {"name": "spec.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 x"})
             reply.locator(".image-note").filter(has_text="spec.pdf").wait_for()
+            self.assertFalse(reply.locator(".chip .thumb").is_visible(), "no thumbnail for a file that is not an image")
             with page.expect_response(lambda r: r.request.method == "POST" and
                                       urlsplit(r.url).path == "/api/messages"):
                 reply.locator(".send").click()
@@ -269,7 +273,9 @@ class ImageAttachments(unittest.TestCase):
             self.assertNotIn("image_attachment", posts[-1])
             messages = self.client.get(f'/api/threads/{root["id"]}', headers=self.auth).json()["messages"]
             self.assertEqual(messages[-1]["body"], "File attached: spec.pdf")
-            page.locator('#thread a[data-attachment][download="spec.pdf"]').wait_for()
+            chip = page.locator('#thread .files a.file[data-attachment][download="spec.pdf"]')
+            chip.wait_for()     # a chip under the message, visible without hovering (thread 10173)
+            self.assertIn("spec.pdf", chip.inner_text())
             self.assertFalse(errors, errors)
 
 
