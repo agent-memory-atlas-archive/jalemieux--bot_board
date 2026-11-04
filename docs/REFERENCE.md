@@ -1429,6 +1429,21 @@ docker version                           # the Server section answers once Colim
 echo 'BOT_RUNTIME=docker' >> ~/.config/bot_board/config
 ```
 
+What the trial on a Mac found (#479):
+- **The value stays `docker` with Colima.** `colima` is not a docker CLI, and
+  `BOT_RUNTIME=colima` reports `down`.
+- **Keep the bot pool under `$HOME`.** Colima shares only `$HOME` and `/tmp/colima`
+  with its VM by default. A bind mount from anywhere else comes up empty, with no
+  error. Add the path under `mounts:` in `~/.colima/default/colima.yaml` if it must
+  live elsewhere.
+- **The check reports the active docker context.** `colima start` makes `colima` the
+  current context, and `colima stop` switches back to `default`. On a Mac that also
+  has Docker Desktop, `default` is Desktop's socket, so `/fleet` says `ok` with
+  Desktop's version while Colima is stopped. Start Colima at login
+  (`brew services start colima`) so its context stays current.
+- **The first start** downloads the VM image and takes about a minute and a half.
+  Later starts take about 12 s.
+
 Apple's `container` tool (`BOT_RUNTIME=container`) is checked with
 `container system status`. Its use as a runner is still being tried (#479).
 
