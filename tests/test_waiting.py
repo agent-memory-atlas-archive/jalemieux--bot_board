@@ -150,5 +150,87 @@ class Waiting(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_a_mention_that_cannot_be_read_is_fetched_once(self):
+        # #445 review: a message refused or deleted after the status was computed is not fetched again and again
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Install Playwright and Chromium for board page checks")
+        gone = self.post(self.bot, '@jac this one is refused')
+        self.post(self.bot, '@jac this one reads fine')
+        token = self.jac['Authorization'].split()[1]
+        asked = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                errors = []
+                page.on('pageerror', lambda err: errors.append(str(err)))
+                def serve(route):
+                    path = route.request.url.replace('http://board.test', '')
+                    if 'wait=' in path:
+                        return route.abort()
+                    if path == f'/api/messages/{gone}':
+                        asked.append(path)
+                        return route.fulfill(status=404, body='{"error": "no such message"}', content_type='application/json')
+                    r = self.client.request(route.request.method, path, content=route.request.post_data,
+                                            headers=route.request.headers)
+                    route.fulfill(status=r.status_code, body=r.content, content_type=r.headers.get('content-type', 'text/plain'))
+                page.route('**/*', serve)
+                page.add_init_script("localStorage.setItem('bb.me', JSON.stringify({handle:'jac', token:'%s'}))" % token)
+                page.goto('http://board.test/mentions')
+                page.wait_for_selector('#stream .mrow')
+                page.wait_for_timeout(800)
+                self.assertEqual(len(asked), 1, 'fetched once, not in a loop')
+                self.assertIn('this one reads fine', page.inner_text('#stream'))
+                self.assertNotIn('refused', page.inner_text('#stream'))
+                # the counts match what the view shows
+                page.wait_for_function("document.querySelector('#mentionsli .badge').textContent === '1'")
+                self.assertIn('1 message that name', page.inner_text('#head'))
+                self.assertEqual(errors, [])
+            finally:
+                browser.close()
+
+    def test_a_failed_request_is_tried_again_at_the_next_status(self):
+        # #445 review: offline or a 502 is not final, a missing message is; and it is not retried in a loop
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Install Playwright and Chromium for board page checks")
+        flaky = self.post(self.bot, '@jac this one comes back')
+        token = self.jac['Authorization'].split()[1]
+        asked = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                errors = []
+                page.on('pageerror', lambda err: errors.append(str(err)))
+                def serve(route):
+                    path = route.request.url.replace('http://board.test', '')
+                    if 'wait=' in path:
+                        return route.abort()
+                    if path == f'/api/messages/{flaky}':
+                        asked.append(path)
+                        if len(asked) == 1:
+                            return route.abort()        # the first try fails on the network
+                    r = self.client.request(route.request.method, path, content=route.request.post_data,
+                                            headers=route.request.headers)
+                    route.fulfill(status=r.status_code, body=r.content, content_type=r.headers.get('content-type', 'text/plain'))
+                page.route('**/*', serve)
+                page.add_init_script("localStorage.setItem('bb.me', JSON.stringify({handle:'jac', token:'%s'}))" % token)
+                page.goto('http://board.test/mentions')
+                page.wait_for_timeout(1000)
+                settled = len(asked)
+                page.wait_for_timeout(1000)
+                self.assertEqual(len(asked), settled, 'no retry loop: a failed request waits for the next status')
+                page.evaluate('window.bbStatusRefresh()')
+                page.wait_for_selector('#stream .mrow')
+                self.assertIn('this one comes back', page.inner_text('#stream'))
+                self.assertGreaterEqual(len(asked), 2, 'the failed request was tried again')
+                self.assertEqual(errors, [])
+            finally:
+                browser.close()
+
 if __name__ == '__main__':
     unittest.main()

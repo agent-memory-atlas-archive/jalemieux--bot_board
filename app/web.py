@@ -1334,9 +1334,13 @@ function renderUnread(){
 // What names this human, from GET /api/status (the bell's fetch shares it with a bb:status event):
 // first what bots marked as waiting on them, with the ask, then the other @mentions. An item leaves
 // when the human answers in its thread, its asker marks it resolved, or the human says done.
-S.status = null; S.mmsgs = {};
-function mentionCount(){ return S.status ? (S.status.waiting || []).length + (S.status.mentions || []).length : 0; }
+S.status = null; S.mmsgs = {}; S.mretry = {};
+function mentionCount(){     // what the view can show: an item whose message cannot be read is left out
+  if (!S.status) return 0;
+  return (S.status.waiting || []).concat(S.status.mentions || []).filter(function(x){ return S.mmsgs[+x.key.slice(1)] !== false; }).length;
+}
 window.addEventListener('bb:status', function(ev){
+  Object.keys(S.mretry).forEach(function(id){ delete S.mmsgs[id]; }); S.mretry = {};
   S.status = ev.detail; renderRail();
   if (S.view === 'mentions') renderMentions();
 });
@@ -1363,15 +1367,20 @@ function renderMentions(){
   renderMentionsHead();
   var st = S.status || {}, waiting = st.waiting || [], mentions = st.mentions || [], all = waiting.concat(mentions);
   if (!all.length) { stream.innerHTML = '<div class="empty">Nothing waits on you. You are all caught up.</div>'; return; }
-  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !S.mmsgs[id]; });
+  // each message is fetched once: null while it is on its way, false if it cannot be read (deleted since, or refused)
+  var missing = all.map(function(x){ return +x.key.slice(1); }).filter(function(id){ return !(id in S.mmsgs); });
   if (missing.length) {
     Promise.all(missing.map(function(id){
-      return fetch('/api/messages/' + id).then(function(r){ return r.json(); }).then(function(d){ if (d.message) S.mmsgs[id] = d.message; });
-    })).then(function(){ if (S.view === 'mentions') renderMentions(); }).catch(function(){});
+      S.mmsgs[id] = null;
+      return fetch('/api/messages/' + id).then(function(r){ return r.json(); })
+        // no message in the answer is final; a failed request (offline, a 502 page) waits for the next status to try again
+        .then(function(d){ S.mmsgs[id] = d.message || false; }, function(){ S.mretry[id] = 1; });
+    })).then(function(){ renderRail(); if (S.view === 'mentions') renderMentions(); });
     if (!stream.querySelector('.mrow')) return;     // keep "loading…" until the messages are in
   }
   var keep = stream.scrollTop;
   var group = function(title, items, needs){
+    items = items.filter(function(x){ return S.mmsgs[+x.key.slice(1)]; });
     if (!items.length) return '';
     return '<section class="ugroup"><h3><span>' + title + '</span><span class="n">' + items.length + '</span></h3>' +
       items.map(function(x){
@@ -1383,7 +1392,8 @@ function renderMentions(){
           '<button type="button" class="mdone" data-done="' + esc(x.key) + '" title="clear it without replying">done</button></div>';
       }).join('') + '</section>';
   };
-  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false);
+  stream.innerHTML = group('Waiting on you', waiting, true) + group('Mentions', mentions, false) ||
+    '<div class="empty">Nothing waits on you. You are all caught up.</div>';
   stream.scrollTop = keep;
 }
 function mentionDone(key, b){
