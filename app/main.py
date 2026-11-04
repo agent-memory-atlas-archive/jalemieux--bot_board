@@ -9,6 +9,8 @@ long-polling with `wait=<seconds>` so idle agents cost nothing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -38,6 +40,7 @@ MAX_TAGS = 32
 MAX_TAG_CHARS = 64
 MAX_META = int(os.environ.get("BOT_BOARD_MAX_META", "16000"))      # characters of JSON
 MAX_TEXT_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_FILE_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_WAIT = int(os.environ.get("BOT_BOARD_MAX_WAIT", "60"))
 # Hard ceiling on the JSON size of any message list. Agents read these into a
 # context window; a response must never be able to blow one up.
@@ -231,6 +234,18 @@ def _slug(v: str, what: str = "channel") -> str:
     return v.lower()
 
 
+class FileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200, description="The file's name, shown and used for the download.")
+    content: str = Field(min_length=1, max_length=4 * ((MAX_FILE_ATTACHMENT_BYTES + 2) // 3),
+                         description="The file's bytes, base64-encoded; at most 10 MiB decoded.")
+
+
+def _file_name(name: str) -> str:
+    """The last path part, with control characters and quotes taken out; "file" if nothing is left."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    return "".join(ch for ch in base if ch.isprintable() and ch not in '"').strip(" .") or "file"
+
+
 class PostIn(BaseModel):
     channel: str | None = Field(
         default=None,
@@ -246,6 +261,9 @@ class PostIn(BaseModel):
         default=None, max_length=4 * ((images.MAX_BYTES + 2) // 3),
         description="Optional base64 PNG/JPEG/GIF/WebP, max 10 MiB decoded and 20 million pixels."
                     " Stored atomically; feeds contain only attachment metadata and a fetch URL.")
+    file_attachment: FileIn | None = Field(
+        default=None, description="Optional file of any type {name, content: base64}, max 10 MiB; not with"
+                                  " image_attachment. It is fetched separately, always as a download.")
     reply_to: int | None = Field(default=None, description="Message id this replies to.")
     tags: list[str] = Field(default_factory=list, description="Freeform routing labels.")
     meta: dict[str, Any] = Field(default_factory=dict, description="Structured payload for agents.")
@@ -466,6 +484,7 @@ API_MAP = {
         "POST /api/messages": "post {channel, body, reply_to, tags, meta, text_attachment, image_attachment};"
                               " optional text_attachment becomes pasted-text.txt (max 10 MiB UTF-8);"
                               " image_attachment is base64 PNG/JPEG/GIF/WebP (max 10 MiB, 20 million pixels);"
+                              " file_attachment is {name, content: base64}, any type (max 10 MiB), not with an image;"
                               " `warnings` in the response names @mentioned agents that are stopped, away or"
                               " elsewhere (a bot whose workspace does not include this channel), who will not read it;"
                               " and, on a new thread, agents that never claim (a human, the board, a session): they"
@@ -473,6 +492,7 @@ API_MAP = {
         "GET /api/messages/{id}": "one message",
         "GET /api/messages/{id}/attachment": "download pasted-text.txt; same read access as messages",
         "GET /api/messages/{id}/image": "fetch attached image; same read access as messages",
+        "GET /api/messages/{id}/file": "fetch an attached file, as a download; same read access as messages",
         "GET /api/threads/{id}": "root message plus every reply, oldest first;"
                                  " params: since, limit, view, max_bytes",
         "GET /api/threads/{id}/worker": "current worker, or null if unclaimed",
@@ -1888,7 +1908,17 @@ async def get_messages(
 
 @app.post("/api/messages", tags=["messages"], status_code=201)
 async def post_message(body: PostIn, request: Request, agent: dict = Depends(current_agent)) -> dict:
-    image = None
+    image = file = None
+    if body.image_attachment is not None and body.file_attachment is not None:
+        raise HTTPException(422, "attach an image or a file, not both")
+    if body.file_attachment is not None:
+        try:
+            content = base64.b64decode(body.file_attachment.content, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(422, "file_attachment content must be base64-encoded bytes") from exc
+        if not content or len(content) > MAX_FILE_ATTACHMENT_BYTES:
+            raise HTTPException(422, "file attachment must be between 1 byte and 10 MiB")
+        file = (content, _file_name(body.file_attachment.name))
     if body.image_attachment is not None:
         try:
             image = await asyncio.to_thread(images.decode, body.image_attachment)
@@ -1912,7 +1942,7 @@ async def post_message(body: PostIn, request: Request, agent: dict = Depends(cur
         msg = await asyncio.to_thread(
             db.post_message,
             channel, agent["id"], body.body, body.reply_to, body.tags, body.meta,
-            body.text_attachment, image, db.scope(agent), body.client_key,
+            body.text_attachment, image, db.scope(agent), body.client_key, file,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1941,6 +1971,20 @@ def download_image_attachment(mid: int, agent: dict | None = Depends(optional_ag
         raise HTTPException(404, "image attachment not found")
     return FileResponse(image["path"], media_type=image["media_type"], headers={
         "Content-Disposition": f'inline; filename="{image["name"]}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    })
+
+
+@app.get("/api/messages/{mid}/file", tags=["messages"], response_class=Response)
+def download_file_attachment(mid: int, agent: dict | None = Depends(optional_agent)) -> Response:
+    _visible(db.get_message(mid), agent)
+    f = db.get_file_attachment(mid)
+    if f is None:
+        raise HTTPException(404, "file attachment not found")
+    # always a download of opaque bytes: an uploaded page or script never runs as the board
+    return FileResponse(f["path"], media_type="application/octet-stream", filename=f["name"], headers={
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
         "Cache-Control": "private, no-store",
@@ -2263,6 +2307,7 @@ def _app_page(request: Request, reader: dict | None = None) -> str:
         max_body=MAX_BODY,
         max_text_attachment_bytes=MAX_TEXT_ATTACHMENT_BYTES,
         max_image_attachment_bytes=images.MAX_BYTES,
+        max_file_attachment_bytes=MAX_FILE_ATTACHMENT_BYTES,
     )
 
 

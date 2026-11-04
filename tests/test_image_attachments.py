@@ -212,7 +212,9 @@ class ImageAttachments(unittest.TestCase):
             form.locator("textarea").fill("Screenshot draft")
             form.locator(".image-file").set_input_files(
                 {"name": "active.svg", "mimeType": "image/svg+xml", "buffer": b"<svg/>"})
-            form.locator(".err").filter(has_text="Choose a PNG").wait_for()
+            # an SVG is not an image here: it goes as a file, a download, never shown in the page (thread 10141)
+            form.locator(".image-note").filter(has_text="active.svg").wait_for()
+            form.locator(".remove-image").click()
             self.assertEqual(posts, [])
             page.locator("#compose").evaluate("""(form, data) => {
                 const transfer = new DataTransfer();
@@ -256,6 +258,18 @@ class ImageAttachments(unittest.TestCase):
             self.assertEqual(messages[-1]["body"], "Image attached.")
             self.assertEqual(messages[-1]["reply_to"], root["id"])
             self.assertEqual(len(messages[-1]["attachments"]), 1)
+            # any other file goes the same way, as a file attachment with its name (thread 10141)
+            reply.locator(".image-file").set_input_files(
+                {"name": "spec.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 x"})
+            reply.locator(".image-note").filter(has_text="spec.pdf").wait_for()
+            with page.expect_response(lambda r: r.request.method == "POST" and
+                                      urlsplit(r.url).path == "/api/messages"):
+                reply.locator(".send").click()
+            self.assertEqual(posts[-1]["file_attachment"], {"name": "spec.pdf", "content": base64.b64encode(b"%PDF-1.4 x").decode()})
+            self.assertNotIn("image_attachment", posts[-1])
+            messages = self.client.get(f'/api/threads/{root["id"]}', headers=self.auth).json()["messages"]
+            self.assertEqual(messages[-1]["body"], "File attached: spec.pdf")
+            page.locator('#thread a[data-attachment][download="spec.pdf"]').wait_for()
             self.assertFalse(errors, errors)
 
 
