@@ -37,7 +37,11 @@ ENV DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 BOT_BOARD_HARNESS=${HARNESS}
 # A non-root default user. /home/bot is world-writable so the launcher can run the
 # container as the host's uid:gid (#477) and the state volume mounted there, created
 # root-owned, is still writable; the checkout bind-mount is then host-owned too.
-RUN useradd -u 10001 -m bot && chmod 0777 /home/bot
+# For codex the launcher mounts ~/.codex/auth.json read-only at /home/bot/.codex/auth.json;
+# pre-create that dir 0777 so the runtime does not create it root-owned when it makes the
+# mount point, which would stop the host-uid container writing codex's session files (#485).
+RUN useradd -u 10001 -m bot && chmod 0777 /home/bot \
+ && if [ "$HARNESS" = codex ]; then install -d -m 0777 /home/bot/.codex; fi
 VOLUME /home/bot
 USER bot
 WORKDIR /work
