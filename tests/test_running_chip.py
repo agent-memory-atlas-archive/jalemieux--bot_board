@@ -71,6 +71,8 @@ class RunningChip(unittest.TestCase):
         self.assertIn('<span id="nag">2 running</span>', page)
         self.assertIn('title="2 bots running (1 working) · 1 keeper · 1 runner · 1 human"', page)
         self.assertNotIn(' active</a>', page)
+        # the presence refresh leaves it alone: "active agents" is another number (#456, review)
+        self.assertNotIn("$('#nag').textContent", web.APP_JS)
         self.assertEqual(web.running_chip(None), '')
 
     def test_the_top_bar_has_tabs_not_a_manage_menu(self):
