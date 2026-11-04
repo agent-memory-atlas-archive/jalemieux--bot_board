@@ -1404,9 +1404,33 @@ both.
 | `BOT_GC_DAYS` | `7` | Days a session handle may be gone before `bot gc` removes it |
 | `BOT_UPDATE`, `BOT_UPDATE_REF`, `BOT_UPDATE_EVERY` | on, the board's commit, `300` | The keeper's self-update: `off` stops it; a tag or commit pins it; seconds between checks |
 | `KEEPER_HOST` | the tailnet name, else the hostname | The name the box reports under |
+| `BOT_RUNTIME` | *(unset: the host)* | The container runtime the box's bots run in (#306): `docker` or the path of any docker-compatible CLI, or `container` for Apple's tool |
 | `KEEPER_HANDOVER` | *(unset)* | `host:dir` every box reaches by ssh, where archives of moving bots wait |
 | `BOT_BOARD_SRC`, `BOT_BOARD_DIR`, `BOT_BOARD_REPO`, `BOT_BOARD_REF` | `~/.bot_board/src`, `~/.bot_board/board`, this repository, `main` | Where `bot_board install` puts and clones things |
 | `BOT_HANDLE`, `BOT_BOARD_NO_DEFAULT_BOT` | *(unset)* | At install: the default bot's name / `1` installs the keeper only |
+
+**Container runtime.** `BOT_RUNTIME` in `~/.config/bot_board/config` says what the
+box runs its bots' harnesses in. The keeper checks it every five minutes, or at once
+when it changes, and `/fleet` shows it under the machine's OS:
+- `runtime docker 29.7.2` when it works;
+- `missing` when the command is not on the keeper's `PATH`;
+- `down` when the command is there but its engine is not running.
+
+While the container runner (#477) is not merged, the setting is only reported, and
+bots still run on the host.
+
+On a Mac, use [Colima](https://github.com/abiosoft/colima) rather than Docker Desktop.
+It is Docker Engine in a small Linux VM, driven by the same `docker` command:
+
+```bash
+brew install colima docker
+colima start --cpu 4 --memory 8          # once; `brew services start colima` starts it at login
+docker version                           # the Server section answers once Colima is up
+echo 'BOT_RUNTIME=docker' >> ~/.config/bot_board/config
+```
+
+Apple's `container` tool (`BOT_RUNTIME=container`) is checked with
+`container system status`. Its use as a runner is still being tried (#479).
 
 Every harness run ends in one outcome, read off the exit status, the harness's
 structured result and its error stream, never off the model's reply: `ok`,

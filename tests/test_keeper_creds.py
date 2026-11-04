@@ -68,6 +68,31 @@ class Keeper(unittest.TestCase):
 
     def tearDown(self):
         os.environ['PATH'] = self.path
+
+    def test_out_returns_a_commands_stdout(self):
+        # the host name, memory and bot list all read through out(); it must give text, "" on failure
+        self.assertEqual(self.k.out('echo', 'hi'), 'hi\n')
+        self.assertEqual(self.k.out('no-such-command-here'), '')
+        self.assertIsInstance(self.k.snapshot()['bots'], list)
+
+    def test_the_runtime_setting_is_checked_and_reported(self):
+        # #479: BOT_RUNTIME in the config; host when unset, the command otherwise, re-checked when it changes
+        cfg = os.path.join(self.home, '.config', 'bot_board', 'config')
+        def runtime(value):
+            with open(cfg, 'w') as f:
+                f.write(f'BOT_RUNTIME={value}\n' if value is not None else '')
+            return self.k.runtime_state()
+        self.assertEqual(runtime(None), {'setting': 'host', 'state': 'ok', 'detail': ''})
+        self.assertEqual(runtime('host')['setting'], 'host')
+        self.assertEqual(runtime('nerdctl'), {'setting': 'nerdctl', 'state': 'missing', 'detail': "no nerdctl on this box's PATH"})
+        fake(self.bin, 'docker', '[ "$1" = version ] && echo 29.7.2')
+        self.assertEqual(runtime('docker'), {'setting': 'docker', 'state': 'ok', 'detail': '29.7.2'})
+        self.assertEqual(self.k.snapshot()['runtime']['detail'], '29.7.2')
+        fake(self.bin, 'colima-docker', 'echo "Cannot connect to the Docker daemon" >&2; exit 1')
+        got = runtime(os.path.join(self.bin, 'colima-docker'))
+        self.assertEqual((got['state'], got['detail']), ('down', 'Cannot connect to the Docker daemon'))
+        fake(self.bin, 'container', '[ "$1 $2" = "system status" ] && echo "apiserver is running"')
+        self.assertEqual(runtime('container'), {'setting': 'container', 'state': 'ok', 'detail': 'apiserver is running'})
         self.tmp.cleanup()
 
     def creds(self, c=None, version=None, token='keeper-token'):
@@ -335,6 +360,20 @@ class Page(unittest.TestCase):
         page = self.client.get('/fleet', headers=admin).text
         self.assertIn("The fleet's claude token expires in 10 days", page)
         self.assertIn("The fleet's claude token expires in 10 days", str(self.client.get('/api/status').json()['attention']))
+
+    def test_the_runtime_a_box_reports_shows_on_its_machine_row(self):
+        # #479: the keeper's runtime check reaches /fleet; a problem is marked, a keeper from before shows nothing
+        keeper = {'Authorization': 'Bearer ' + self.client.post('/api/agents', json={'handle': 'keeper-box', 'kind': 'keeper'}).json()['token']}
+        admin = {'Authorization': 'Bearer ' + self.client.post('/api/agents', json={'handle': 'op', 'kind': 'human'}).json()['token']}
+        self.client.put('/api/fleet/hosts/box', headers=keeper, json={'bots': [], 'runtime': {
+            'setting': 'docker', 'state': 'ok', 'detail': '29.7.2'}}).raise_for_status()
+        self.assertIn('runtime docker 29.7.2</div>', self.client.get('/fleet', headers=admin).text)
+        self.client.put('/api/fleet/hosts/box', headers=keeper, json={'bots': [], 'runtime': {
+            'setting': 'colima', 'state': 'missing', 'detail': "no colima on this box's PATH"}}).raise_for_status()
+        page = self.client.get('/fleet', headers=admin).text
+        self.assertIn('class="by prob" title="no colima on this box&#x27;s PATH">runtime colima missing</div>', page)
+        self.client.put('/api/fleet/hosts/box', headers=keeper, json={'bots': []}).raise_for_status()
+        self.assertNotIn('runtime ', self.client.get('/fleet', headers=admin).text.split('id="box-box"')[1].split('</tr>')[0])
 
     def test_the_board_tells_keepers_and_healthz_the_commit_it_runs(self):
         # #240: keepers update to the board's release commit; "" from source, origin's tip for them

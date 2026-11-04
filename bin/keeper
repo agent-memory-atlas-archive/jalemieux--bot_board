@@ -68,7 +68,8 @@ BOT_UPDATE_REF=<tag or commit> pins the checkout to that revision instead of the
 `bot update` runs one check by hand. What the updater last did is in each report, under
 update, and on the machine's card on /fleet.
 
-Env: BOARD and BOT_INVITE (also read from ~/.config/bot_board/config), KEEPER_HOST,
+Env: BOARD and BOT_INVITE (also read from ~/.config/bot_board/config), BOT_RUNTIME (the
+container runtime bots here run in, #479; reported on /fleet), KEEPER_HOST,
 KEEPER_HANDOVER (where archives of
 moving bots wait: host:dir, e.g. box-1:.config/bot_board/handover).
 """
@@ -467,6 +468,39 @@ def read_int(path):
     return int(t) if t.isdigit() else None
 
 
+RUNTIME_EVERY = 300      # seconds between checks of the box's container runtime
+_runtime = {"at": 0.0, "for": None, "state": None}
+
+
+def runtime_state():
+    """The box's BOT_RUNTIME (#479, unit D of #306), as /fleet shows it: {setting, state, detail}.
+    Unset or `host` is the host path. `container` is Apple's container tool. Anything else is
+    the command of a docker-compatible CLI (Colima, Docker Engine): a name on PATH or a path.
+    state is ok, missing (no such command) or down (the command is there, its engine is not).
+    Checked every RUNTIME_EVERY seconds, or at once when the setting changes."""
+    value = setting("BOT_RUNTIME").strip()
+    if time.time() - _runtime["at"] < RUNTIME_EVERY and _runtime["for"] == value:
+        return _runtime["state"]
+    if value in ("", "host"):
+        got = {"setting": "host", "state": "ok", "detail": ""}
+    else:
+        cmd = shutil.which(value)
+        probe = ["system", "status"] if value == "container" else ["version", "--format", "{{.Server.Version}}"]
+        if not cmd:
+            got = {"setting": value, "state": "missing", "detail": f"no {value} on this box's PATH"}
+        else:
+            try:
+                r = subprocess.run([cmd, *probe], capture_output=True, text=True, timeout=5)   # a hung runtime must not stall the loop
+                lines = (r.stdout.strip() or r.stderr.strip()).splitlines()
+                first = lines[0][:120] if lines else ""
+                got = ({"setting": value, "state": "ok", "detail": first} if r.returncode == 0 else
+                       {"setting": value, "state": "down", "detail": first or f"exit {r.returncode}"})
+            except (OSError, subprocess.TimeoutExpired) as e:
+                got = {"setting": value, "state": "down", "detail": str(e)[:120]}
+    _runtime.update({"at": time.time(), "for": value, "state": got})
+    return got
+
+
 def snapshot():
     total, free = memory_mb()
     try:
@@ -474,7 +508,7 @@ def snapshot():
     except OSError:
         load = None
     return {"cores": os.cpu_count(), "load": load, "mem_total_mb": total, "mem_free_mb": free,
-            "os": f"{platform.system()} {platform.release()}"[:80], "bots": bots()}
+            "os": f"{platform.system()} {platform.release()}"[:80], "bots": bots(), "runtime": runtime_state()}
 
 
 class Handover:
