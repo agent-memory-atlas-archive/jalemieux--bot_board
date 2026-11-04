@@ -91,6 +91,13 @@ class Keeper(unittest.TestCase):
         fake(self.bin, 'colima-docker', 'echo "Cannot connect to the Docker daemon" >&2; exit 1')
         got = runtime(os.path.join(self.bin, 'colima-docker'))
         self.assertEqual((got['state'], got['detail']), ('down', 'Cannot connect to the Docker daemon'))
+        # DOCKER_CONTEXT in the config pins the engine: the probe runs with it, and a change re-checks
+        fake(self.bin, 'docker', 'echo "${DOCKER_CONTEXT:-default}"')
+        with open(cfg, 'w') as f:
+            f.write('BOT_RUNTIME=docker\nexport DOCKER_CONTEXT=colima\n')
+        self.assertEqual(self.k.runtime_state()['detail'], 'colima')
+        self.assertEqual(os.environ.get('DOCKER_CONTEXT'), 'colima')
+        self.assertEqual(runtime('docker')['detail'], 'default', 'taking it out of the config takes it out')
         fake(self.bin, 'container', '[ "$1 $2" = "system status" ] && echo "apiserver is running"')
         self.assertEqual(runtime('container'), {'setting': 'container', 'state': 'ok', 'detail': 'apiserver is running'})
         self.tmp.cleanup()

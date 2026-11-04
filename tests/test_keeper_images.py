@@ -84,7 +84,8 @@ class KeeperImages(unittest.TestCase):
                                  'digest': 'sha256:0123456789abcdef0123', 'detail': '', 'at': rows[0]['at']}])
         self.assertEqual(c.check(self.k.CREDENTIALS[1], c.env()), ('ok', ''))
         run = [line for line in self.calls() if line.startswith('run ')]
-        self.assertEqual(run, [f'run --rm -e CLAUDE_CODE_OAUTH_TOKEN {IMAGE}claude:latest claude auth status'])
+        user = f'{os.getuid()}:{os.getgid()}'
+        self.assertEqual(run, [f'run --rm --user {user} -e HOME=/home/bot -e CLAUDE_CODE_OAUTH_TOKEN {IMAGE}claude:latest claude auth status'])
         self.assertNotIn('sekrit-value', '\n'.join(self.calls()), 'secrets go in by name, never as a value')
 
     def test_the_keepers_own_environment_stays_out(self):
@@ -94,7 +95,7 @@ class KeeperImages(unittest.TestCase):
             fh.write('GH_TOKEN=gh\n')
         c = self.k.Credentials('box')
         argv = self.k.in_image('docker', 'claude', ['claude', 'auth', 'status'], c.env())
-        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == '-e'], ['CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN'])
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == '-e'], ['HOME=/home/bot', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN'])
 
     def test_the_token_is_tried_in_the_image(self):
         self.runtime('docker')
@@ -102,7 +103,7 @@ class KeeperImages(unittest.TestCase):
         self.pulled(self.k.Images())
         c = self.k.Credentials('box'); c.refresh({'claude'}, force=True)
         self.assertEqual(c.state['claude'], ('ok', ''))
-        self.assertTrue(any(line.startswith('run --rm -e CLAUDE_CODE_OAUTH_TOKEN') and ' claude -p ' in line
+        self.assertTrue(any('-e CLAUDE_CODE_OAUTH_TOKEN' in line and ' claude -p ' in line
                             for line in self.calls()), self.calls())
 
     def test_a_failed_pull_keeps_the_image_here(self):
@@ -125,7 +126,8 @@ class KeeperImages(unittest.TestCase):
             fh.write('GH_TOKEN=x\n')
         env = {'PATH': '/bin', 'GH_TOKEN': 'x', 'BOARD_TOKEN': 'the keeper\'s own'}
         argv = self.k.in_image('docker', 'codex', ['codex', 'login', 'status'], env)
-        self.assertEqual(argv, ['docker', 'run', '--rm', '-e', 'GH_TOKEN', '-v',
+        self.assertEqual(argv, ['docker', 'run', '--rm', '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/home/bot',
+                                '-e', 'GH_TOKEN', '-v',
                                 f'{self.home}/.codex/auth.json:/home/bot/.codex/auth.json:ro',
                                 IMAGE + 'codex:latest', 'codex', 'login', 'status'])
 

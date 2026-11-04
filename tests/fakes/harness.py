@@ -33,6 +33,8 @@ with open(os.path.join(sdir, name + ".secrets"), "a") as fh:   # the secrets eac
     fh.write(json.dumps({k: v for k, v in os.environ.items() if re.fullmatch(r"[A-Z][A-Z0-9_]*_(TOKEN|KEY|SECRET)", k)}) + "\n")
 with open(os.path.join(sdir, name + ".env"), "a") as fh:     # the login variables each run saw
     fh.write(json.dumps({k: os.environ.get(k) for k in ("GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_CONFIG_DIR")}) + "\n")
+with open(os.path.join(sdir, name + ".config"), "a") as fh:  # the inline OpenCode configuration each run saw
+    fh.write(json.dumps(os.environ.get("OPENCODE_CONFIG_CONTENT")) + "\n")
 if name == "claude" and args[:2] == ["auth", "status"]:
     print(json.dumps({"loggedIn": os.path.exists(os.path.join(sdir, "login"))})); sys.exit(0)
 if name == "codex" and args[:2] == ["login", "status"]:

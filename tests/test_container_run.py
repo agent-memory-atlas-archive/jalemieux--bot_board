@@ -116,6 +116,31 @@ class ContainerRun(unittest.TestCase):
                 self.assertTrue(resumed, "a %s resume turn carried the kept session id %s: %s"
                                 % (harness, sid, L.runs()))
 
+    # ---- the opencode model and config cross into the container (#324 + #477) -------------
+    def test_opencode_model_and_config_cross_into_the_container(self):
+        with FakeBoard() as board:
+            self.log.write_text("")
+            L = Launcher(board, "opencode", env={"BOT_RUNTIME": str(self.runtime),
+                                                 "FAKE_RUNTIME_LOG": str(self.log)})
+            self.addCleanup(L.close)
+            checkout = Path(L.tmp.name) / "work" / L.name
+            checkout.mkdir(parents=True, exist_ok=True)
+            (checkout / ".keep").write_text("a non-empty checkout")
+            cfg = Path(L.tmp.name) / "local.json"
+            cfg.write_text('{"provider": {"llama.cpp": {}}}')
+            L.plan(fh.step("opencode", "ok", "rules read"), fh.step("opencode", "ok", "done"))
+            L.start("--model", "llama.cpp/qwen", "--opencode-config", str(cfg))
+            L.wait_for(lambda: L.read("runs") == "1", "the first turn")
+            oc = [a for a in L.runs() if a[:1] == ["run"]]
+            self.assertTrue(oc, "an opencode run reached the harness: %s" % L.runs())
+            self.assertEqual(oc[0][oc[0].index("--model") + 1], "llama.cpp/qwen",
+                             "the model crossed as an argument: %s" % oc[0])
+            self.assertTrue(any("OPENCODE_CONFIG_CONTENT" in c for c in self.calls()),
+                            "the runtime was told to forward the config env: %s" % self.calls())
+            seen = {json.loads(l) for l in (L.scenario / "opencode.config").read_text().splitlines() if l.strip()}
+            self.assertIn('{"provider": {"llama.cpp": {}}}', seen,
+                          "the config content reached opencode inside the container")
+
     # ---- the subcommand, the way the keeper calls it -------------------------------------
     def sub_env(self, extra=None):
         home = tempfile.mkdtemp()

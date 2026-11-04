@@ -93,6 +93,11 @@ def setting(name, default=""):
     """The environment, else a plain NAME=value line in the config bin/bot reads."""
     if os.environ.get(name):
         return os.environ[name]
+    return config_setting(name, default)
+
+
+def config_setting(name, default=""):
+    """A plain NAME=value line in the config bin/bot reads, ignoring the environment."""
     try:
         with open(os.environ.get("BOT_CONFIG") or os.path.join(CFG, "config"), encoding="utf-8") as fh:
             for line in fh:
@@ -470,6 +475,7 @@ def read_int(path):
 
 RUNTIME_EVERY = 300      # seconds between checks of the box's container runtime
 _runtime = {"at": 0.0, "for": None, "state": None}
+_OWN_CONTEXT = os.environ.get("DOCKER_CONTEXT", "")     # what the keeper was started with, if anything
 
 
 def runtime_state():
@@ -479,7 +485,17 @@ def runtime_state():
     state is ok, missing (no such command) or down (the command is there, its engine is not).
     Checked every RUNTIME_EVERY seconds, or at once when the setting changes."""
     value = setting("BOT_RUNTIME").strip()
-    if time.time() - _runtime["at"] < RUNTIME_EVERY and _runtime["for"] == value:
+    # DOCKER_CONTEXT in the config pins which engine `docker` means (`colima` on a Mac that also
+    # has Docker Desktop, #479). bin/bot sources the config, so its runs follow an exported one;
+    # the keeper puts it in its own environment, so its probe and its checks follow it too.
+    # The keeper's own environment wins, as for every setting; otherwise the config's. Changed
+    # only when it differs, so a pull or check starting meanwhile never sees it unset.
+    ctx = _OWN_CONTEXT or config_setting("DOCKER_CONTEXT").strip()
+    if ctx and os.environ.get("DOCKER_CONTEXT") != ctx:
+        os.environ["DOCKER_CONTEXT"] = ctx
+    elif not ctx:
+        os.environ.pop("DOCKER_CONTEXT", None)
+    if time.time() - _runtime["at"] < RUNTIME_EVERY and _runtime["for"] == (value, ctx):
         return _runtime["state"]
     if value in ("", "host"):
         got = {"setting": "host", "state": "ok", "detail": ""}
@@ -497,7 +513,7 @@ def runtime_state():
                        {"setting": value, "state": "down", "detail": first or f"exit {r.returncode}"})
             except (OSError, subprocess.TimeoutExpired) as e:
                 got = {"setting": value, "state": "down", "detail": str(e)[:120]}
-    _runtime.update({"at": time.time(), "for": value, "state": got})
+    _runtime.update({"at": time.time(), "for": (value, ctx), "state": got})
     return got
 
 
@@ -601,7 +617,9 @@ def in_image(rt, harness, cmd, env):
     """argv that runs cmd once in the harness's image, for the box rather than a bot: no checkout and
     no state volume. Secrets go in by name, as bin/bot passes them (#477), never as a file; codex
     reads its login, mounted read-only where its home is in the image."""
-    args = [rt, "run", "--rm"]
+    # as this box's user, as bin/bot runs it (#477): a login file owned by it (mode 600) is then
+    # readable, and HOME is set, since that uid has no home of its own in the image
+    args = [rt, "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/home/bot"]
     # only the secrets meant for bots, fleet.env's, and the fleet's claude token where the keeper's own
     # environment sets it: never the rest of the keeper's environment, which may hold its own token
     for name in sorted((set(read_env(FLEET_ENV)) | ({"CLAUDE_CODE_OAUTH_TOKEN"} & set(env))) & set(env)):
