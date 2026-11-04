@@ -2,12 +2,14 @@
 that says what goes. Archived first, the slug typed back, and a workspace with bots refused.
 Run with python -m unittest discover -s tests."""
 import base64
+import json
 import os
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_workspaces import Base       # noqa: E402
 from app import db, storage            # noqa: E402
 
@@ -106,6 +108,20 @@ class DeleteWorkspace(Base):
                 self.assertEqual(errors, [])
             finally:
                 browser.close()
+
+    def test_a_bot_bound_only_to_the_channel_blocks_it_and_others_lose_the_binding(self):
+        self.call('PATCH', '/api/workspaces/game/channels/art', {'archived': True}, auth=self.human)
+        c = db.conn()
+        for handle, chans in (('artist', ['game.art']), ('writer', ['game.art', 'game'])):
+            c.execute("INSERT INTO fleet_bots (handle, host, harness, run, set_by, set_at, channels) VALUES (?,?,?,?,?,?,?)",
+                      (handle, 'box', 'claude', 1, 'jac', db.now(), json.dumps(chans)))
+        c.commit()
+        self.assertEqual(self.call('GET', '/api/workspaces/game/channels/art/deletion', auth=self.human)['deletion']['bound_only'], ['artist'])
+        refused = self.call('DELETE', '/api/workspaces/game/channels/art', {'confirm': 'game.art'}, auth=self.human, expected=409)
+        self.assertIn('@artist', refused['error'])
+        c.execute("DELETE FROM fleet_bots WHERE handle='artist'"); c.commit()
+        self.call('DELETE', '/api/workspaces/game/channels/art', {'confirm': 'game.art'}, auth=self.human)
+        self.assertEqual(db.bot_channels('writer'), ['game'])
 
     def test_the_admin_workspace_cannot_be_deleted(self):
         self.call('DELETE', '/api/workspaces/admin', {'confirm': 'admin'}, auth=self.human, expected=422)

@@ -860,6 +860,9 @@ class FleetReportIn(BaseModel):
     runtime: dict[str, str] | None = Field(default=None, description="The box's BOT_RUNTIME, as the keeper last"
                                            " checked it (#479): {setting: host | container | a docker-compatible"
                                            " command, state: ok | missing | down, detail}.")
+    harness_images: list[dict[str, str]] = Field(default_factory=list, max_length=8, description="The harness"
+                                                 " images this box pulled (#478), when its bots run in a container:"
+                                                 " {harness, image, state: ok | pulling | stale | missing, digest, detail, at}.")
     bots: list[FleetBot] = Field(default_factory=list, max_length=500)
     credentials: list[FleetCredential] = Field(default_factory=list, max_length=20, description="What bots here"
                                                " need, as the keeper last checked it. Secrets themselves never come here.")
