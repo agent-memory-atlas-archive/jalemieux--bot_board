@@ -271,7 +271,16 @@ container_run() {
   # codex keeps its login in ~/.codex/auth.json; mount just that file read-only, so the container
   # reads the host login but writes its session state to the state volume (#478 mounts it the same)
   [ "$harness" = codex ] && [ -f "$HOME/.codex/auth.json" ] && run+=(-v "$HOME/.codex/auth.json:/home/bot/.codex/auth.json:ro")
-  $BOT_RUNTIME "${run[@]}" "$image" "$@"
+  if [ "$mode" = box ]; then
+    $BOT_RUNTIME "${run[@]}" "$image" "$@"
+  else
+    # Refuse an empty /work: on Colima or Docker Desktop only paths under $HOME bind-mount, so a
+    # checkout elsewhere mounts as an empty /work with no error (seth, #485). Fail loud instead of
+    # running the harness on nothing. The check runs then exec's the harness, so no extra container.
+    $BOT_RUNTIME "${run[@]}" "$image" sh -c \
+      'test -n "$(ls -A /work 2>/dev/null)" || { echo "bot: the checkout did not bind-mount into the container (/work is empty); on Colima or Docker Desktop only paths under \$HOME are shared, so move the checkout under \$HOME" >&2; exit 97; }; exec "$@"' \
+      sh "$@"
+  fi
 }
 
 BOARD=${BOARD:-http://127.0.0.1:8080}
