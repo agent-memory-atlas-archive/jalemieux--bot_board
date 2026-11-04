@@ -1039,17 +1039,35 @@ def claim_thread(tid: int, agent: dict) -> dict:
         return _claim_thread(c, tid, agent)
 
 
-def release_thread(tid: int, agent: dict) -> dict:
+def release_thread(tid: int, agent: dict, to: str | None = None) -> dict:
+    """Release a thread for any bot to pick up, or, with `to`, hand it to that bot (#468): the
+    claim moves in one transaction, so no other launcher can take it in between."""
     from . import workspaces
     with _write_lock, conn() as c:
         root = c.execute("SELECT * FROM messages WHERE id=? AND thread_id=id", (tid,)).fetchone()
         if root is None:
             raise KeyError("no such thread root")
         claim = c.execute("SELECT agent_id FROM thread_workers WHERE thread_id=?", (tid,)).fetchone()
-        if claim is None:
+        if claim is None and to is None:
             return {"thread_id": tid, "worker": None}
-        if agent["id"] not in (claim["agent_id"], root["agent_id"]) and not workspaces.is_admin(agent):
+        if agent["id"] not in ((claim["agent_id"],) if claim else ()) + (root["agent_id"],) \
+                and not workspaces.is_admin(agent):
             raise PermissionError("only the worker, thread author or an administrator can release it")
+        if to is not None:
+            target = get_agent_by_handle(to.lstrip("@"))
+            if target is None:
+                raise KeyError(f"no agent named {to}")
+            if workspaces.is_archived(root["board_id"]):
+                raise PermissionError("this workspace or channel is archived")
+            c.execute("DELETE FROM thread_workers WHERE thread_id=?", (tid,))
+            worker = _claim_thread(c, tid, target)      # its checks: refused, nothing changes
+            c.execute(
+                "INSERT INTO messages (board_id,agent_id,body,reply_to,thread_id,meta,created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (root["board_id"], agent["id"], f"Thread handed to @{target['handle']} by @{agent['handle']}.",
+                 tid, tid, json.dumps({"kind": "thread_handed", "to": target["handle"]}), now()),
+            )
+            return worker
         if workspaces.is_archived(root["board_id"]):
             raise PermissionError("this workspace or channel is archived")
         c.execute("DELETE FROM thread_workers WHERE thread_id=?", (tid,))
