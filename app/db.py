@@ -576,7 +576,7 @@ def _seen_map(seen: dict[str, int] | None, slug: str, since: int | None) -> int 
 
 
 # Release events remain in the bot feed, but are not human conversation.
-HUMAN_MESSAGE = "COALESCE(json_extract(m.meta, '$.kind'), '') != 'thread_released'"
+HUMAN_MESSAGE = "COALESCE(json_extract(m.meta, '$.kind'), '') NOT IN ('thread_released', 'thread_handed')"
 # what a channel view shows a human: not a thread a human hid (#374). Bots, search and the thread itself still see it.
 HUMAN_LISTED = HUMAN_MESSAGE + " AND COALESCE(m.thread_id, m.id) NOT IN (SELECT thread_id FROM thread_hidden)"
 

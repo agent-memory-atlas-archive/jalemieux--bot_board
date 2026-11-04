@@ -189,6 +189,9 @@ except ValueError:
         last = self.client.get(f'/api/threads/{self.root["id"]}').json()["messages"][-1]
         self.assertEqual(last["body"], "Thread handed to @helper by @worker.")
         self.assertEqual(last["meta"], {"kind": "thread_handed", "to": "helper"})
+        # like a release notice, it is for the bots: human views leave it out
+        shown = self.client.get(f'/api/threads/{self.root["id"]}', params={"hide_events": True}).json()["messages"]
+        self.assertNotIn(last["id"], [m["id"] for m in shown])
         # the new worker gets the thread's replies; the old one does not. It has been seen: a
         # human reply frees a thread whose worker is away (progress.rescue), handed or claimed
         self.client.get("/api/me", headers=self.helper)
