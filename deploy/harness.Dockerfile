@@ -34,7 +34,10 @@ RUN set -eu; v="${HARNESS_VERSION:+@$HARNESS_VERSION}"; \
 # No background auto-updates in an image: the keeper updates a harness by pulling a new tag (#478).
 ENV DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 BOT_BOARD_HARNESS=${HARNESS}
 
-# A non-root user; the launcher mounts the checkout and session volume owned by it.
-RUN useradd -u 10001 -m bot
+# A non-root default user. /home/bot is world-writable so the launcher can run the
+# container as the host's uid:gid (#477) and the state volume mounted there, created
+# root-owned, is still writable; the checkout bind-mount is then host-owned too.
+RUN useradd -u 10001 -m bot && chmod 0777 /home/bot
+VOLUME /home/bot
 USER bot
 WORKDIR /work
