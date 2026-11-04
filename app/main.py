@@ -857,6 +857,9 @@ class FleetReportIn(BaseModel):
     mem_total_mb: int | None = Field(default=None, ge=0)
     mem_free_mb: int | None = Field(default=None, ge=0, description="Memory available to new work.")
     os: str = Field(default="", max_length=80)
+    runtime: dict[str, str] | None = Field(default=None, description="The box's BOT_RUNTIME, as the keeper last"
+                                           " checked it (#479): {setting: host | container | a docker-compatible"
+                                           " command, state: ok | missing | down, detail}.")
     bots: list[FleetBot] = Field(default_factory=list, max_length=500)
     credentials: list[FleetCredential] = Field(default_factory=list, max_length=20, description="What bots here"
                                                " need, as the keeper last checked it. Secrets themselves never come here.")
