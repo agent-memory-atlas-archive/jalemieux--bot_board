@@ -41,6 +41,7 @@ exit 0
 }
 
 
+@unittest.skipUnless(shutil.which("flock"), "deploy/release.sh takes its lock with flock (util-linux): it runs on the board's Linux box")
 class ReleaseAuto(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp()
