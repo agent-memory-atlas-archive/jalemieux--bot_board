@@ -491,6 +491,9 @@ case ${1:-} in
     esac; done
     case $RC_HARNESS in claude|codex|opencode|copilot) ;; *) echo "bot: run-in-container needs a harness (claude, codex, opencode, copilot)" >&2; exit 1 ;; esac
     [ -n "${BOT_RUNTIME:-}" ] || { echo "bot: run-in-container needs BOT_RUNTIME set (the box's container runtime)" >&2; exit 1; }
+    # bot mode needs a checkout: --handle or --dir alone would build -v ":/work" and the runtime
+    # would answer with an opaque mount error, so say what is missing instead (#485 review).
+    [ "$RC_MODE" != bot ] || [ -n "$RC_DIR" ] || { echo "bot: run-in-container bot mode needs --dir <checkout>" >&2; exit 1; }
     container_run "$RC_MODE" "$RC_HARNESS" "$RC_DIR" "$RC_HARNESS" "$@"
     exit $? ;;
   keeper)
