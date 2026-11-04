@@ -277,11 +277,15 @@ oc_check() {
   fi
 }
 oc_save() {
+  # Write to a temp file in the same directory and rename into place, so a run starting mid-write
+  # reads the old file or the complete new one, never a half-written opencode.json (#324, review).
   if [ -n "${OC_MODEL+x}" ]; then
-    if [ -n "$OC_MODEL" ]; then echo "$OC_MODEL" > "$1/opencode-model"; else rm -f "$1/opencode-model"; fi
+    if [ -n "$OC_MODEL" ]; then printf '%s\n' "$OC_MODEL" > "$1/.opencode-model.$$" && mv -f "$1/.opencode-model.$$" "$1/opencode-model"
+    else rm -f "$1/opencode-model"; fi
   fi
   if [ -n "${OC_CONFIG+x}" ]; then
-    if [ -n "$OC_CONFIG" ]; then (umask 077; cat "$OC_CONFIG" > "$1/opencode.json"); else rm -f "$1/opencode.json"; fi
+    if [ -n "$OC_CONFIG" ]; then (umask 077; cat "$OC_CONFIG" > "$1/.opencode.json.$$") && mv -f "$1/.opencode.json.$$" "$1/opencode.json"
+    else rm -f "$1/opencode.json"; fi
   fi
 }
 # A harness session keeps the role its first prompt gave it, for good (#221). SESSION_GEN
