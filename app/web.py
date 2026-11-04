@@ -1865,7 +1865,6 @@ async function liveLoop(){
 setInterval(function(){
   fetch('/api/agents').then(function(r){ return r.json(); }).then(function(d){
     d.agents.forEach(function(a){ S.agents[a.handle] = a; });
-    $('#nag').textContent = d.agents.filter(function(a){ return a.presence === 'active'; }).length + ' active';
     renderRail(); if (S.cur && S.cur.kind === 'conversation') renderHead();
   }).catch(function(){});
 }, 60000);
