@@ -1,5 +1,5 @@
-"""#223: what waits on a human, in the bell: messages a bot marked as needing them, paused
-routines nobody has said yes to, and (not counted) their other mentions.
+"""#223, #445: what waits on a human: messages a bot marked as needing them and their other mentions,
+in the board's Mentions view, and paused routines nobody has said yes to, on the bell.
 Run with python -m unittest discover -s tests."""
 import json
 import os
@@ -93,18 +93,22 @@ class Waiting(unittest.TestCase):
         self.client.post(f'/api/routines/{rid}/approve', headers=self.jac)       # a human said yes: it waits no more
         self.assertFalse([a for a in self.status()['attention'] if 'waits for your yes' in a['text']])
 
-    def test_the_bell_shows_both_tabs(self):
+    def test_mentions_are_in_the_rail_and_the_bell_keeps_alerts(self):
+        # #445: a Mentions view under Unread, what waits on you first; the bell counts alerts only
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            self.skipTest("Install Playwright and Chromium for bell UI checks")
-        self.post(self.bot, '@jac review PR 9?', meta={'needs': 'jac', 'ask': 'review PR 9'})
-        self.post(self.bot, '@jac merged, fyi')
+            self.skipTest("Install Playwright and Chromium for board page checks")
+        ask = self.post(self.bot, '@jac review PR 9?', meta={'needs': 'jac', 'ask': 'review PR 9'})
+        fyi = self.post(self.bot, '@jac merged, fyi')
+        alerts = len(self.status()['attention'])
         token = self.jac['Authorization'].split()[1]
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             try:
                 page = browser.new_page()
+                errors = []
+                page.on('pageerror', lambda err: errors.append(str(err)))
                 def serve(route):
                     path = route.request.url.replace('http://board.test', '')
                     if 'wait=' in path:
@@ -115,15 +119,36 @@ class Waiting(unittest.TestCase):
                 page.route('**/*', serve)
                 page.add_init_script("localStorage.setItem('bb.me', JSON.stringify({handle:'jac', token:'%s'}))" % token)
                 page.goto('http://board.test/c/admin')
-                page.wait_for_function("document.getElementById('bell-count').textContent !== ''")
+                page.wait_for_function("document.querySelector('#mentionsli .badge').textContent === '2'")
+                self.assertEqual(page.inner_text('#bell-count'), str(alerts or ''), 'asks and mentions do not count on the bell')
                 page.click('#bell')
-                self.assertIn('review PR 9', page.inner_text('#inbox'))
-                self.assertNotIn('merged, fyi', page.inner_text('#inbox'))
-                page.click('#inbox .inbox-tabs button:nth-child(2)')
-                self.assertIn('merged, fyi', page.inner_text('#inbox'))
+                inbox = page.inner_text('#inbox')
+                self.assertNotIn('review PR 9', inbox)
+                self.assertIn('2 messages name you, 1 waiting on you: Mentions', inbox)
+                page.click('#bell')
+                page.click('#mentionsli')
+                page.wait_for_selector('#stream .mrow')
+                self.assertTrue(page.url.endswith('/mentions'))
+                groups = page.locator('#stream .ugroup h3').all_inner_texts()
+                self.assertEqual([g.split()[0:3] for g in groups], [['Waiting', 'on', 'you'], ['Mentions', '1']])
+                self.assertIn('review PR 9', page.inner_text('#stream .ugroup:nth-of-type(1) .ask'))
+                self.assertIn('merged, fyi', page.inner_text('#stream .ugroup:nth-of-type(2)'))
+                # done clears one without a reply; an answer in the thread clears the other
+                page.click(f'[data-done="m{fyi}"]')
+                page.wait_for_function("document.querySelector('#mentionsli .badge').textContent === '1'")
+                self.assertNotIn('merged, fyi', page.inner_text('#stream'))
+                self.post(self.jac, 'looking now', reply_to=ask)
+                page.evaluate('window.bbStatusRefresh()')
+                page.wait_for_function("document.querySelector('#mentionsli .badge').hidden")
+                self.assertIn('You are all caught up', page.inner_text('#stream'))
+                # the address opens it directly too
+                self.post(self.bot, '@jac one more')
+                page.goto('http://board.test/mentions')
+                page.wait_for_selector('#stream .mrow')
+                self.assertIn('one more', page.inner_text('#stream'))
+                self.assertEqual(errors, [])
             finally:
                 browser.close()
-
 
 if __name__ == '__main__':
     unittest.main()
