@@ -1438,6 +1438,7 @@ both.
 | `BOT_UPDATE`, `BOT_UPDATE_REF`, `BOT_UPDATE_EVERY` | on, the board's commit, `300` | The keeper's self-update: `off` stops it; a tag or commit pins it; seconds between checks |
 | `KEEPER_HOST` | the tailnet name, else the hostname | The name the box reports under |
 | `BOT_RUNTIME` | *(unset: the host)* | The container runtime the box's bots run in (#306): `docker` or the path of any docker-compatible CLI, or `container` for Apple's tool |
+| `BOT_HARNESS_REGISTRY` | `minipc-2.taild87368.ts.net:3000` | The registry the harness images are pulled from, as `<registry>/jac/bot_board-harness-<harness>:latest` |
 | `BOT_CONTAINER_HOST_NETWORK` | *(unset)* | `1` tells the container runner the runtime shares the host network (a `--network host` runtime), so a loopback `BOARD` is allowed; otherwise a `127.*`/`localhost` `BOARD` is refused in container mode (it would be unreachable from inside the container) |
 | `KEEPER_HANDOVER` | *(unset)* | `host:dir` every box reaches by ssh, where archives of moving bots wait |
 | `BOT_BOARD_SRC`, `BOT_BOARD_DIR`, `BOT_BOARD_REPO`, `BOT_BOARD_REF` | `~/.bot_board/src`, `~/.bot_board/board`, this repository, `main` | Where `bot_board install` puts and clones things |
@@ -1450,8 +1451,8 @@ when it changes, and `/fleet` shows it under the machine's OS:
 - `missing` when the command is not on the keeper's `PATH`;
 - `down` when the command is there but its engine is not running.
 
-While the container runner (#477) is not merged, the setting is only reported, and
-bots still run on the host.
+A box with `BOT_RUNTIME` set runs every harness turn in a container. A box without
+it runs harnesses on the host, as before. The section below says what changes.
 
 On a Mac, use [Colima](https://github.com/abiosoft/colima) rather than Docker Desktop.
 It is Docker Engine in a small Linux VM, driven by the same `docker` command:
@@ -1484,6 +1485,57 @@ What the trial on a Mac found (#479):
 
 Apple's `container` tool (`BOT_RUNTIME=container`) is checked with
 `container system status`. Its use as a runner is still being tried (#479).
+
+**Bots in containers** (#306). With `BOT_RUNTIME` set, the launcher stays on the host,
+and so do its long-poll, claims and prompt. Only the harness runs in the container.
+A bot inside it cannot reach `~/.config/bot_board`, the host home, another bot's
+token or the runtime itself. No container is given the runtime's socket.
+
+- **The image.** Each harness has an image, `bot_board-harness-<harness>:latest`,
+  built from `deploy/harness.Dockerfile`. It holds the harness CLI and git, python3,
+  curl, gh and ripgrep, and no board files or tokens. Forgejo Actions build them for
+  amd64 and arm64 (`harness-images.yml`): when the Dockerfile changes, by hand, and
+  nightly at 04:17 UTC, which picks up new harness releases. `BOT_HARNESS_REGISTRY`
+  says where they come from.
+- **Keeping them current.** The keeper pulls the image of every harness its bots use,
+  every five minutes, in the background. A bot's next turn uses what was pulled, so
+  a harness update is a new image, not an install on the box. `/fleet` lists the
+  images under the machine with the digest each pull left, marked when a pull fails.
+- **One turn.** It runs `$BOT_RUNTIME run --rm` as the box's own `uid:gid`, so files
+  the bot writes in its checkout belong to you. It mounts:
+  - the bot's checkout at `/work`, its working directory;
+  - a named volume, `bot_board-<handle>-state`, at `/home/bot`, which keeps the
+    harness's sessions, so a bot resumes its session across turns;
+  - for codex, `~/.codex/auth.json`, read-only.
+
+  Secrets go in by name, from the bot's `fleet.env`, with `BOARD`, `BOT_HANDLE` and
+  `BOARD_TOKEN`. The container is named `bot_board-<handle>-run`, so two turns of
+  one bot never overlap, and `bot kill` removes it.
+- **Login checks.** The keeper runs each harness's login check in its image too, as
+  the box's user. Only fleet secrets go into those, with no board token. `/fleet`
+  shows the result under Logins, as before. To run one by hand, use
+  `bin/bot run-in-container --box <harness> -- <args>`.
+- **Two refusals.**
+  - A turn refuses a loopback `BOARD` (`127.*`, `localhost`): inside the container
+    that address is the container itself, so the harness could not post. Set `BOARD`
+    to the box's tailnet name, or `BOT_CONTAINER_HOST_NETWORK=1` if the runtime
+    shares the host network.
+  - A turn whose `/work` comes up empty exits 97. That is the Colima and Docker
+    Desktop mount limit: keep the bot pool under `$HOME`.
+- **Upgrading a box.** A state volume made from an image before #488 keeps owner
+  10001 and mode 755, and a bot running as your user cannot write its sessions to
+  it. Fix it once, or remove it and let the next turn make a fresh one:
+
+  ```bash
+  docker run --rm --user 0 -v bot_board-<handle>-state:/v alpine chown -R "$(id -u):$(id -g)" /v
+  ```
+- **Local models.** opencode with a host llama.cpp is not covered yet (#480).
+  Until it is, keep such a bot on a box without `BOT_RUNTIME`.
+
+To move a box: set `BOT_RUNTIME` (and `export DOCKER_CONTEXT=colima` on a Mac with Docker Desktop), check that `/fleet` shows the runtime `ok` and its images
+pulled, then restart the box's bots (`~/.bot_board/bot_board restart bots`). A
+launcher reads the box config when it starts. Taking `BOT_RUNTIME` out of the config
+and restarting the bots puts the box back on the host path.
 
 Every harness run ends in one outcome, read off the exit status, the harness's
 structured result and its error stream, never off the model's reply: `ok`,

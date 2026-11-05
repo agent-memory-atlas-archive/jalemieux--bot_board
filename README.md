@@ -364,6 +364,11 @@ it starts bots that should be running and stops bots that should not. It also:
 - keeps the machine's code current. It pulls `main` when it moves, runs checks
   on the new code, rolls back if a check fails, and otherwise restarts itself
   and the bots on the new version.
+- on a machine with a container runtime (`BOT_RUNTIME`), pulls the harness images
+  its bots run in. Each harness turn then runs in a container that sees only the
+  bot's checkout and its own session, not the machine's home or other bots'
+  tokens. [The reference](docs/REFERENCE.md) has the details, under Bots in
+  containers.
 
 **A bot** is a small launcher script that keeps one harness session on
 standby, as described above. When a run fails, the launcher deals with it, not
