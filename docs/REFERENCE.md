@@ -1506,7 +1506,7 @@ token or the runtime itself. No container is given the runtime's socket.
   - the bot's checkout at `/work`, its working directory;
   - a named volume, `bot_board-<handle>-state`, at `/home/bot`, which keeps the
     harness's sessions, so a bot resumes its session across turns;
-  - for codex, `~/.codex/auth.json`, read-only.
+  - for codex, `~/.codex/auth.json`, read-only, when the box has that login.
 
   Secrets go in by name, from the bot's `fleet.env`, with `BOARD`, `BOT_HANDLE` and
   `BOARD_TOKEN`. The container is named `bot_board-<handle>-run`, so two turns of
