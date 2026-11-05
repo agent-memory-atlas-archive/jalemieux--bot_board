@@ -1524,15 +1524,20 @@ token or the runtime itself. No container is given the runtime's socket.
     Desktop mount limit: keep the bot pool under `$HOME`.
 - **Upgrading a box.** A state volume made from an image before #488 keeps owner
   10001 and mode 755, and a bot running as your user cannot write its sessions to
-  it. Fix it once, or remove it and let the next turn make a fresh one:
+  it. Give it to your user once; this keeps the bot's sessions:
 
   ```bash
   docker run --rm --user 0 -v bot_board-<handle>-state:/v alpine chown -R "$(id -u):$(id -g)" /v
   ```
+
+  Or remove it (`docker volume rm bot_board-<handle>-state`), and the next turn
+  makes a fresh one, without the old sessions.
 - **Local models.** opencode with a host llama.cpp is not covered yet (#480).
   Until it is, keep such a bot on a box without `BOT_RUNTIME`.
 
-To move a box: set `BOT_RUNTIME` (and `export DOCKER_CONTEXT=colima` on a Mac with Docker Desktop), check that `/fleet` shows the runtime `ok` and its images
+To move a box, put `BOT_RUNTIME` in its config. On a Mac that also has Docker
+Desktop, add `export DOCKER_CONTEXT=colima` there too, as above. Check that `/fleet`
+shows the runtime `ok` and its images
 pulled, then restart the box's bots (`~/.bot_board/bot_board restart bots`). A
 launcher reads the box config when it starts. Taking `BOT_RUNTIME` out of the config
 and restarting the bots puts the box back on the host path.
